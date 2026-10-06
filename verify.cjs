@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const sandbox={module:{exports:{}}};
 vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),sandbox);
-const {processJob,recover,verifyTask,outputIds,safeName,checkCost,bindPanelDrag,acceptFolder,folderError,bindFolderActivation,pickDirectory}=sandbox.module.exports;
+const {processJob,recover,verifyTask,outputIds,safeName,checkCost,bindPanelDrag,acceptFolder,folderError,bindFolderActivation,pickDirectory,storageSupport}=sandbox.module.exports;
 const job=()=>({id:'fixture',prompt:'1girl, smile',title:'미소',state:'queued',saved:[]});
 const task=(j,count=4)=>({id:j.taskId,status:'completed',createdAt:new Date(j.submittedAt || Date.now()).toISOString(),parameters:{prompts:j.prompt},outputs:{batch:Array.from({length:count},(_,i)=>({mediaId:String(100+i)}))}});
 function fixture(j, overrides={}) {
@@ -227,4 +227,76 @@ test('missing, synchronously failing and cancelled pickers reject instead of sil
   await assert.rejects(pickDirectory({showDirectoryPicker(){throw new Error('Illegal invocation')}},()=>{},timers),/Illegal invocation/);
   await assert.rejects(pickDirectory({showDirectoryPicker:()=>Promise.reject(Object.assign(new Error('cancel'),{name:'AbortError'}))},()=>{},timers));
   assert.deepEqual(timers.cleared,[1]);
+});
+
+test('unsupported folder APIs are detected without attempting a picker or generation',()=>{
+  const firefox=storageSupport({});assert.equal(firefox.supported,false);assert.match(firefox.message,/Firefox/);
+  assert.equal(storageSupport({showDirectoryPicker(){}}).supported,true);
+  assert.equal(storageSupport({showDirectoryPicker:true}).supported,false);
+});
+
+// Mount the complete script, rather than testing only its exported helper functions.
+function panelFixture(nativePicker) {
+  class Element {
+    constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';}
+    setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
+    append(...children){this.children.push(...children);}
+    replaceChildren(...children){this.children=children;}
+    contains(target){return this===target||this.children.some(child=>child.contains(target));}
+    querySelectorAll(selector){
+      const selectors=selector.split(',').map(s=>s.trim());
+      const matches=element=>selectors.some(s=>{
+        const data=s.match(/^\[data-([\w-]+)\]$/);
+        if(data)return data[1].replace(/-([a-z])/g,(_,c)=>c.toUpperCase()) in element.dataset;
+        if(s.startsWith('#'))return element.attrs.id===s.slice(1);
+        return element.tagName===s;
+      });
+      return this.children.flatMap(child=>[...(matches(child)?[child]:[]),...child.querySelectorAll(selector)]);
+    }
+    querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+    addEventListener(type,fn,capture){(this.events[type]??=[]).push({fn,capture});}
+    fire(type,values={}){
+      const event={type,target:this,button:0,pointerId:1,isPrimary:true,isTrusted:true,timeStamp:100,detail:1,preventDefault(){},stopImmediatePropagation(){this.stopped=true},...values};
+      for(const {fn} of [...(this.events[type]||[])].sort((a,b)=>Number(!!b.capture)-Number(!!a.capture))){fn(event);if(event.stopped)break;}
+    }
+    getBoundingClientRect(){return {left:600,top:200,width:340,height:450};}
+    setPointerCapture(){} hasPointerCapture(){return false} releasePointerCapture(){}
+  }
+  const body=new Element('body'), records=new Map();let paid=0,pickerCalls=0;
+  const document={body,readyState:'complete',createElement:tag=>new Element(tag),
+    getElementById:id=>body.querySelector(`#${id}`),querySelector:s=>body.querySelector(s),querySelectorAll:s=>body.querySelectorAll(s),addEventListener(){}};
+  const window={innerWidth:1200,innerHeight:900,addEventListener(){}};window.top=window.self=window;
+  if(nativePicker)window.showDirectoryPicker=(...args)=>{pickerCalls++;return nativePicker(...args)};
+  const context={window,document,location:{hostname:'pixai.art',pathname:'/ko/generator/image'},
+    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>records.set(key,value)},
+    navigator:{locks:{request:async(name,options,callback)=>callback({})}},
+    ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
+    fetch:()=>{paid++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'}};
+  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
+  const panel=body.querySelector('#local-pixai-queue');
+  return {panel,get paid(){return paid},get pickerCalls(){return pickerCalls},
+    press(button){button.fire('pointerdown');button.fire('pointerup');},
+    message:()=>panel.querySelector('[data-message]').textContent};
+}
+
+test('Firefox-like full UI explains unsupported storage on mount and keeps paid start disabled',()=>{
+  const f=panelFixture();assert.match(f.message(),/Firefox/);
+  assert.equal(f.panel.querySelector('[data-start]').disabled,true);
+  f.press(f.panel.querySelector('[data-choose-folder]'));assert.match(f.message(),/지원하지/);
+  assert.equal(f.pickerCalls,0);assert.equal(f.paid,0);
+});
+
+test('queue button handles direct pointer release even when no click is delivered; empty prompt shows validation',async()=>{
+  const f=panelFixture();const add=f.panel.querySelectorAll('button').find(b=>b.textContent==='대기열 추가');
+  f.press(add);assert.match(f.message(),/입력 확인/);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/프롬프트/);assert.equal(f.paid,0);
+});
+
+test('supported full UI calls picker once on release and renders cancellation without network',async()=>{
+  const f=panelFixture(()=>Promise.reject(Object.assign(new Error('cancel'),{name:'AbortError'})));
+  const choose=f.panel.querySelector('[data-choose-folder]');f.press(choose);choose.fire('click',{timeStamp:110});
+  assert.equal(f.pickerCalls,1);assert.match(f.message(),/선택창 여는 중/);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/취소/);assert.equal(choose.disabled,false);assert.equal(f.paid,0);
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.1.4
+// @version      0.1.5
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -98,7 +98,12 @@
     if (error.name === 'SecurityError') return `폴더 선택이 브라우저에서 차단됐습니다. PixAI 탭에서 버튼을 직접 눌러 주세요. [SecurityError] ${error.message}`;
     return `[${error.name || 'Error'}] ${error.message}`;
   }
-  // Register before the site's document/React handlers. Only this button is intercepted.
+  function storageSupport(win) {
+    return typeof win.showDirectoryPicker === 'function'
+      ? {supported:true, message:'저장 폴더를 선택해 주세요.'}
+      : {supported:false, message:'이 브라우저는 폴더를 선택해 직접 저장하는 기능을 지원하지 않습니다. Firefox에서는 다운로드 방식이 필요합니다. 현재 직접 저장은 데스크톱 Chrome/Edge에서 사용할 수 있습니다.'};
+  }
+  // Direct pointer handlers also support browsers where only click delivery fails.
   function bindFolderActivation(root, getButton, action, onError) {
     let lastPointerAt = -Infinity;
     let pressedPointer = null;
@@ -219,7 +224,7 @@
     }
   }
 
-  const core = {normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory};
+  const core = {normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -234,7 +239,8 @@
   let initialModel = null;
   let panel;
   let choosingFolder = false;
-  let message = 'Chrome/Edge · 새 이미지 에디터 · 공통 설정 사용';
+  const storage = storageSupport(window);
+  let message = storage.message;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const $ = selector => document.querySelector(selector);
   const all = selector => [...document.querySelectorAll(selector)];
@@ -442,9 +448,11 @@
   }
   function button(text, action) {
     const element = node('button', text, {type:'button'});
-    element.addEventListener('click', async () => {
-      try { await action(); } catch (error) { message = error.message; render(); }
-    });
+    bindFolderActivation(element, () => element, () => {
+      message = `입력 확인: ${text}`;
+      if (panel) panel.querySelector('[data-message]').textContent = message;
+      return action();
+    }, error => { message = error.message; render(); });
     return element;
   }
   function render() {
@@ -478,16 +486,18 @@
     choose.disabled = running || choosingFolder;
     choose.textContent = choosingFolder ? '폴더 선택 중…' : '저장 폴더 선택';
     panel.querySelector('[data-start]').textContent = running ? '실행 중' : '시작 / 같은 작업 재개';
+    if (!storage.supported) panel.querySelector('[data-start]').disabled = true;
   }
   function mount() {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.1.4 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.1.5 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{position:sticky;top:0;background:#211d2b;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     panel.append(style, dragHandle, node('small','제목줄을 드래그해서 이동 · 모델·LoRA·해상도는 실행할 때의 화면 설정을 공통 사용합니다. 실행 중에는 사이트를 조작하지 마세요.'));
     panel.append(node('div','저장 폴더 미선택',{'data-folder':''}));
-    const choose = node('button','저장 폴더 선택',{type:'button','data-choose-folder':''});
+    const choose = button('저장 폴더 선택', chooseFolder);
+    choose.dataset.chooseFolder = '';
     choose.dataset.edit = '';
     panel.append(choose, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}));
     const title = node('input',null,{placeholder:'파일 이름 / 작업 이름', 'data-edit':'', 'aria-label':'대기열 작업 이름'});
@@ -533,6 +543,7 @@
   }
   async function chooseFolder() {
     if (choosingFolder || running) return;
+    if (!storage.supported) { message = storage.message; render(); return; }
     choosingFolder = true;
     const choose = panel.querySelector('[data-choose-folder]');
     choose.disabled = true; choose.textContent = '폴더 선택 중…';
@@ -557,9 +568,6 @@
     } catch (error) { message = folderError(error); }
     finally { choosingFolder = false; render(); }
   }
-  bindFolderActivation(window, () => panel?.querySelector('[data-choose-folder]'), chooseFolder, error => {
-    message = folderError(error); render();
-  });
   // Pausing precedes any manual edit. No synthetic event is treated as permission.
   for (const type of ['click','keydown','beforeinput']) document.addEventListener(type,event=>{
     if (!running || internalAction || panel?.contains(event.target) || !event.isTrusted) return;
