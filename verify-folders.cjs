@@ -5,7 +5,7 @@ const path=require('node:path');
 const vm=require('node:vm');
 const sandbox={module:{exports:{}},TextEncoder};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname,'pixai-web-queue.user.js'),'utf8'),sandbox);
-const {makePresetLibrary,normalizePresetLibrary,orderedChunks,moveLibraryItem,moveChunksTo,removeChunks,duplicateChunks,removeChunkFolder,
+const {makePresetLibrary,normalizePresetLibrary,orderedChunks,moveLibraryItem,moveChunksTo,removeChunks,duplicateChunks,createChunkFolder,removeChunkFolder,
   expandPresetReservations,makeSettingsBackup,parseSettingsBackup}=sandbox.module.exports;
 const plain=value=>JSON.parse(JSON.stringify(value));
 const ids=items=>plain(items.map(item=>item.id));
@@ -34,6 +34,18 @@ function expand(library) {let n=0;return expandPresetReservations(library,{idFac
 function parse(library) {return parseSettingsBackup(JSON.stringify(library));}
 const options={maxCredits:7800,filePrefix:'assets',repeat:1};
 const meta={appVersion:'0.4.0',exportedAt:'2026-10-07T02:03:04.000Z'};
+
+test('quick creation moves selected chunks atomically in display order and preserves jobs, reservations and backup data',()=>{
+  const library=frozen(fixture()),before=plain(library),result=createChunkFolder(library,'  새 폴더  ',['a1','b1'],()=> 'quick-folder');
+  assert.equal(result.chunkFolders.at(-1).name,'새 폴더');assert.deepEqual(ids(result.scenes.filter(item=>item.folderId==='quick-folder')),['b1','a1']);
+  assert.deepEqual(plain(result.reservations),before.reservations);assert.equal(expand(result)[0].prompt,expand(library)[0].prompt);assert.deepEqual(plain(parse(result).library),plain(result));assert.deepEqual(plain(library),before);
+  const empty=createChunkFolder(library,'Empty',[],()=> 'empty');assert.deepEqual(plain(empty.scenes),before.scenes);
+});
+test('quick creation rejects blank or duplicate names, identity collisions and stale selections without partial writes',()=>{
+  const library=frozen(fixture()),before=plain(library);
+  for(const name of ['', '  ', '표정'])assert.throws(()=>createChunkFolder(library,name,[],()=> 'quick'),/이름|폴더/);
+  assert.throws(()=>createChunkFolder(library,'New',[],()=> 'fA'),/중복/);assert.throws(()=>createChunkFolder(library,'New',['missing'],()=> 'quick'),/청크/);assert.deepEqual(plain(library),before);
+});
 
 test('drag placement uses full stored order, moves before or after a target, and leaves selected-target drops unchanged',()=>{
   const library=frozen(fixture()),original=plain(library);

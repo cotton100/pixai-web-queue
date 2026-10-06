@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.6.0
+// @version      0.7.0
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -29,6 +29,15 @@
     return cost;
   }
 
+  // Google Material Icons, Apache-2.0. See MATERIAL-ICONS-LICENSE.txt and THIRD_PARTY_NOTICES.md.
+  const materialPaths = {"folder":["M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"],"folder_open":["M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"],"create_new_folder":["M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-1 8h-3v3h-2v-3h-3v-2h3V9h2v3h3v2z"],"content_copy":["M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"],"delete":["M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"],"add":["M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"],"close":["M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"],"drag_indicator":["M11 18c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm-2-8c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"],"play_arrow":["M8 5v14l11-7z"],"stop":["M6 6h12v12H6z"],"settings":["M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"],"person":["M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"],"layers":["M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z"],"view_module":["M14.67,5v6.5H9.33V5H14.67z M15.67,11.5H21V5h-5.33V11.5z M14.67,19v-6.5H9.33V19H14.67z M15.67,12.5V19H21v-6.5H15.67z M8.33,12.5H3V19h5.33V12.5z M8.33,11.5V5H3v6.5H8.33z"],"playlist_add":["M14,10H3v2h11V10z M14,6H3v2h11V6z M18,14v-4h-2v4h-4v2h4v4h2v-4h4v-2H18z M3,16h7v-2H3V16z"],"tune":["M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"],"save":["M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"],"search":["M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"],"chevron_left":["M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"],"chevron_right":["M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"],"open_in_full":["M21,11 L21,3 L13,3 L16.29,6.29 L6.29,16.29 L3,13 L3,21 L11,21 L7.71,17.71 L17.71,7.71 Z"],"download":["M5,20h14v-2H5V20z M19,9h-4V3H9v6H5l7,7L19,9z"],"upload":["M5,20h14v-2H5V20z M5,10h4v6h6v-6h4l-7-7L5,10z"]};
+  function materialIcon(name) {
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    for (const [key,value] of Object.entries({viewBox:'0 0 24 24',width:'20',height:'20',fill:'currentColor','aria-hidden':'true',focusable:'false',class:'pq-icon'})) svg.setAttribute(key,value);
+    for (const d of materialPaths[name] || materialPaths.layers) {const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d',d);svg.append(path);}
+    return svg;
+  }
+  function decorateIcon(control,name) {if (!control.querySelector('svg.pq-icon')) {control.dataset.icon=name;control.append(materialIcon(name));}return control;}
   function clampPosition(position, size, viewport) {
     const margin = 8;
     const maxX = Math.max(margin, viewport.width - size.width - margin);
@@ -420,6 +429,92 @@
     for (const chunk of library.scenes) if (chunk.folderId === folderId) delete chunk.folderId;
     return library;
   }
+  function paneRatios(value, fallback) {
+    const source=Array.isArray(value)&&value.length===fallback.length&&value.every(item=>Number.isFinite(item)&&item>0) ? value : fallback;
+    const largest=Math.max(...source),scaled=source.map(item=>item/largest),sum=scaled.reduce((total,item)=>total+item,0);return scaled.map(item=>item/sum);
+  }
+  function resizePanePair(value,index,delta,minimums) {
+    const next=[...value],total=next[index]+next[index+1];
+    const scale=Math.min(1,total/(minimums[index]+minimums[index+1]));
+    const left=Math.min(total-minimums[index+1]*scale,Math.max(minimums[index]*scale,next[index]+delta));
+    next[index]=left;next[index+1]=total-left;return next;
+  }
+  function bindPaneResize(host,panes,io) {
+    let ratios=paneRatios(null,io.initial),drag=null;
+    try {ratios=paneRatios(io.load?.(),io.initial);}catch { /* Layout storage does not block the editor. */ }
+    const handles=panes.slice(1).map((_pane,index)=>io.createHandle(index));
+    host.replaceChildren(...panes.flatMap((pane,index)=>index ? [handles[index-1],pane] : [pane]));
+    function draw() {
+      panes.forEach((pane,index)=>{pane.style.flex=`${ratios[index]} 1 0px`;});
+      handles.forEach((handle,index)=>handle.setAttribute('aria-valuenow',String(Math.round(ratios[index]/(ratios[index]+ratios[index+1])*100))));
+    }
+    function measure() {
+      const width=Math.max(1,host.getBoundingClientRect().width-handles.length*8);
+      const scale=Math.min(1,width/io.minimums.reduce((sum,item)=>sum+item,0));
+      return {width,minimums:io.minimums.map(item=>item*scale/width)};
+    }
+    function remember() {try {io.save?.([...ratios]);}catch { /* Keep the usable layout in this tab. */ }}
+    for (const [index,handle] of handles.entries()) {
+      handle.addEventListener('pointerdown',event=>{
+        if (event.isTrusted===false || event.button!==0 || event.isPrimary===false || drag || io.enabled?.()===false) return;
+        drag={id:event.pointerId,index,startX:event.clientX,start:[...ratios],...measure()};
+        handle.setPointerCapture(event.pointerId);host.dataset.resizing='true';event.preventDefault();event.stopPropagation();
+      });
+      handle.addEventListener('pointermove',event=>{
+        if (!drag || drag.id!==event.pointerId || drag.index!==index) return;
+        ratios=resizePanePair(drag.start,index,(event.clientX-drag.startX)/drag.width,drag.minimums);draw();event.preventDefault();
+      });
+      function finish(event) {
+        if (!drag || drag.id!==event.pointerId || drag.index!==index) return;
+        const previous=drag.start,commit=event.type==='pointerup';drag=null;delete host.dataset.resizing;
+        if (!commit) ratios=previous;draw();
+        if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+        if (commit) remember();
+      }
+      for (const type of ['pointerup','pointercancel','lostpointercapture']) handle.addEventListener(type,finish);
+      handle.addEventListener('keydown',event=>{
+        if (event.isTrusted===false || io.enabled?.()===false || !['ArrowLeft','ArrowRight','Home'].includes(event.key)) return;
+        event.preventDefault();
+        ratios=event.key==='Home' ? paneRatios(null,io.initial) : resizePanePair(ratios,index,event.key==='ArrowRight' ? .025 : -.025,measure().minimums);
+        draw();remember();
+      });
+      handle.addEventListener('dblclick',event=>{if (event.isTrusted===false || io.enabled?.()===false) return;ratios=paneRatios(null,io.initial);draw();remember();});
+    }
+    draw();return {ratios:()=>[...ratios]};
+  }
+  function bindWindowResize(target,handle,io) {
+    let drag=null,size=null,preferred=null;
+    function apply(value) {
+      const viewport=io.viewport(),rect=target.getBoundingClientRect();
+      const width=Math.min(viewport.width-16,Math.max(Math.min(560,viewport.width-16),value.width));
+      const height=Math.min(viewport.height-16,Math.max(Math.min(420,viewport.height-16),value.height));
+      size={width,height};Object.assign(target.style,{width:`${width}px`,height:`${height}px`});
+      if (target.dataset.minimized!=='true') {
+        const position=clampPosition({x:value.x ?? rect.left,y:value.y ?? rect.top},size,viewport);
+        Object.assign(target.style,{left:`${position.x}px`,top:`${position.y}px`,right:'auto',bottom:'auto'});
+      }
+    }
+    try {const saved=io.load?.();if (Number.isFinite(saved?.width)&&Number.isFinite(saved?.height)&&saved.width>0&&saved.height>0) {preferred={width:saved.width,height:saved.height};apply(preferred);}}catch { /* Ignore invalid size storage. */ }
+    handle.addEventListener('pointerdown',event=>{
+      if (event.isTrusted===false || event.button!==0 || event.isPrimary===false || drag || target.dataset.minimized==='true') return;
+      const rect=target.getBoundingClientRect();drag={id:event.pointerId,startX:event.clientX,startY:event.clientY,start:{width:rect.width,height:rect.height,x:rect.left,y:rect.top}};
+      handle.setPointerCapture(event.pointerId);event.preventDefault();event.stopPropagation();
+    });
+    handle.addEventListener('pointermove',event=>{if (!drag || drag.id!==event.pointerId) return;apply({width:drag.start.width+event.clientX-drag.startX,height:drag.start.height+event.clientY-drag.startY});event.preventDefault();});
+    function finish(event) {
+      if (!drag || drag.id!==event.pointerId) return;
+      const previous=drag.start,commit=event.type==='pointerup';drag=null;if (!commit) apply(previous);
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      if (commit) {const current=size || previous;preferred={width:current.width,height:current.height};try {io.save?.(preferred);}catch { /* Size still works in this tab. */ }}
+    }
+    for (const type of ['pointerup','pointercancel','lostpointercapture']) handle.addEventListener(type,finish);
+    handle.addEventListener('keydown',event=>{
+      if (event.isTrusted===false || target.dataset.minimized==='true' || !['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) return;
+      event.preventDefault();const rect=target.getBoundingClientRect();apply({width:rect.width+(event.key==='ArrowRight' ? 24 : event.key==='ArrowLeft' ? -24 : 0),height:rect.height+(event.key==='ArrowDown' ? 24 : event.key==='ArrowUp' ? -24 : 0)});
+      preferred={...size};try {io.save?.(preferred);}catch { /* Keyboard resize does not need storage. */ }
+    });
+    io.onResize?.(()=>{if ((preferred || size) && !drag) apply(preferred || size);});
+  }
   function selectedChunks(library, ids) {
     if (!Array.isArray(ids) || !ids.length) throw new Error('청크를 하나 이상 선택해 주세요.');
     const selected=new Set(ids.map(id=>presetIdentifier(id,'선택한 청크')));
@@ -459,6 +554,15 @@
     }
     library.scenes=library.scenes.flatMap(chunk=>copies.has(chunk.id) ? [chunk,copies.get(chunk.id)] : [chunk]);
     return library;
+  }
+  function createChunkFolder(value,name,ids=[],idFactory=()=>crypto.randomUUID()) {
+    const library=normalizePresetLibrary(value),title=presetText(name).trim();
+    if (!title) throw new Error('새 폴더 이름을 입력해 주세요.');
+    if (library.chunkFolders.some(item=>item.name.toLocaleLowerCase()===title.toLocaleLowerCase())) throw new Error('같은 이름의 폴더가 있습니다. 목록에서 그 폴더를 선택해 주세요.');
+    const id=presetIdentifier(idFactory(),'새 청크 폴더');
+    if (library.chunkFolders.some(item=>item.id===id)) throw new Error('새 폴더 ID가 중복됐습니다.');
+    library.chunkFolders.push({id,name:title});
+    return ids.length ? moveChunksTo(library,ids,id) : library;
   }
   function settingsBackupKeys(value, label, required, allowed = required) {
     const source = presetObject(value, label);
@@ -918,6 +1022,7 @@ function mountPresetEditor(parent, io) {
   const copy = value => JSON.parse(JSON.stringify(value));
   let library = normalizePresetLibrary(io.load() || makePresetLibrary());
   const root = document.createElement('div'); root.className = 'pq-presets';
+  const pickerRenderers=new Map();
   function el(tag, text, attrs = {}) {
     const element = document.createElement(tag);
     if (text != null) element.textContent = text;
@@ -926,6 +1031,8 @@ function mountPresetEditor(parent, io) {
   }
   function action(text, run) {
     const element = io.button(text, run); element.dataset.edit = '';
+    const icon=text.includes('삭제') || text.includes('제외') ? 'delete' : text.includes('복제') ? 'content_copy' : text.includes('폴더') ? 'create_new_folder' : text.includes('저장') ? 'save' : text.includes('해제') || text.includes('취소') ? 'close' : text.includes('예약') || text.includes('등록') ? 'playlist_add' : text.includes('이동') ? 'folder_open' : text.includes('읽기') ? 'download' : text.includes('새 ') || text.includes('추가') ? 'add' : null;
+    if (icon) decorateIcon(element,icon);
     if (text.endsWith(' 저장') || text === '이 조합 예약 추가' || text === '예약 전부를 대기열에 등록') element.dataset.primary = '';
     if (io.isBusy?.()) element.disabled=true;
     return element;
@@ -945,10 +1052,42 @@ function mountPresetEditor(parent, io) {
     }
     if (focus) {view.tab.focus({preventScroll:true});view.tab.scrollIntoView?.({block:'nearest',inline:'nearest',behavior:'auto'});}
   }
+  function buttonPicker(control,{icon='folder',caption=null,empty=true,onChange=()=>{},editable=true}={}) {
+    control.wrap.hidden=true;
+    const wrap=el('div',null,{class:'pq-button-picker'}),label=control.input.getAttribute('aria-label');
+    const list=el('div',null,{class:'pq-choice-list','aria-label':`${label} 버튼 목록`});wrap.append(el('strong',caption || label),list);
+    function render() {
+      const focused=document.activeElement?.dataset.choiceValue;list.replaceChildren();
+      const options=[...control.input.children].filter(option=>empty || option.value || control.input.children.length===1);
+      for (const option of options) {
+        const button=el('button',option.textContent,{type:'button','aria-label':`${label}: ${option.textContent}`,'aria-pressed':String(control.input.value===option.value),'data-choice-value':option.value});
+        decorateIcon(button,icon);if (editable) {button.dataset.edit='';button.disabled=!!io.isBusy?.();}if (!empty && !option.value) {button.dataset.unavailable='true';button.disabled=true;}
+        button.addEventListener('click',()=>{if (editable && io.isBusy?.()) return;control.input.value=option.value;onChange(option.value);render();[...list.children].find(item=>item.dataset.choiceValue===option.value)?.focus({preventScroll:true});});list.append(button);
+      }
+      if (focused!==undefined && document.activeElement?.parentElement===list) [...list.children].find(item=>item.dataset.choiceValue===focused)?.focus({preventScroll:true});
+    }
+    pickerRenderers.set(control.input,render);control.input.addEventListener('change',render);wrap.append(control.wrap);
+    return {wrap,list,render};
+  }
+  function quickFolder(picker,label,onCreate,moving=false) {
+    const create=el('div',null,{class:'pq-quick-folder'}),name=field(`${label} 새 폴더 이름`,'input',{placeholder:'새 폴더 이름'}),form=el('div',null,{class:'pq-quick-folder-form'});form.hidden=true;
+    const open=action('새 폴더',()=>{form.hidden=false;name.input.focus();});open.setAttribute('aria-label',`${label} 새 폴더`);open.dataset.headerFeedback='';
+    async function saveFolder() {await onCreate(nameValue(name.input));form.hidden=true;name.input.value='';picker.render();[...picker.list.children].find(item=>item.getAttribute('aria-pressed')==='true')?.focus({preventScroll:true});}
+    const save=action(moving ? '만들고 선택 청크 이동' : '만들고 폴더 선택',saveFolder);save.dataset.headerFeedback='';
+    const cancel=action('취소',()=>{form.hidden=true;name.input.value='';open.focus();});cancel.setAttribute('aria-label',`${label} 폴더 만들기 취소`);cancel.dataset.headerFeedback='';
+    name.input.addEventListener('keydown',async event=>{if (event.key!=='Enter' || event.isTrusted===false || io.isBusy?.()) return;event.preventDefault();try {await saveFolder();}catch(error){io.notify(error.message);}});
+    const actions=el('div',null,{class:'pq-actions'});actions.append(save,cancel);form.append(name.wrap,actions);create.append(open,form);picker.wrap.append(create);
+    return ()=>{form.hidden=true;name.input.value='';};
+  }
+  function resizable(layout,panes,key,initial,minimums) {
+    layout.className+=' pq-resizable-layout';layout.dataset.layoutKey=key;
+    bindPaneResize(layout,panes,{initial,minimums,load:()=>io.loadLayout?.(key),save:value=>io.saveLayout?.(key,value),enabled:()=>!io.isCompact?.(),
+      createHandle:index=>el('div',null,{class:'pq-pane-handle',role:'separator',tabindex:'0','aria-orientation':'vertical','aria-label':`${key} 영역 ${index+1} 너비 조절`,'aria-valuemin':'0','aria-valuemax':'100',title:'드래그해 비율 조절 · ←→ 키 · 두 번 클릭하면 기본 비율'})});
+  }
   function section(title, open = false, id = ['common','presets','characters','chunks','compose'][views.length] || title) {
     const label={common:'공통문',presets:'모델·LoRA',characters:'캐릭터',chunks:'청크',compose:'조합 예약'}[id] || title;
     const body=el('div',null,{class:'pq-preset-body',role:'tabpanel',id:`pq-page-${id}`,'aria-labelledby':`pq-tab-${id}`,'data-page':id});
-    const tab=el('button',label,{type:'button',role:'tab',id:`pq-tab-${id}`,'aria-controls':body.id});
+    const tab=el('button',label,{type:'button',role:'tab',id:`pq-tab-${id}`,'aria-controls':body.id});decorateIcon(tab,({compose:'playlist_add',chunks:'layers',characters:'person',presets:'tune',common:'view_module',queue:'play_arrow',settings:'settings'})[id]);
     tab.addEventListener('click',()=>showPage(id));
     tab.addEventListener('keydown',event=>{
       const index=views.findIndex(item=>item.id===id);
@@ -962,6 +1101,7 @@ function mountPresetEditor(parent, io) {
     select.replaceChildren(el('option',caption,{value:''}));
     for (const item of items) select.append(el('option',item.name,{value:item.id}));
     select.value = items.some(item => item.id === selected) ? selected : (first ? items[0]?.id || '' : '');
+    pickerRenderers.get(select)?.();
   }
   async function commit(next, message) {
     const normalized = normalizePresetLibrary(next);
@@ -1017,9 +1157,9 @@ function mountPresetEditor(parent, io) {
     if (!Number.isInteger(value) || value < 1 || value > 100) throw new Error('생성 횟수는 1~100의 정수로 입력해 주세요.');
     return value;
   }
-  root.append(el('style', '.pq-presets details{border-top:1px solid #4c4355;margin-top:8px}.pq-presets summary{padding:8px 0;cursor:pointer;font-weight:600}.pq-presets .pq-preset-body{padding-bottom:7px}.pq-presets label{display:block;margin:6px 0;font-size:13px}.pq-presets select{display:block;width:100%;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}.pq-presets textarea{min-height:68px}.pq-presets .pq-lora,.pq-presets .pq-reservation{border:1px solid #4c4355;border-radius:8px;padding:8px;margin:6px 0}.pq-presets .pq-inline{display:flex;gap:7px}.pq-presets .pq-inline>*{flex:1;min-width:0}.pq-presets .pq-reservation label{max-width:130px}.pq-presets .pq-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:125px;overflow:auto;border-left:2px solid #756488;padding-left:8px;margin:8px 0;color:#d9cbe5}.pq-presets button{font-size:13px}'));
-  root.append(el('style','#local-pixai-queue .pq-chunk-list{max-height:210px;overflow:auto;border:1px solid #4c4355;border-radius:8px;margin:6px 0}#local-pixai-queue .pq-chunk-option{display:flex;align-items:flex-start;gap:8px;margin:0;padding:8px;cursor:pointer;border-bottom:1px solid #4c4355}#local-pixai-queue .pq-chunk-option:last-child{border-bottom:0}#local-pixai-queue .pq-chunk-option input[type="checkbox"]{width:auto;flex:0 0 auto;margin:3px 0;padding:0;accent-color:#b799d4}#local-pixai-queue .pq-chunk-option>span{min-width:0;flex:1}#local-pixai-queue .pq-chunk-option small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}'));
-  root.append(el('style','#local-pixai-queue .pq-presets .pq-actions{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:6px 0}#local-pixai-queue .pq-presets .pq-actions button{margin:0;padding:6px 9px;min-height:32px}#local-pixai-queue .pq-presets .pq-manager-row{padding:8px;border-top:1px solid #4c4355}#local-pixai-queue .pq-presets .pq-manager-row[data-selected="true"]{background:#413250;border-left:3px solid #b799d4}#local-pixai-queue .pq-presets .pq-manager-row strong{display:block;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-manager-row small{max-height:42px;overflow:hidden;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-folder-group{margin:0;border:0}#local-pixai-queue .pq-presets .pq-folder-group summary{padding:8px;background:#30263d;font-size:13px;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-selected-chunks{padding:8px 10px;border:1px solid #756488;border-radius:8px;background:#30263d;overflow-wrap:anywhere;font-size:13px}#local-pixai-queue .pq-presets .pq-selected-chunks small{margin-top:3px}#local-pixai-queue .pq-presets .pq-empty{padding:10px;color:#cfc1dc}#local-pixai-queue .pq-presets button[data-unavailable="true"]{opacity:.45;cursor:default}#local-pixai-queue .pq-presets .pq-chunk-list:empty{display:none}'));
+  root.append(el('style', '.pq-presets details{border-top:1px solid #41474f;margin-top:8px}.pq-presets summary{padding:8px 0;cursor:pointer;font-weight:600}.pq-presets .pq-preset-body{padding-bottom:7px}.pq-presets label{display:block;margin:6px 0;font-size:13px}.pq-presets select{display:block;width:100%;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}.pq-presets textarea{min-height:68px}.pq-presets .pq-lora,.pq-presets .pq-reservation{border:1px solid #41474f;border-radius:8px;padding:8px;margin:6px 0}.pq-presets .pq-inline{display:flex;gap:7px}.pq-presets .pq-inline>*{flex:1;min-width:0}.pq-presets .pq-reservation label{max-width:130px}.pq-presets .pq-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:125px;overflow:auto;border-left:2px solid #627d91;padding-left:8px;margin:8px 0;color:#d0d7df}.pq-presets button{font-size:13px}'));
+  root.append(el('style','#local-pixai-queue .pq-chunk-list{max-height:210px;overflow:auto;border:1px solid #41474f;border-radius:8px;margin:6px 0}#local-pixai-queue .pq-chunk-option{display:flex;align-items:flex-start;gap:8px;margin:0;padding:8px;cursor:pointer;border-bottom:1px solid #41474f}#local-pixai-queue .pq-chunk-option:last-child{border-bottom:0}#local-pixai-queue .pq-chunk-option input[type="checkbox"]{width:auto;flex:0 0 auto;margin:3px 0;padding:0;accent-color:#94bedf}#local-pixai-queue .pq-chunk-option>span{min-width:0;flex:1}#local-pixai-queue .pq-chunk-option small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}'));
+  root.append(el('style','#local-pixai-queue .pq-presets .pq-actions{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:6px 0}#local-pixai-queue .pq-presets .pq-actions button{margin:0;padding:6px 9px;min-height:32px}#local-pixai-queue .pq-presets .pq-manager-row{padding:8px;border-top:1px solid #41474f}#local-pixai-queue .pq-presets .pq-manager-row[data-selected="true"]{background:#30363c;border-left:3px solid #94bedf}#local-pixai-queue .pq-presets .pq-manager-row strong{display:block;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-manager-row small{max-height:42px;overflow:hidden;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-folder-group{margin:0;border:0}#local-pixai-queue .pq-presets .pq-folder-group summary{padding:8px;background:#29343d;font-size:13px;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-selected-chunks{padding:8px 10px;border:1px solid #627d91;border-radius:8px;background:#29343d;overflow-wrap:anywhere;font-size:13px}#local-pixai-queue .pq-presets .pq-selected-chunks small{margin-top:3px}#local-pixai-queue .pq-presets .pq-empty{padding:10px;color:#bbc3cc}#local-pixai-queue .pq-presets button[data-unavailable="true"]{opacity:.45;cursor:default}#local-pixai-queue .pq-presets .pq-chunk-list:empty{display:none}'));
   root.append(el('style','#local-pixai-queue .pq-presets .pq-chunk-row-head{display:flex;align-items:center;gap:6px}#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-name-button{flex:1;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0;padding:3px 0;border:0;background:transparent;font-weight:600;font-size:13px}#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-actions{flex:none;margin:0}#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-actions button{width:30px;padding:4px;min-height:30px}#local-pixai-queue .pq-presets .pq-manager-row small{white-space:nowrap;text-overflow:ellipsis;max-height:21px}'));
   // Each screen keeps its DOM and draft when another tab is selected.
 
@@ -1143,7 +1283,8 @@ function mountPresetEditor(parent, io) {
   };
   presetSearch.input.addEventListener('input',renderPresetList);
   presetBrowse.append(presetSearch.wrap,presetList,action('새 프리셋 만들기',()=>{presetSelect.input.value='';fillPreset(null);showPresetEditor('edit');presetName.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();}));
-  showPresetEditor('browse');presetBody.append(presetMode,presetBrowse,presetForm);
+  const presetLayout=el('div',null,{class:'pq-library-layout'});resizable(presetLayout,[presetBrowse,presetForm],'모델 프리셋',[.3,.7],[190,250]);
+  showPresetEditor('browse');presetBody.append(presetMode,presetLayout);
 
   function promptEditor(key, title, label, placeholder) {
     const body = section(title);
@@ -1160,6 +1301,8 @@ function mountPresetEditor(parent, io) {
     const prompt = field(`${label} 프롬프트`,'textarea',{placeholder});
     const negative = field(`${label} 네거티브`,'textarea');
     const folder = key==='scenes' ? field('청크 폴더','select') : null;
+    const folderPicker=folder ? buttonPicker(folder,{caption:'소속 폴더'}) : null;
+    let resetFolderCreate=()=>{};
     let renderManager = () => {};
     let refreshFolders = () => {};
     let resetView = () => {};
@@ -1167,7 +1310,7 @@ function mountPresetEditor(parent, io) {
       name.input.value = value?.name || '';
       prompt.input.value = value?.prompt || '';
       negative.input.value = value?.negativePrompt || '';
-      if (folder) folder.input.value=value?.folderId || '';
+      if (folder) {folder.input.value=value?.folderId || '';folderPicker.render();}
       renderManager();
     }
     select.input.addEventListener('change',() => {fill(library[key].find(item => item.id === select.input.value));for (const refresh of orderRefreshers) refresh();});
@@ -1177,10 +1320,12 @@ function mountPresetEditor(parent, io) {
       const folderTools=el('details');folderTools.append(el('summary','폴더 관리'));
       const managedFolder=field('관리할 청크 폴더','select');
       const folderName=field('청크 폴더 이름','input',{placeholder:'예: 표정, 행동, 배경'});
-      managedFolder.input.addEventListener('change',()=>{
+      function chooseManagedFolder() {
         folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';
         for (const refresh of orderRefreshers) refresh();
-      });
+      }
+      managedFolder.input.addEventListener('change',chooseManagedFolder);
+      const managedFolderPicker=buttonPicker(managedFolder,{onChange:chooseManagedFolder});
       const folderActions=el('div',null,{class:'pq-actions'});
       folderActions.append(action('폴더 저장',async()=>{
         const value={id:managedFolder.input.value || crypto.randomUUID(),name:nameValue(folderName.input)};
@@ -1196,7 +1341,7 @@ function mountPresetEditor(parent, io) {
       });
       folderActions.append(removeFolder);
       orderRefreshers.push(()=>available(removeFolder,library.chunkFolders.some(item=>item.id===managedFolder.input.value)));
-      folderTools.append(managedFolder.wrap,folderName.wrap,folderActions,orderControls('chunkFolders',()=>managedFolder.input.value,'선택 폴더'),el('small','폴더 삭제 시 안의 청크는 미분류로 이동합니다. 청크와 예약은 지우지 않습니다.'));
+      folderTools.append(managedFolderPicker.wrap,folderName.wrap,folderActions,orderControls('chunkFolders',()=>managedFolder.input.value,'선택 폴더'),el('small','폴더 삭제 시 안의 청크는 미분류로 이동합니다. 청크와 예약은 지우지 않습니다.'));
       const search=field('청크 검색','input',{type:'search',placeholder:'청크 이름·프롬프트 검색'});
       const filter=field('청크 폴더 필터','select');
       const count=el('small',null,{'aria-label':'청크 목록 개수','role':'status'});
@@ -1206,7 +1351,19 @@ function mountPresetEditor(parent, io) {
       const management=el('div',null,{class:'pq-chunk-management','aria-label':'선택 청크 관리',title:'체크한 청크에 이동·복제·삭제를 함께 적용합니다.'});
       const selectionSummary=el('small',null,{role:'status','aria-label':'관리 선택 청크 요약'});
       const moveFolder=field('이동할 청크 폴더','select');
-      moveFolder.wrap.replaceChildren(moveFolder.input);moveFolder.input.title='이동할 청크 폴더';
+      const movePicker=buttonPicker(moveFolder,{caption:'이동할 폴더'});movePicker.wrap.className+=' pq-move-destination';
+      const resetMoveCreate=quickFolder(movePicker,'이동 대상',async name=>{
+        const editedId=select.input.value,oldFolder=library.scenes.find(item=>item.id===editedId)?.folderId || '',updateDraft=managedChunkIds.has(editedId)&&folder.input.value===oldFolder;
+        const next=createChunkFolder(library,name,[...managedChunkIds]),id=next.chunkFolders.at(-1).id;
+        await commit(next,`${name} 폴더를 만들고 청크 ${managedChunkIds.size}개를 이동했습니다.`);
+        if (updateDraft && select.input.value===editedId && folder.input.value===oldFolder) {folder.input.value=id;folderPicker.render();}
+        moveFolder.input.value=id;filter.input.value=`folder:${id}`;renderManager();
+      },true);
+      resetFolderCreate=quickFolder(folderPicker,'청크 소속',async name=>{
+        const next=createChunkFolder(library,name),id=next.chunkFolders.at(-1).id;
+        await commit(next,`${name} 폴더를 만들었습니다. 청크 저장을 누르면 새 폴더에 저장됩니다.`);
+        folder.input.value=id;folderPicker.render();
+      });
       const bulkActions=el('div',null,{class:'pq-actions'});
       const duplicate=action('선택 복제',async()=>{
         const before=new Set(library.scenes.map(item=>item.id)),next=duplicateChunks(library,[...managedChunkIds]);
@@ -1223,7 +1380,7 @@ function mountPresetEditor(parent, io) {
       const moveRow=el('div',null,{class:'pq-bulk-move'});
       const moveSelected=action('선택 이동',()=>moveChunks([...managedChunkIds],{folderId:moveFolder.input.value}));
       for (const control of [duplicate,removeSelected,clearSelection,moveSelected]) control.dataset.headerFeedback='';
-      moveRow.append(moveFolder.wrap,moveSelected);management.append(selectionSummary,bulkActions,moveRow);management.hidden=true;
+      moveRow.append(movePicker.wrap,moveSelected);management.append(selectionSummary,bulkActions,moveRow);management.hidden=true;
       const dragType='application/x-pixai-queue-chunk';
       function clearDropFeedback() {
         for (const element of root.querySelectorAll('[data-drop-position]')) element.dataset.dropPosition='';
@@ -1250,7 +1407,7 @@ function mountPresetEditor(parent, io) {
           const editedId=select.input.value,updateFolder=ids.includes(editedId) && folder.input.value===oldFolder;
           const folderName=library.chunkFolders.find(item=>item.id===destination.folderId)?.name || '미분류';
           await commit(next,`${originals.length===1 ? originals[0].name : `청크 ${originals.length}개`} → ${folderName} · 위치를 저장했습니다. 기존 예약 순서는 유지됩니다.`);
-          if (updateFolder && select.input.value===editedId && folder.input.value===oldFolder) folder.input.value=destination.folderId;
+          if (updateFolder && select.input.value===editedId && folder.input.value===oldFolder) {folder.input.value=destination.folderId;folderPicker.render();}
           focusChunk(focusId,destination.folderId);
         } catch(error) {io.notify(`청크 이동 실패: ${error.message}`);}
         finally {dropBusy=false;clearDropFeedback();}
@@ -1286,7 +1443,8 @@ function mountPresetEditor(parent, io) {
         folderButtons.replaceChildren();
         const folders=[{id:'',name:'전체',count:library.scenes.length},{id:'unfiled',name:'미분류',count:library.scenes.filter(item=>!item.folderId).length},...library.chunkFolders.map(item=>({id:`folder:${item.id}`,name:item.name,count:library.scenes.filter(chunk=>chunk.folderId===item.id).length}))];
         for (const item of folders) {
-          const control=el('button',`${item.name} · ${item.count}`,{type:'button','aria-label':`폴더 보기: ${item.name}`,'aria-pressed':String(filter.input.value===item.id)});
+          const control=el('button',null,{type:'button','aria-label':`폴더 보기: ${item.name}`,'aria-pressed':String(filter.input.value===item.id),title:`${item.name} · ${item.count}개`});control.append(el('span',item.name,{class:'pq-folder-label'}),el('small',` · ${item.count}`,{class:'pq-folder-count'}));
+          decorateIcon(control,item.id ? 'folder' : 'view_module');
           if (item.id) {control.dataset.dropFolder=item.id==='unfiled' ? '' : item.id.slice(7);dropTarget(control,()=>({folderId:control.dataset.dropFolder}));}
           control.addEventListener('click',()=>{filter.input.value=item.id;renderManager();});folderButtons.append(control);
         }
@@ -1309,6 +1467,7 @@ function mountPresetEditor(parent, io) {
             const checkbox=el('input',null,{type:'checkbox','data-edit':'','aria-label':`청크 관리 선택: ${chunk.name}`});checkbox.checked=managedChunkIds.has(chunk.id);checkbox.disabled=!!io.isBusy?.();
             checkbox.addEventListener('change',()=>{if (io.isBusy?.() || dropBusy) {checkbox.checked=managedChunkIds.has(chunk.id);return;}if (checkbox.checked) managedChunkIds.add(chunk.id);else managedChunkIds.delete(chunk.id);renderManager();const current=[...list.querySelectorAll('input')].find(element=>element.getAttribute('aria-label')===`청크 관리 선택: ${chunk.name}`);current?.focus({preventScroll:true});current?.closest?.('.pq-manager-row')?.scrollIntoView?.({block:'nearest',inline:'nearest'});});
             const handle=el('button','⠿',{type:'button',class:'pq-drag-handle',draggable:'true','data-edit':'','data-drag-chunk':chunk.id,'aria-label':`청크 이동: ${chunk.name}`,title:'드래그해서 순서·폴더 이동 · 키보드 ↑↓로 순서 변경'});
+            handle.textContent='';decorateIcon(handle,'drag_indicator');
             handle.disabled=!!io.isBusy?.();
             handle.addEventListener('dragstart',event=>{
               if (event.isTrusted===false || dropBusy || io.isBusy?.() || !event.dataTransfer) {event.preventDefault();return;}
@@ -1340,9 +1499,9 @@ function mountPresetEditor(parent, io) {
         selectOptions(managedFolder.input,library.chunkFolders,'새 폴더',managedFolder.input.value);
         folderFilterOptions(filter.input);renderManager();
       };
-      resetView=()=>{endDrag();managedChunkIds.clear();search.input.value='';filter.input.value='';closed.clear();folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';};
+      resetView=()=>{endDrag();managedChunkIds.clear();resetFolderCreate();resetMoveCreate();search.input.value='';filter.input.value='';closed.clear();folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';};
       filter.wrap.hidden=true;rail.append(folderTools,filter.wrap);
-      browse.append(search.wrap,count,list,management);
+      browse.append(search.wrap,count,list);body.append(management);resizable(layout,[rail,browse,editor],'청크',[.16,.32,.52],[100,190,220]);
     } else {
       const search=field('캐릭터 검색','input',{type:'search',placeholder:'이름·프롬프트 검색'}),list=el('div',null,{class:'pq-saved-list','aria-label':'저장한 캐릭터 목록'});
       renderManager=()=>{
@@ -1355,6 +1514,7 @@ function mountPresetEditor(parent, io) {
         }
       };
       search.input.addEventListener('input',renderManager);refreshFolders=renderManager;resetView=()=>{search.input.value='';};browse.append(search.wrap,list);
+      resizable(layout,[browse,editor],'캐릭터',[.32,.68],[190,220]);
     }
     const controls=el('div',null,{class:'pq-actions'});
     controls.append(action(`${label} 저장`,async () => {
@@ -1372,7 +1532,7 @@ function mountPresetEditor(parent, io) {
     });
     controls.append(remove);orderRefreshers.push(()=>available(remove,library[key].some(item=>item.id===select.input.value)));
     controls.append(...orderControls(key,()=>select.input.value,`선택 ${label}`).children);
-    select.wrap.hidden=true;editor.append(el('strong',`${label} 편집`),select.wrap,name.wrap,...(folder ? [folder.wrap] : []),prompt.wrap,negative.wrap,controls);
+    select.wrap.hidden=true;editor.append(el('strong',`${label} 편집`),select.wrap,name.wrap,...(folder ? [folderPicker.wrap] : []),prompt.wrap,negative.wrap,controls);
     const create=action(`새 ${label} 만들기`,()=>{select.input.value='';fill(null);setMode('edit');name.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();});browse.append(create);
     return {key,select:select.input,label,fill,resetView,refresh:()=>{selectOptions(select.input,key==='scenes' ? orderedChunks(library) : library[key],`새 ${label}`,select.input.value);refreshFolders();}};
   }
@@ -1381,9 +1541,12 @@ function mountPresetEditor(parent, io) {
   const reserveBody = section('⑤ 조합 예약',true);
   const reservePreset = field('예약 프리셋','select');
   const reserveCharacter = field('예약 캐릭터','select');
+  const reservePresetPicker=buttonPicker(reservePreset,{icon:'tune',caption:'프리셋',empty:false,onChange:preview});
+  const reserveCharacterPicker=buttonPicker(reserveCharacter,{icon:'person',caption:'캐릭터',empty:false,onChange:preview});
   const chunkList = el('div',null,{class:'pq-chunk-list','aria-label':'예약 청크 목록'});
   const chunkSearch = field('예약 청크 검색','input',{type:'search',placeholder:'함께 쓸 청크 이름·프롬프트 검색'});
   const chunkFilter = field('예약 청크 폴더 필터','select');
+  const chunkFilterPicker=buttonPicker(chunkFilter,{caption:'청크 폴더',editable:false,onChange:()=>{renderChunkChoices();preview();}});
   const chunkCount = el('div',null,{class:'pq-selected-chunks','aria-label':'선택한 청크 요약','role':'status'});
   const pickerClosed = new Set();
   let groupSummaries = new Map();
@@ -1464,9 +1627,9 @@ function mountPresetEditor(parent, io) {
       reservations.append(row);
     }
   }
-  const choiceFilters=el('div',null,{class:'pq-inline'});choiceFilters.append(chunkSearch.wrap,chunkFilter.wrap);
+  const choiceFilters=el('div',null,{class:'pq-inline pq-choice-filters'});choiceFilters.append(chunkSearch.wrap,chunkFilterPicker.wrap);
   const choices=el('div',null,{class:'pq-compose-choices'}),review=el('div',null,{class:'pq-compose-review'}),composeLayout=el('div',null,{class:'pq-compose-layout'});
-  const selectors=el('div',null,{class:'pq-inline'});selectors.append(reservePreset.wrap,reserveCharacter.wrap);
+  const selectors=el('div',null,{class:'pq-inline pq-reserve-selectors'});selectors.append(reservePresetPicker.wrap,reserveCharacterPicker.wrap);
   choices.append(el('strong','조합 만들기'),selectors,el('strong','함께 쓸 청크'),choiceFilters,choiceActions,chunkCount,chunkList);
   review.append(el('strong','전송 미리보기'),combined,reserveCount.wrap,
     action('이 조합 예약 추가',async () => {
@@ -1483,7 +1646,7 @@ function mountPresetEditor(parent, io) {
   const register=review.children[review.children.length-1];register.dataset.headerFeedback='';
   const summary=el('div',null,{class:'pq-compose-summary'});summary.append(...[...review.children].filter(child=>child!==register));
   review.replaceChildren(summary,register);
-  composeLayout.append(choices,review);reserveBody.append(composeLayout);
+  resizable(composeLayout,[choices,review],'조합 예약',[.52,.48],[250,230]);reserveBody.append(composeLayout);
   const order=['compose','chunks','characters','presets','common'];
   views.sort((a,b)=>order.indexOf(a.id)-order.indexOf(b.id));navigation.replaceChildren(...views.map(item=>item.tab));
   refreshLists(); renderReservations(); preview(); parent.append(root);
@@ -1507,7 +1670,7 @@ function mountPresetEditor(parent, io) {
   };
 }
 
-  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -1849,6 +2012,7 @@ function mountPresetEditor(parent, io) {
       ? (choosingFolder ? '확인 파일 다운로드 중…' : '자동 다운로드 준비 확인')
       : (choosingFolder ? '폴더 선택 중…' : '저장 폴더 선택');
     panel.querySelector('[data-start]').textContent = running ? '실행 중' : starting ? '시작 준비 중…' : '시작 / 같은 작업 재개';
+    decorateIcon(panel.querySelector('[data-start]'),'play_arrow');
     // Keep idle Start clickable so its preflight can explain missing setup.
     panel.querySelector('[data-start]').title = !storage.supported ? storage.message
       : (storage.mode === 'download' && !downloadsReady ? '자동 다운로드 준비 확인을 먼저 완료해 주세요.' : '저장 준비와 대기열을 확인한 뒤 실행합니다.');
@@ -1856,12 +2020,12 @@ function mountPresetEditor(parent, io) {
   function mount() {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
-    const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.6.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
+    const dragHandle = node('h2','PixAI 대기열 · 0.7.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
-    style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #dbc0f4;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#c4a6df;background:#524064}#local-pixai-queue [data-primary]{background:#b799d4;color:#1f1529;border-color:#b799d4;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#d0b1ed;color:#1f1529}';
-    style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#211d2b}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
-    style.textContent += '#local-pixai-queue [data-launcher]{display:none;width:52px;height:52px;margin:0;padding:12px;border:1px solid #8c72a7;border-radius:50%;line-height:0;background:#413250;touch-action:none;user-select:none}#local-pixai-queue [data-launcher][data-dragging]{cursor:grabbing}#local-pixai-queue [data-launcher]:focus-visible,#local-pixai-queue [data-collapse]:focus-visible{outline:2px solid #e2c7ff;outline-offset:3px}#local-pixai-queue[data-minimized="true"]{width:52px;height:52px;max-height:none;padding:0;border:0;border-radius:50%;overflow:visible}#local-pixai-queue[data-minimized="true"]>:not([data-launcher]){display:none!important}#local-pixai-queue[data-minimized="true"]>[data-launcher]{display:block}';
+    style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
+    style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
+    style.textContent += '#local-pixai-queue [data-launcher]{display:none;width:52px;height:52px;margin:0;padding:12px;border:1px solid #759bb8;border-radius:50%;line-height:0;background:#30363c;touch-action:none;user-select:none}#local-pixai-queue [data-launcher][data-dragging]{cursor:grabbing}#local-pixai-queue [data-launcher]:focus-visible,#local-pixai-queue [data-collapse]:focus-visible{outline:2px solid #bbdef6;outline-offset:3px}#local-pixai-queue[data-minimized="true"]{width:52px;height:52px;max-height:none;padding:0;border:0;border-radius:50%;overflow:visible}#local-pixai-queue[data-minimized="true"]>:not([data-launcher]){display:none!important}#local-pixai-queue[data-minimized="true"]>[data-launcher]{display:block}';
     function iconControl(label, attribute, path) {
       const control=node('button',null,{type:'button','aria-label':label,title:label,[attribute]:'','aria-controls':'local-pixai-queue'});
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
@@ -1933,6 +2097,9 @@ function mountPresetEditor(parent, io) {
     function mountEditor() { try { presetEditor=mountPresetEditor(editorSlot, {
       isBusy:() => running || starting || settingsBusy,
       load:readLibrary,save:saveLibrary,button,
+      isCompact:()=>(document.documentElement?.clientWidth || window.innerWidth)<=620,
+      loadLayout:key=>JSON.parse(localStorage.getItem(`local.pixai-web-queue.layout.v1.${key}`) || 'null'),
+      saveLayout:(key,value)=>localStorage.setItem(`local.pixai-web-queue.layout.v1.${key}`,JSON.stringify(value)),
       notify:text=>{message=text;render();},
       captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
       applySettings:value=>settingsAction(()=>settings.apply(value)),
@@ -1965,7 +2132,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.6.0',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.7.0',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -2035,6 +2202,7 @@ function mountPresetEditor(parent, io) {
     backups.append(saveSettings,openSettings,input,preview,undoSettings);panel.append(backups);
     const footer=node('div',null,{class:'pq-footer'});
     const storageLink=node('button','저장 설정',{type:'button','aria-label':'저장 설정 열기'});
+    decorateIcon(storageLink,'settings');decorateIcon(run,'play_arrow');decorateIcon(stopButton,'stop');
     storageLink.addEventListener('click',()=>presetEditor?.showPage('settings',true));
     footer.append(storageLink,run,stopButton);
     const folderStatus=panel.querySelector('[data-folder]'),jobsView=panel.querySelector('[data-jobs]');
@@ -2048,44 +2216,45 @@ function mountPresetEditor(parent, io) {
       editorSlot.replaceChildren(presetEditor.root);
     };
     if (presetEditor) attachRuntimePages();else editorSlot.append(settingsContent,queueContent);
-    intro?.remove();panel.append(footer);
+    const resizeHandle=node('div',null,{class:'pq-window-resize',role:'button',tabindex:'0','aria-label':'작업창 크기 조절',title:'드래그해 작업창 크기 조절 · 방향키로 조절'});resizeHandle.append(materialIcon('open_in_full'));
+    intro?.remove();panel.append(footer,resizeHandle);
     style.textContent += `
-#local-pixai-queue:not([data-minimized="true"]){width:min(920px,calc(100vw - 24px));height:min(700px,calc(100vh - 24px));max-height:none;display:flex;flex-direction:column;overflow:hidden;padding:0;border-radius:16px;background:#211d2b}
+#local-pixai-queue:not([data-minimized="true"]){width:min(920px,calc(100vw - 24px));height:min(700px,calc(100vh - 24px));max-height:none;display:flex;flex-direction:column;overflow:hidden;padding:0;border-radius:16px;background:#222529}
 #local-pixai-queue [hidden]{display:none!important}
-#local-pixai-queue [data-header]{position:static;height:54px;margin:0;padding:12px 16px;flex:none;border-bottom:1px solid #4c4355}
+#local-pixai-queue [data-header]{position:static;height:54px;margin:0;padding:12px 16px;flex:none;border-bottom:1px solid #41474f}
 #local-pixai-queue [data-message]{position:static;flex:none;max-height:56px;overflow:auto;margin:8px 12px;padding:6px 10px;font-size:13px}
 #local-pixai-queue .pq-workspace{flex:1;min-height:0;overflow:hidden}
 #local-pixai-queue .pq-presets{height:100%;display:flex;flex-direction:column}
-#local-pixai-queue .pq-tabs{display:flex;gap:2px;overflow:auto;padding:0 12px;border-bottom:1px solid #4c4355;flex:none}
-#local-pixai-queue .pq-tabs button{background:transparent;border:0;border-radius:0;margin:0;padding:10px 12px;white-space:nowrap;font-size:14px;color:#cfc1dc;border-bottom:2px solid transparent}
-#local-pixai-queue .pq-tabs button[aria-selected="true"]{color:#ebd8ff;background:#30263d;border-bottom-color:#b799d4}
+#local-pixai-queue .pq-tabs{display:flex;gap:2px;overflow:auto;padding:0 12px;border-bottom:1px solid #41474f;flex:none}
+#local-pixai-queue .pq-tabs button{background:transparent;border:0;border-radius:0;margin:0;padding:10px 12px;white-space:nowrap;font-size:14px;color:#bbc3cc;border-bottom:2px solid transparent}
+#local-pixai-queue .pq-tabs button[aria-selected="true"]{color:#e6f2fc;background:#29343d;border-bottom-color:#94bedf}
 #local-pixai-queue .pq-pages{flex:1;min-height:0;overflow:hidden}
 #local-pixai-queue .pq-preset-body{height:100%;padding:14px;overflow:auto}
 #local-pixai-queue .pq-preset-body[data-page="chunks"],#local-pixai-queue .pq-preset-body[data-page="characters"]{display:flex;flex-direction:column;overflow:hidden;padding:0}
 #local-pixai-queue .pq-library-layout{display:grid;grid-template-columns:260px minmax(0,1fr);height:100%;flex:1;min-height:0}
 #local-pixai-queue .pq-with-folders{grid-template-columns:150px 270px minmax(0,1fr)}
-#local-pixai-queue .pq-library-browse{display:flex;flex-direction:column;padding:12px;min-width:0;min-height:0;overflow:hidden;background:#1c1824;border-right:1px solid #4c4355}
+#local-pixai-queue .pq-library-browse{display:flex;flex-direction:column;padding:12px;min-width:0;min-height:0;overflow:hidden;background:#1d2024;border-right:1px solid #41474f}
 #local-pixai-queue .pq-library-editor{padding:14px;min-width:0;min-height:0;overflow:auto}
 #local-pixai-queue .pq-library-editor>strong{display:block;margin-bottom:10px;font-size:15px}
-#local-pixai-queue .pq-folder-rail{padding:14px 8px;min-width:0;overflow:auto;background:#18151f;border-right:1px solid #4c4355}
-#local-pixai-queue .pq-folder-rail>strong{display:block;margin:0 8px 10px;color:#cfc1dc;font-size:13px}
+#local-pixai-queue .pq-folder-rail{padding:14px 8px;min-width:0;overflow:auto;background:#181a1d;border-right:1px solid #41474f}
+#local-pixai-queue .pq-folder-rail>strong{display:block;margin:0 8px 10px;color:#bbc3cc;font-size:13px}
 #local-pixai-queue .pq-folder-buttons button{display:block;width:100%;text-align:left;margin:2px 0;border:0;background:transparent;overflow-wrap:anywhere;font-size:13px;padding:8px}
-#local-pixai-queue .pq-folder-buttons button[aria-pressed="true"]{background:#413250;color:#ebd8ff}
+#local-pixai-queue .pq-folder-buttons button[aria-pressed="true"]{background:#30363c;color:#e6f2fc}
 #local-pixai-queue .pq-folder-rail details{margin-top:20px}
 #local-pixai-queue .pq-folder-rail .pq-actions button{font-size:12px}
 #local-pixai-queue .pq-presets .pq-library-browse .pq-chunk-list,#local-pixai-queue .pq-saved-list{flex:1;min-height:0;max-height:none;overflow:auto;border:0;border-radius:0;margin:8px -4px}
-#local-pixai-queue .pq-presets .pq-manager-row{border-top:0;border-bottom:1px solid #4c4355;padding:10px 8px}
+#local-pixai-queue .pq-presets .pq-manager-row{border-top:0;border-bottom:1px solid #41474f;padding:10px 8px}
 #local-pixai-queue .pq-presets .pq-manager-row small{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-height:42px;font-size:13px}
 #local-pixai-queue .pq-presets .pq-chunk-row-head .pq-name-button{font-size:14px}
-#local-pixai-queue .pq-presets .pq-chunk-row-head input[type="checkbox"]{width:15px;height:15px;flex:none;margin:0;padding:0;accent-color:#b799d4}
-#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-drag-handle{flex:none;width:20px;min-height:28px;margin:0;padding:0;border:0;background:transparent;font-size:19px;cursor:grab;color:#c7b3df}
+#local-pixai-queue .pq-presets .pq-chunk-row-head input[type="checkbox"]{width:15px;height:15px;flex:none;margin:0;padding:0;accent-color:#94bedf}
+#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-drag-handle{flex:none;width:20px;min-height:28px;margin:0;padding:0;border:0;background:transparent;font-size:19px;cursor:grab;color:#b6c1cc}
 #local-pixai-queue .pq-presets .pq-drag-handle:active{cursor:grabbing;transform:none}
-#local-pixai-queue .pq-presets .pq-manager-row[data-managed="true"]{background:#30263d}
+#local-pixai-queue .pq-presets .pq-manager-row[data-managed="true"]{background:#29343d}
 #local-pixai-queue .pq-presets .pq-manager-row[data-chunk-dragging="true"]{opacity:.5}
-#local-pixai-queue .pq-presets .pq-manager-row[data-drop-position="before"]{box-shadow:inset 0 3px 0 #dbc0f4}
-#local-pixai-queue .pq-presets .pq-manager-row[data-drop-position="after"]{box-shadow:inset 0 -3px 0 #dbc0f4}
-#local-pixai-queue .pq-presets [data-drop-active="true"]{outline:2px dashed #dbc0f4;outline-offset:-3px;background:#524064}
-#local-pixai-queue .pq-chunk-management{flex:none;padding:8px;border:1px solid #756488;border-radius:8px;background:#30263d;margin:4px 0}
+#local-pixai-queue .pq-presets .pq-manager-row[data-drop-position="before"]{box-shadow:inset 0 3px 0 #acd1ed}
+#local-pixai-queue .pq-presets .pq-manager-row[data-drop-position="after"]{box-shadow:inset 0 -3px 0 #acd1ed}
+#local-pixai-queue .pq-presets [data-drop-active="true"]{outline:2px dashed #acd1ed;outline-offset:-3px;background:#39434d}
+#local-pixai-queue .pq-chunk-management{flex:none;padding:8px;border:1px solid #627d91;border-radius:8px;background:#29343d;margin:4px 0}
 #local-pixai-queue .pq-presets .pq-chunk-management .pq-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin:5px 0}
 #local-pixai-queue .pq-presets .pq-chunk-management .pq-actions button{padding:6px 3px;white-space:nowrap}
 #local-pixai-queue .pq-bulk-move{display:flex;gap:6px;align-items:flex-end}
@@ -2093,7 +2262,7 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-bulk-move button{flex:none;margin:0}
 #local-pixai-queue .pq-saved-card{width:100%;display:block;text-align:left;padding:12px;margin:0 0 6px;background:transparent;border:1px solid transparent;font-weight:600;overflow-wrap:anywhere}
 #local-pixai-queue .pq-saved-card small{font-weight:400;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:13px}
-#local-pixai-queue .pq-saved-card[aria-pressed="true"]{background:#413250;border-color:#8c72a7}
+#local-pixai-queue .pq-saved-card[aria-pressed="true"]{background:#30363c;border-color:#759bb8}
 #local-pixai-queue .pq-presets label{font-size:13px;margin:4px 0}
 #local-pixai-queue .pq-actions [data-action-message]{order:1;flex-basis:100%;font-size:12px;margin:3px 0;padding:4px 8px}
 #local-pixai-queue .pq-library-editor input,#local-pixai-queue .pq-library-editor textarea{margin:3px 0}
@@ -2110,11 +2279,11 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-compose-summary{flex:1;min-height:0;overflow:auto;margin-bottom:8px;padding-right:4px}
 #local-pixai-queue .pq-compose-review>button{flex:none;align-self:flex-start}
 #local-pixai-queue .pq-compose-review>button:last-child{align-self:stretch}
-#local-pixai-queue .pq-compose-review .pq-preview{flex:none;max-height:140px;min-height:100px;background:#18151f;padding:12px;border:1px solid #4c4355;border-radius:8px;font-size:13px}
+#local-pixai-queue .pq-compose-review .pq-preview{flex:none;max-height:140px;min-height:100px;background:#181a1d;padding:12px;border:1px solid #41474f;border-radius:8px;font-size:13px}
 #local-pixai-queue .pq-reservation-list{max-height:210px;overflow:auto;margin:6px 0}
 #local-pixai-queue .pq-compose-review .pq-reservation{margin:8px 0}
 #local-pixai-queue .pq-presets .pq-chunk-option{padding:10px}
-#local-pixai-queue .pq-footer{display:flex;align-items:center;gap:6px;padding:9px 14px;border-top:1px solid #4c4355;flex:none;background:#18151f}
+#local-pixai-queue .pq-footer{display:flex;align-items:center;gap:6px;padding:9px 14px;border-top:1px solid #41474f;flex:none;background:#181a1d}
 #local-pixai-queue .pq-footer>[data-start]{margin-left:auto}
 #local-pixai-queue .pq-footer button{margin:0;white-space:nowrap}
 #local-pixai-queue [data-jobs]{max-height:none;overflow:visible}
@@ -2122,12 +2291,12 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-settings-content,#local-pixai-queue .pq-queue-content{max-width:700px;margin:auto}
 #local-pixai-queue .pq-settings-content h3:not(:first-child){margin-top:24px}
 #local-pixai-queue .pq-library-mode{display:none}
-#local-pixai-queue .pq-library-mode button[aria-pressed="true"]{border-color:#b799d4;background:#524064}
+#local-pixai-queue .pq-library-mode button[aria-pressed="true"]{border-color:#94bedf;background:#39434d}
 #local-pixai-queue button:not(:disabled):active{transform:scale(.98)}
 @media (max-width:760px){#local-pixai-queue .pq-with-folders{grid-template-columns:125px 220px minmax(0,1fr)}#local-pixai-queue .pq-tabs button{padding:9px 10px;font-size:13px}}
 @media (max-width:620px){
 #local-pixai-queue [data-header]{padding:10px 12px;height:48px}#local-pixai-queue [data-drag-handle]{font-size:15px}
-#local-pixai-queue .pq-library-mode{display:flex;gap:6px;padding:5px 10px;border-bottom:1px solid #4c4355;flex:none}
+#local-pixai-queue .pq-library-mode{display:flex;gap:6px;padding:5px 10px;border-bottom:1px solid #41474f;flex:none}
 #local-pixai-queue .pq-library-layout{grid-template-columns:minmax(0,1fr)}#local-pixai-queue .pq-with-folders{grid-template-columns:110px minmax(0,1fr)}
 #local-pixai-queue [data-library-mode="browse"] .pq-library-editor{display:none}#local-pixai-queue [data-library-mode="edit"] .pq-library-browse,#local-pixai-queue [data-library-mode="edit"] .pq-folder-rail{display:none}
 #local-pixai-queue [data-library-mode="edit"] .pq-library-layout{grid-template-columns:minmax(0,1fr)}
@@ -2137,18 +2306,69 @@ function mountPresetEditor(parent, io) {
 }
 @media (prefers-reduced-motion:reduce){#local-pixai-queue button:not(:disabled):active{transform:none}}
 `;
+    style.textContent += `
+#local-pixai-queue .pq-icon{width:20px;height:20px;flex:none;order:-1;pointer-events:none;color:inherit}
+#local-pixai-queue button[data-icon]{display:inline-flex;align-items:center;justify-content:center;gap:6px}
+#local-pixai-queue .pq-tabs button[data-icon]{gap:7px}
+#local-pixai-queue .pq-button-picker{min-width:0;margin:5px 0}
+#local-pixai-queue .pq-button-picker>strong{display:block;font-size:13px;color:#bbc3cc;margin-bottom:5px;font-weight:500}
+#local-pixai-queue .pq-choice-list{height:88px;min-height:54px;max-height:220px;overflow:auto;resize:vertical;border:1px solid #41474f;border-radius:6px;background:#181a1d;padding:3px}
+#local-pixai-queue .pq-choice-list button[data-icon]{display:flex;justify-content:flex-start;text-align:left;width:100%;min-height:32px;padding:6px 8px;margin:1px 0;border:1px solid transparent;background:transparent;white-space:normal;overflow-wrap:anywhere;line-height:1.35}
+#local-pixai-queue .pq-choice-list button[aria-pressed="true"]{background:#29343d;border-color:#627d91;color:#edf1f5}
+#local-pixai-queue .pq-folder-buttons button[data-icon]{display:flex;justify-content:flex-start}
+#local-pixai-queue .pq-folder-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#local-pixai-queue .pq-folder-count{flex:none;white-space:nowrap;font-size:12px}
+#local-pixai-queue .pq-quick-folder>button{width:100%;justify-content:flex-start;font-size:13px;padding:5px 8px;background:transparent;border-style:dashed}
+#local-pixai-queue .pq-quick-folder-form{padding:6px 0}
+#local-pixai-queue .pq-quick-folder-form .pq-actions{display:flex;flex-wrap:wrap}
+#local-pixai-queue .pq-quick-folder-form .pq-actions button{white-space:normal}
+#local-pixai-queue .pq-resizable-layout{display:flex;gap:0;min-width:0;min-height:0;height:100%;flex:1;overflow:hidden}
+#local-pixai-queue .pq-resizable-layout>.pq-library-browse,#local-pixai-queue .pq-resizable-layout>.pq-library-editor,#local-pixai-queue .pq-resizable-layout>.pq-folder-rail{height:100%;min-width:0;min-height:0;border-right:0}
+#local-pixai-queue .pq-pane-handle{width:8px;flex:0 0 8px;position:relative;cursor:col-resize;touch-action:none;background:#181a1d;outline-offset:-2px}
+#local-pixai-queue .pq-pane-handle:before{content:'';position:absolute;left:3px;top:0;bottom:0;width:1px;background:#41474f}
+#local-pixai-queue .pq-pane-handle:after{content:'';position:absolute;left:2px;top:calc(50% - 14px);width:3px;height:28px;border-radius:2px;background:#627d91}
+#local-pixai-queue .pq-pane-handle:focus-visible{outline:2px solid #acd1ed}
+#local-pixai-queue .pq-resizable-layout[data-resizing="true"]{user-select:none;cursor:col-resize}
+#local-pixai-queue .pq-preset-body[data-page="presets"]{display:flex;flex-direction:column;padding:0}
+#local-pixai-queue .pq-compose-choices{padding-right:12px;overflow:auto}
+#local-pixai-queue .pq-compose-review{padding-left:12px}
+#local-pixai-queue .pq-reserve-selectors .pq-choice-list{height:78px}
+#local-pixai-queue .pq-choice-filters{align-items:end}
+#local-pixai-queue .pq-choice-filters .pq-choice-list{height:66px}
+#local-pixai-queue .pq-chunk-management{display:grid;grid-template-columns:minmax(110px,.6fr) minmax(220px,1fr) minmax(260px,1.4fr);align-items:center;gap:12px;flex:none;max-height:230px;overflow:auto;margin:0;padding:8px 12px;border-width:1px 0 0;border-radius:0;background:#252a2f}
+#local-pixai-queue .pq-chunk-management>[role="status"]{font-size:13px}
+#local-pixai-queue .pq-chunk-management .pq-move-destination .pq-choice-list{height:66px}
+#local-pixai-queue .pq-chunk-management .pq-actions button{min-width:0}
+#local-pixai-queue .pq-presets .pq-chunk-management .pq-quick-folder-form .pq-actions{display:flex}
+#local-pixai-queue .pq-presets .pq-bulk-move{align-items:center;min-width:0}
+#local-pixai-queue .pq-bulk-move>.pq-button-picker{flex:1}
+#local-pixai-queue .pq-window-resize{position:absolute;right:3px;bottom:3px;width:23px;height:23px;display:flex;align-items:center;justify-content:center;color:#b6c1cc;cursor:nwse-resize;touch-action:none;border-radius:3px}
+#local-pixai-queue .pq-window-resize .pq-icon{width:16px;height:16px}
+#local-pixai-queue .pq-footer{padding-right:32px}
+#local-pixai-queue[data-minimized="true"]{width:52px!important;height:52px!important}
+@media (hover:hover) and (pointer:fine){#local-pixai-queue .pq-pane-handle:hover:after,#local-pixai-queue [data-resizing="true"]>.pq-pane-handle:after{background:#94bedf}#local-pixai-queue .pq-window-resize:hover{background:#29343d;color:#acd1ed}}
+@media (max-width:760px){#local-pixai-queue .pq-chunk-management{grid-template-columns:120px minmax(0,1fr)}#local-pixai-queue .pq-chunk-management>.pq-bulk-move{grid-column:1/-1}}
+@media (max-width:620px){#local-pixai-queue .pq-pane-handle{display:none}#local-pixai-queue .pq-resizable-layout{display:grid;grid-template-columns:minmax(0,1fr)}#local-pixai-queue .pq-resizable-layout.pq-with-folders{grid-template-columns:95px minmax(0,1fr)}#local-pixai-queue [data-library-mode="edit"] .pq-resizable-layout{grid-template-columns:minmax(0,1fr)}#local-pixai-queue .pq-resizable-layout.pq-compose-layout{display:block;overflow:auto}#local-pixai-queue .pq-compose-choices{overflow:visible;padding-right:0}#local-pixai-queue .pq-compose-review{padding-left:0}#local-pixai-queue .pq-footer{padding-right:28px}#local-pixai-queue .pq-chunk-management{max-height:220px;grid-template-columns:minmax(0,1fr);gap:4px}#local-pixai-queue .pq-chunk-management>.pq-bulk-move{grid-column:auto}#local-pixai-queue .pq-tabs button{gap:5px;padding:9px 10px}#local-pixai-queue .pq-choice-filters{display:block}}
+@media (max-width:620px){#local-pixai-queue .pq-resizable-layout.pq-with-folders{grid-template-columns:110px minmax(0,1fr)}#local-pixai-queue [data-library-mode="edit"] .pq-resizable-layout.pq-with-folders{grid-template-columns:minmax(0,1fr)}#local-pixai-queue .pq-folder-buttons button[data-icon]{padding:8px 4px;gap:4px}#local-pixai-queue .pq-folder-buttons .pq-icon{width:16px;height:16px}#local-pixai-queue .pq-folder-count{display:none}#local-pixai-queue .pq-chunk-management{grid-template-columns:50px minmax(0,1fr);column-gap:6px}#local-pixai-queue .pq-chunk-management>.pq-bulk-move{grid-column:1/-1}#local-pixai-queue .pq-chunk-management .pq-move-destination .pq-choice-list{height:54px}#local-pixai-queue .pq-chunk-management .pq-actions button{padding:6px 3px}#local-pixai-queue .pq-chunk-management .pq-actions .pq-icon{width:16px;height:16px}}
+`;
     document.body.append(panel);
     try { load(); } catch(error) { message=`대기열 읽기 실패: ${error.message}\n프리셋 읽기·편집은 사용할 수 있습니다. 대기열 원본은 유지했습니다.`; }
     render();
     bindPanelDrag(panel, dragHandle, {
       launcher, open:() => minimize(false),
-      viewport:() => ({width:window.innerWidth,height:window.innerHeight}),
+      viewport:() => ({width:document.documentElement?.clientWidth || window.innerWidth,height:document.documentElement?.clientHeight || window.innerHeight}),
       load:() => JSON.parse(localStorage.getItem('local.pixai-web-queue.position.v1') || 'null'),
       save:position => localStorage.setItem('local.pixai-web-queue.position.v1', JSON.stringify(position)),
       onResize:action => {
         window.addEventListener('resize', action);
         new ResizeObserver(action).observe(panel);
       }
+    });
+    bindWindowResize(panel,resizeHandle,{
+      viewport:()=>({width:document.documentElement?.clientWidth || window.innerWidth,height:document.documentElement?.clientHeight || window.innerHeight}),
+      load:()=>JSON.parse(localStorage.getItem('local.pixai-web-queue.size.v1') || 'null'),
+      save:value=>localStorage.setItem('local.pixai-web-queue.size.v1',JSON.stringify(value)),
+      onResize:listener=>window.addEventListener('resize',listener)
     });
   }
   async function chooseFolder() {
@@ -2164,7 +2384,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.6.0', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.7.0', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

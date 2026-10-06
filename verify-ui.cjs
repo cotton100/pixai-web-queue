@@ -49,7 +49,7 @@ function fixture(t,initial=seed()) {
   let loadResult,saveFailure,busy=false;
   const messages=[],jobs=[],saves=[];let sequence=0;
   const parent=new Element('aside');const previousDocument=globalThis.document;
-  globalThis.document={createElement:tag=>new Element(tag)};
+  globalThis.document={createElement:tag=>new Element(tag),createElementNS:(_namespace,tag)=>new Element(tag)};
   t.after(()=>{if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument;});
   const ui=core.mountPresetEditor(parent,{
     load:()=>copy(loadResult===undefined?library:loadResult),save:value=>{if(saveFailure)throw new Error(saveFailure);library=core.normalizePresetLibrary(copy(value));saves.push(copy(library));},
@@ -61,7 +61,7 @@ function fixture(t,initial=seed()) {
   const all=(root=parent)=>[root,...root.children.flatMap(child=>all(child))];
   const fields=name=>all().filter(element=>element.getAttribute('aria-label')===name);
   const field=(name,index=0)=>{const element=fields(name)[index];assert(element,`Missing field: ${name} #${index}`);return element;};
-  const button=name=>{const element=all().find(item=>item.tagName==='BUTTON'&&item._text===name);assert(element,`Missing button: ${name}`);return element;};
+  const button=name=>{const element=all().find(item=>item.tagName==='BUTTON'&&(item._text===name||item.getAttribute('aria-label')===name));assert(element,`Missing button: ${name}`);return element;};
   const press=async name=>{const element=button(name);assert(Object.hasOwn(element.dataset,'edit'),`${name} must participate in running-state disable`);await element.press();};
   const select=async(name,value)=>{field(name).value=value;await field(name).emit('change');};
   const choose=async(name,checked=true)=>{const element=field(`청크 선택: ${name}`);assert.equal(element.type,'checkbox');element.checked=checked;await element.emit('change');};
@@ -83,6 +83,39 @@ async function dragChunk(f,name,target,after=false) {
   await target.emit('drop',{dataTransfer,clientY:after?160:104});await handle.emit('dragend');
 }
 async function manage(f,name,checked=true){const control=f.field(`청크 관리 선택: ${name}`);control.checked=checked;await control.emit('change');}
+
+test('visible picker buttons update real composition and folder drafts while keeping generation choices separate',async t=>{
+  const initial=seed();initial.characters.push({id:'c2',name:'Bob',prompt:'different character',negativePrompt:''});initial.chunkFolders=[{id:'f1',name:'표정 폴더'}];const f=fixture(t,initial);
+  await f.field('예약 캐릭터: Bob').emit('click');assert.match(f.preview(),/different character/);assert.equal(f.field('예약 캐릭터').value,'c2');assert.equal(f.field('예약 캐릭터: Bob').getAttribute('aria-pressed'),'true');
+  await f.choose('표정');await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved';await f.field('청크 폴더: 표정 폴더').emit('click');
+  assert.equal(f.field('청크 폴더').value,'f1');assert.equal(f.field('청크 프롬프트').value,'unsaved');assert.equal(f.library().scenes[0].folderId,undefined);assert.equal(f.field('청크 선택: 표정').checked,true);
+  f.setBusy(true);await f.field('예약 캐릭터: Alice').emit('click');assert.equal(f.field('예약 캐릭터').value,'c2');assert.equal(f.field('예약 캐릭터: Bob').disabled,true);
+});
+test('quick folder creation and bulk move commit together and retain checked chunks, drafts and saved reservation order',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved';await manage(f,'행동');await manage(f,'표정');
+  await f.press('이동 대상 새 폴더');f.field('이동 대상 새 폴더 이름').value='새 작업';const writes=f.saves.length;await f.press('만들고 선택 청크 이동');
+  const saved=f.library(),folder=saved.chunkFolders[0];assert.equal(f.saves.length,writes+1);assert.equal(folder.name,'새 작업');assert(saved.scenes.every(item=>item.folderId===folder.id));
+  assert.equal(f.field('청크 프롬프트').value,'unsaved');assert.equal(f.field('청크 폴더').value,folder.id);assert.equal(f.field('이동할 청크 폴더').value,folder.id);
+  assert.deepEqual(saved.reservations[0].sceneIds,['s1','s2']);assert.equal(f.field('청크 관리 선택: 표정').checked,true);assert.equal(f.field('청크 선택: 표정').checked,true);
+});
+test('quick folder failure and cancellation keep existing data, selections and entered names; import resets pending creation',async t=>{
+  const f=fixture(t);await manage(f,'표정');await f.press('이동 대상 새 폴더');f.field('이동 대상 새 폴더 이름').value='Keep';const before=f.library();
+  f.setSaveFailure('Quota exceeded');await f.press('만들고 선택 청크 이동');assert.deepEqual(f.library(),before);assert.equal(f.field('이동 대상 새 폴더 이름').value,'Keep');assert.equal(f.field('청크 관리 선택: 표정').checked,true);
+  await f.press('이동 대상 폴더 만들기 취소');assert.equal(f.field('이동 대상 새 폴더 이름').value,'');assert.deepEqual(f.library(),before);
+  f.setSaveFailure(null);await f.press('이동 대상 새 폴더');f.field('이동 대상 새 폴더 이름').value='Pending';f.ui.reload();assert.equal(f.field('이동 대상 새 폴더 이름').value,'');assert.deepEqual(f.library(),before);
+});
+test('creating a folder in the editor selects it without overwriting unsaved prompts or moving the saved chunk before save',async t=>{
+  const f=fixture(t);await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='new prompt';await f.press('청크 소속 새 폴더');f.field('청크 소속 새 폴더 이름').value='Custom';await f.press('만들고 폴더 선택');
+  const id=f.library().chunkFolders[0].id;assert.equal(f.field('청크 폴더').value,id);assert.equal(f.library().scenes[0].folderId,undefined);assert.equal(f.field('청크 프롬프트').value,'new prompt');
+  await f.press('청크 저장');assert.equal(f.library().scenes.find(item=>item.id==='s1').folderId,id);assert.equal(f.library().scenes.find(item=>item.id==='s1').prompt,'new prompt');
+});
+
+test('Enter creates a folder and moves selected chunks once, while busy or untrusted keyboard input cannot create it',async t=>{
+  const f=fixture(t);await manage(f,'표정');await f.press('이동 대상 새 폴더');f.field('이동 대상 새 폴더 이름').value='Keyboard';
+  f.setBusy(true);await f.field('이동 대상 새 폴더 이름').emit('keydown',{key:'Enter'});assert.equal(f.library().chunkFolders.length,0);
+  f.setBusy(false);await f.field('이동 대상 새 폴더 이름').emit('keydown',{key:'Enter',isTrusted:false});assert.equal(f.library().chunkFolders.length,0);
+  await f.field('이동 대상 새 폴더 이름').emit('keydown',{key:'Enter'});assert.equal(f.saves.length,1);assert.equal(f.library().chunkFolders[0].name,'Keyboard');assert.equal(f.library().scenes.find(item=>item.id==='s1').folderId,f.library().chunkFolders[0].id);
+});
 
 test('native chunk drag reorders rows and updates future composition without erasing edited drafts or old reservations',async t=>{
   const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');
