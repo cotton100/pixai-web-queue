@@ -1,0 +1,6 @@
+preserved/
+test-output/
+node_modules/
+*.log
+.env
+.env.*
