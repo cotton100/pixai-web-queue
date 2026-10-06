@@ -40,7 +40,7 @@ test('older queue backups import only saved library and preserve current options
   const original=plain(jobs),result=parse({version:1,jobs,library:source});
   assert.equal(result.source,'queue');assert.equal(result.options,null);assert.equal(result.appVersion,null);assert.equal(result.exportedAt,null);
   assert.equal('jobs' in result,false);assert.equal('taskId' in result,false);assert.deepEqual(jobs,original);
-  assert.deepEqual(plain(result.library),source);
+  assert.deepEqual(plain(result.library),plain(normalizePresetLibrary(source)));
 });
 test('raw version-one libraries import without options and legacy single sceneId is converted compatibly',()=>{
   const source=library();source.reservations=[{id:'legacy',presetId:'p1',characterId:'c1',sceneId:'s1',count:3}];

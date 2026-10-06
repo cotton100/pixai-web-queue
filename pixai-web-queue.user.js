@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.3.3
+// @version      0.4.0
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -290,7 +290,7 @@
   }
 
   function makePresetLibrary() {
-    return {version:1, common:{prompt:'', negativePrompt:''}, presets:[], characters:[], scenes:[], reservations:[]};
+    return {version:1, common:{prompt:'', negativePrompt:''}, presets:[], characters:[], chunkFolders:[], scenes:[], reservations:[]};
   }
   function presetText(value) {
     if (value != null && typeof value !== 'string') throw new Error('프롬프트와 이름은 문자열이어야 합니다.');
@@ -349,7 +349,8 @@
     const source = presetObject(value, '프리셋 라이브러리');
     if (source.version !== 1) throw new Error('지원하지 않는 프리셋 라이브러리 버전입니다.');
     const common = presetObject(source.common, '공통 프롬프트');
-    function entries(key, build) {
+    function entries(key, build, optional = false) {
+      if (optional && !Object.prototype.hasOwnProperty.call(source, key)) return [];
       if (!Array.isArray(source[key])) throw new Error(`${key} 목록 형식을 확인해 주세요.`);
       const seen = new Set();
       return source[key].map(item => {
@@ -360,12 +361,26 @@
         return build(item, id);
       });
     }
+    const chunkFolders = entries('chunkFolders', (item, id) => {
+      if (typeof item.name !== 'string' || !presetText(item.name)) throw new Error('청크 폴더 이름을 입력해 주세요.');
+      return {id, name:presetText(item.name)};
+    }, true);
+    const folderIds = new Set(chunkFolders.map(item => item.id));
     const library = {
       version:1,
       common:{prompt:presetText(common.prompt), negativePrompt:presetText(common.negativePrompt)},
       presets:entries('presets', (item, id) => ({id, name:presetText(item.name), ...validatePresetConfiguration(item, options)})),
       characters:entries('characters', (item, id) => ({id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)})),
-      scenes:entries('scenes', (item, id) => ({id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)})),
+      chunkFolders,
+      scenes:entries('scenes', (item, id) => {
+        const chunk = {id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)};
+        if (Object.prototype.hasOwnProperty.call(item, 'folderId')) {
+          const folderId = presetIdentifier(item.folderId, '청크 폴더');
+          if (!folderIds.has(folderId)) throw new Error(`청크 ${id}의 폴더가 없습니다: ${folderId}`);
+          chunk.folderId = folderId;
+        }
+        return chunk;
+      }),
       reservations:entries('reservations', (item, id) => {
         const sourceIds = Object.prototype.hasOwnProperty.call(item, 'sceneIds') ? item.sceneIds : [item.sceneId];
         if (!Array.isArray(sourceIds)) throw new Error('선택한 프롬프트 청크 목록 형식을 확인해 주세요.');
@@ -378,6 +393,31 @@
       })
     };
     if (library.reservations.reduce((sum, item) => sum + item.count, 0) > 1000) throw new Error('예약 작업은 한 번에 1,000개까지 만들 수 있습니다.');
+    return library;
+  }
+  function orderedChunks(value) {
+    const library = normalizePresetLibrary(value);
+    return [...library.scenes.filter(item => !item.folderId),
+      ...library.chunkFolders.flatMap(folder => library.scenes.filter(item => item.folderId === folder.id))];
+  }
+  function moveLibraryItem(value, key, id, direction) {
+    if (!['presets','characters','scenes','chunkFolders','reservations'].includes(key)) throw new Error('순서를 변경할 목록을 확인해 주세요.');
+    if (direction !== -1 && direction !== 1) throw new Error('이동 방향은 위 또는 아래여야 합니다.');
+    const library = normalizePresetLibrary(value);
+    const items = library[key], itemId = presetIdentifier(id, '이동할 항목');
+    const index = items.findIndex(item => item.id === itemId);
+    if (index < 0) throw new Error('순서를 변경할 항목이 없습니다.');
+    const indexes = items.map((_item, itemIndex) => itemIndex)
+      .filter(itemIndex => key !== 'scenes' || items[itemIndex].folderId === items[index].folderId);
+    const target = indexes[indexes.indexOf(index) + direction];
+    if (target !== undefined) [items[index], items[target]] = [items[target], items[index]];
+    return library;
+  }
+  function removeChunkFolder(value, id) {
+    const library = normalizePresetLibrary(value), folderId = presetIdentifier(id, '청크 폴더');
+    if (!library.chunkFolders.some(item => item.id === folderId)) throw new Error('삭제할 청크 폴더가 없습니다.');
+    library.chunkFolders = library.chunkFolders.filter(item => item.id !== folderId);
+    for (const chunk of library.scenes) if (chunk.folderId === folderId) delete chunk.folderId;
     return library;
   }
   function settingsBackupKeys(value, label, required, allowed = required) {
@@ -402,10 +442,15 @@
     }
   }
   function settingsBackupLibrary(value) {
-    const source = settingsBackupKeys(value, '프리셋 라이브러리', ['version','common','presets','characters','scenes','reservations']);
+    const source = settingsBackupKeys(value, '프리셋 라이브러리', ['version','common','presets','characters','scenes','reservations'],
+      ['version','common','presets','characters','chunkFolders','scenes','reservations']);
     settingsBackupKeys(source.common, '공통 프롬프트', ['prompt','negativePrompt']);
     settingsBackupStrings(source.common, ['prompt','negativePrompt'], '공통 프롬프트');
     const library = normalizePresetLibrary(source);
+    for (const folder of source.chunkFolders || []) {
+      settingsBackupKeys(folder, '청크 폴더', ['id','name']);
+      settingsBackupStrings(folder, ['name'], '청크 폴더 이름');
+    }
     for (const item of source.presets) {
       settingsBackupKeys(item, '설정 프리셋', ['id','name','model','loras']);
       settingsBackupStrings(item, ['name'], '프리셋 이름');
@@ -417,7 +462,8 @@
       }
     }
     for (const key of ['characters','scenes']) for (const item of source[key]) {
-      settingsBackupKeys(item, '캐릭터·청크 프롬프트', ['id','name','prompt','negativePrompt']);
+      const fields = ['id','name','prompt','negativePrompt'];
+      settingsBackupKeys(item, '캐릭터·청크 프롬프트', fields, key === 'scenes' ? [...fields,'folderId'] : fields);
       settingsBackupStrings(item, ['name','prompt','negativePrompt'], '캐릭터·청크 프롬프트');
     }
     for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds']);
@@ -839,7 +885,10 @@ function mountPresetEditor(parent, io) {
     return element;
   }
   function action(text, run) {
-    const element = io.button(text, run); element.dataset.edit = ''; return element;
+    const element = io.button(text, run); element.dataset.edit = '';
+    if (text.endsWith(' 저장') || text === '이 조합 예약 추가' || text === '예약 전부를 대기열에 등록') element.dataset.primary = '';
+    if (io.isBusy?.()) element.disabled=true;
+    return element;
   }
   function field(label, tag = 'input', attrs = {}) {
     const input = el(tag,null,{'data-edit':'','aria-label':label,...attrs});
@@ -861,6 +910,44 @@ function mountPresetEditor(parent, io) {
     refreshLists(); renderReservations(); preview();
     if (message) io.notify(message);
   }
+  const orderRefreshers = [];
+  function available(control, value) {
+    control.dataset.unavailable = String(!value); control.disabled = !value || !!io.isBusy?.();
+  }
+  function orderControls(key, currentId, label, persistent = true, compact = false) {
+    const wrap = el('div',null,{class:'pq-actions'});
+    const buttons = [-1,1].map(direction => {
+      const word = direction < 0 ? '위로' : '아래로';
+      const button = action(compact ? (direction < 0 ? '↑' : '↓') : word,async () => {
+        const id = currentId();
+        if (!library[key].some(item=>item.id===id)) throw new Error('순서를 바꿀 저장 항목을 선택해 주세요.');
+        await commit(moveLibraryItem(library,key,id,direction),'목록 순서를 변경했습니다. 기존 예약의 청크 순서는 유지됩니다.');
+        const controls=[...root.querySelectorAll('[data-order-key]')].filter(control=>control.dataset.orderKey===key&&control.dataset.orderId===id&&control.dataset.orderContext===(persistent ? 'editor' : 'row')&&!control.disabled);
+        (controls.find(control=>control.dataset.direction===String(direction)) || controls[0])?.focus({preventScroll:true});
+      });
+      button.setAttribute('aria-label',`${label} ${word}`); button.title=`${label} ${word}`;
+      button.dataset.orderContext=persistent ? 'editor' : 'row';
+      wrap.append(button); return button;
+    });
+    function refresh() {
+      const id=currentId(),current=library[key].find(item=>item.id===id);
+      const items=key==='scenes' ? library.scenes.filter(item=>item.folderId===current?.folderId) : library[key];
+      const index=items.findIndex(item=>item.id===id);
+      for (let i=0;i<buttons.length;i++) Object.assign(buttons[i].dataset,{orderKey:key,orderId:id || '',direction:String(i===0 ? -1 : 1)});
+      available(buttons[0],index>0);available(buttons[1],index>=0&&index<items.length-1);
+    }
+    if (persistent) orderRefreshers.push(refresh);
+    refresh(); return wrap;
+  }
+  const chunkGroups = () => [{id:'',name:'미분류'},...library.chunkFolders];
+  const matchesChunk = (chunk,text) => `${chunk.name}\n${chunk.prompt}\n${chunk.negativePrompt}`.toLocaleLowerCase().includes(text.trim().toLocaleLowerCase());
+  function filterChunks(search,filter) {
+    return orderedChunks(library).filter(chunk=>matchesChunk(chunk,search)&&(!filter || (filter==='unfiled' ? !chunk.folderId : `folder:${chunk.folderId}`===filter)));
+  }
+  function folderFilterOptions(select) {
+    const selected=select.value;
+    selectOptions(select,[{id:'unfiled',name:'미분류'},...library.chunkFolders.map(folder=>({id:`folder:${folder.id}`,name:folder.name}))],'모든 폴더',selected);
+  }
   function nameValue(input) {
     const value = input.value.trim();
     if (!value) throw new Error('저장할 이름을 입력해 주세요.');
@@ -873,6 +960,8 @@ function mountPresetEditor(parent, io) {
   }
   root.append(el('style', '.pq-presets details{border-top:1px solid #4c4355;margin-top:8px}.pq-presets summary{padding:8px 0;cursor:pointer;font-weight:600}.pq-presets .pq-preset-body{padding-bottom:7px}.pq-presets label{display:block;margin:6px 0;font-size:13px}.pq-presets select{display:block;width:100%;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}.pq-presets textarea{min-height:68px}.pq-presets .pq-lora,.pq-presets .pq-reservation{border:1px solid #4c4355;border-radius:8px;padding:8px;margin:6px 0}.pq-presets .pq-inline{display:flex;gap:7px}.pq-presets .pq-inline>*{flex:1;min-width:0}.pq-presets .pq-reservation label{max-width:130px}.pq-presets .pq-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:125px;overflow:auto;border-left:2px solid #756488;padding-left:8px;margin:8px 0;color:#d9cbe5}.pq-presets button{font-size:13px}'));
   root.append(el('style','#local-pixai-queue .pq-chunk-list{max-height:210px;overflow:auto;border:1px solid #4c4355;border-radius:8px;margin:6px 0}#local-pixai-queue .pq-chunk-option{display:flex;align-items:flex-start;gap:8px;margin:0;padding:8px;cursor:pointer;border-bottom:1px solid #4c4355}#local-pixai-queue .pq-chunk-option:last-child{border-bottom:0}#local-pixai-queue .pq-chunk-option input[type="checkbox"]{width:auto;flex:0 0 auto;margin:3px 0;padding:0;accent-color:#b799d4}#local-pixai-queue .pq-chunk-option>span{min-width:0;flex:1}#local-pixai-queue .pq-chunk-option small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}'));
+  root.append(el('style','#local-pixai-queue .pq-presets .pq-actions{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:6px 0}#local-pixai-queue .pq-presets .pq-actions button{margin:0;padding:6px 9px;min-height:32px}#local-pixai-queue .pq-presets .pq-manager-row{padding:8px;border-top:1px solid #4c4355}#local-pixai-queue .pq-presets .pq-manager-row[data-selected="true"]{background:#413250;border-left:3px solid #b799d4}#local-pixai-queue .pq-presets .pq-manager-row strong{display:block;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-manager-row small{max-height:42px;overflow:hidden;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-folder-group{margin:0;border:0}#local-pixai-queue .pq-presets .pq-folder-group summary{padding:8px;background:#30263d;font-size:13px;overflow-wrap:anywhere}#local-pixai-queue .pq-presets .pq-selected-chunks{padding:8px 10px;border:1px solid #756488;border-radius:8px;background:#30263d;overflow-wrap:anywhere;font-size:13px}#local-pixai-queue .pq-presets .pq-selected-chunks small{margin-top:3px}#local-pixai-queue .pq-presets .pq-empty{padding:10px;color:#cfc1dc}#local-pixai-queue .pq-presets button[data-unavailable="true"]{opacity:.45;cursor:default}#local-pixai-queue .pq-presets .pq-chunk-list:empty{display:none}'));
+  root.append(el('style','#local-pixai-queue .pq-presets .pq-chunk-row-head{display:flex;align-items:center;gap:6px}#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-name-button{flex:1;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0;padding:3px 0;border:0;background:transparent;font-weight:600;font-size:13px}#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-actions{flex:none;margin:0}#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-actions button{width:30px;padding:4px;min-height:30px}#local-pixai-queue .pq-presets .pq-manager-row small{white-space:nowrap;text-overflow:ellipsis;max-height:21px}'));
   root.append(el('small','공통문·캐릭터·청크를 따로 저장하고 조합을 예약합니다. 대기열에 등록한 작업은 이후 편집의 영향을 받지 않습니다.'));
 
   const commonBody = section('① 공통 프롬프트');
@@ -939,7 +1028,7 @@ function mountPresetEditor(parent, io) {
     const family = modelFamily.input.value.trim();
     return {model:{id,versionId,name:modelName.input.value.trim(),...(family ? {family} : {})},loras};
   }
-  presetSelect.input.addEventListener('change',() => fillPreset(library.presets.find(item => item.id === presetSelect.input.value)));
+  presetSelect.input.addEventListener('change',() => {fillPreset(library.presets.find(item => item.id === presetSelect.input.value));for (const refresh of orderRefreshers) refresh();});
   const modelIdentity=el('details');modelIdentity.append(el('summary','모델 ID 직접 편집'),modelId.wrap,modelVersionId.wrap,modelFamily.wrap);
   presetBody.append(presetSelect.wrap,presetName.wrap,
     el('small','PixAI 화면에서 모델·LoRA를 선택한 뒤 읽어오세요. 읽어오기와 설정 확인은 이미지를 생성하지 않습니다.'),
@@ -965,14 +1054,14 @@ function mountPresetEditor(parent, io) {
     const next = copy(library); const index = next.presets.findIndex(item => item.id === value.id);
     if (index < 0) next.presets.push(value); else next.presets[index] = value;
     await commit(next,'모델·LoRA 프리셋을 저장했습니다.');
-    presetSelect.input.value = value.id;
-  }),action('새 프리셋',() => {presetSelect.input.value = '';fillPreset(null);}),action('선택 프리셋 삭제',async () => {
+    presetSelect.input.value = value.id; for (const refresh of orderRefreshers) refresh();
+  }),action('새 프리셋',() => {presetSelect.input.value = '';fillPreset(null);for (const refresh of orderRefreshers) refresh();}),action('선택 프리셋 삭제',async () => {
     const id = presetSelect.input.value;
     if (!id) throw new Error('삭제할 저장 프리셋을 선택해 주세요.');
     const next = copy(library); next.presets = next.presets.filter(item => item.id !== id);
     await commit(next,'프리셋을 삭제했습니다. 이미 등록한 대기열은 유지됩니다. 예약은 다른 프리셋으로 다시 추가해 주세요.');
     fillPreset(null);
-  }));
+  }),orderControls('presets',()=>presetSelect.input.value,'선택 프리셋'));
 
   function promptEditor(key, title, label, placeholder) {
     const body = section(title);
@@ -980,25 +1069,94 @@ function mountPresetEditor(parent, io) {
     const name = field(`${label} 이름`);
     const prompt = field(`${label} 프롬프트`,'textarea',{placeholder});
     const negative = field(`${label} 네거티브`,'textarea');
+    const folder = key==='scenes' ? field('청크 폴더','select') : null;
+    let renderManager = () => {};
+    let refreshFolders = () => {};
+    let resetView = () => {};
     function fill(value) {
       name.input.value = value?.name || '';
       prompt.input.value = value?.prompt || '';
       negative.input.value = value?.negativePrompt || '';
+      if (folder) folder.input.value=value?.folderId || '';
+      renderManager();
     }
-    select.input.addEventListener('change',() => fill(library[key].find(item => item.id === select.input.value)));
-    body.append(select.wrap,name.wrap,prompt.wrap,negative.wrap,action(`${label} 저장`,async () => {
-      const value = {id:select.input.value || crypto.randomUUID(),name:nameValue(name.input),prompt:prompt.input.value.trim(),negativePrompt:negative.input.value.trim()};
+    select.input.addEventListener('change',() => {fill(library[key].find(item => item.id === select.input.value));for (const refresh of orderRefreshers) refresh();});
+    if (folder) {
+      const folderTools=el('details');folderTools.append(el('summary','폴더 관리'));
+      const managedFolder=field('관리할 청크 폴더','select');
+      const folderName=field('청크 폴더 이름','input',{placeholder:'예: 표정, 행동, 배경'});
+      managedFolder.input.addEventListener('change',()=>{
+        folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';
+        for (const refresh of orderRefreshers) refresh();
+      });
+      const folderActions=el('div',null,{class:'pq-actions'});
+      folderActions.append(action('폴더 저장',async()=>{
+        const value={id:managedFolder.input.value || crypto.randomUUID(),name:nameValue(folderName.input)};
+        const next=copy(library),index=next.chunkFolders.findIndex(item=>item.id===value.id);
+        if (index<0) next.chunkFolders.push(value);else next.chunkFolders[index]=value;
+        await commit(next,'청크 폴더를 저장했습니다.');managedFolder.input.value=value.id;
+        for (const refresh of orderRefreshers) refresh();
+      }),action('새 폴더',()=>{managedFolder.input.value='';folderName.input.value='';for (const refresh of orderRefreshers) refresh();}));
+      const removeFolder=action('선택 폴더 삭제',async()=>{
+        if (!managedFolder.input.value) throw new Error('삭제할 폴더를 선택해 주세요.');
+        await commit(removeChunkFolder(library,managedFolder.input.value),'폴더를 삭제했습니다. 안의 청크는 미분류로 옮겼고 예약은 유지했습니다.');
+        folderName.input.value='';
+      });
+      folderActions.append(removeFolder);
+      orderRefreshers.push(()=>available(removeFolder,library.chunkFolders.some(item=>item.id===managedFolder.input.value)));
+      folderTools.append(managedFolder.wrap,folderName.wrap,folderActions,orderControls('chunkFolders',()=>managedFolder.input.value,'선택 폴더'),el('small','폴더 삭제 시 안의 청크는 미분류로 이동합니다. 청크와 예약은 지우지 않습니다.'));
+      const search=field('청크 검색','input',{type:'search',placeholder:'청크 이름·프롬프트 검색'});
+      const filter=field('청크 폴더 필터','select');
+      const count=el('small',null,{'aria-label':'청크 목록 개수','role':'status'});
+      const list=el('div',null,{class:'pq-chunk-list','aria-label':'저장한 청크 목록'});
+      const closed=new Set();
+      renderManager=()=>{
+        const visible=filterChunks(search.input.value,filter.input.value);list.replaceChildren();
+        count.textContent=`검색 결과 ${visible.length} / 전체 ${library.scenes.length}개 · 폴더 안에서 위·아래로 정렬`;
+        if (!visible.length) list.append(el('small',library.scenes.length ? '검색에 맞는 청크가 없습니다. 검색어나 폴더 필터를 바꿔 주세요.' : '아래 이름과 프롬프트를 입력해 첫 청크를 저장하세요.',{class:'pq-empty'}));
+        for (const group of chunkGroups()) {
+          const chunks=visible.filter(item=>(item.folderId || '')===group.id);
+          if (!chunks.length) continue;
+          const details=el('details',null,{class:'pq-folder-group','data-chunk-folder':group.id});details.open=!closed.has(group.id);
+          details.append(el('summary',`${group.name} · ${chunks.length} / ${library.scenes.filter(item=>(item.folderId || '')===group.id).length}개`));
+          details.addEventListener('toggle',()=>{if (details.open) closed.delete(group.id);else closed.add(group.id);});
+          for (const chunk of chunks) {
+            const row=el('div',null,{class:'pq-manager-row','data-selected':String(select.input.value===chunk.id)});
+            const edit=action(chunk.name,()=>{select.input.value=chunk.id;fill(chunk);for (const refresh of orderRefreshers) refresh();});edit.className='pq-name-button';
+            edit.setAttribute('aria-label',`청크 편집: ${chunk.name}`);
+            const header=el('div',null,{class:'pq-chunk-row-head'});header.append(edit,orderControls('scenes',()=>chunk.id,`청크 ${chunk.name}`,false,true));
+            row.append(header,el('small',chunk.prompt || `네거티브: ${chunk.negativePrompt}`));details.append(row);
+          }
+          list.append(details);
+        }
+      };
+      search.input.addEventListener('input',renderManager);filter.input.addEventListener('change',renderManager);
+      refreshFolders=()=>{
+        selectOptions(folder.input,library.chunkFolders,'미분류',folder.input.value);
+        selectOptions(managedFolder.input,library.chunkFolders,'새 폴더',managedFolder.input.value);
+        folderFilterOptions(filter.input);renderManager();
+      };
+      resetView=()=>{search.input.value='';filter.input.value='';closed.clear();folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';};
+      const filters=el('div',null,{class:'pq-inline'});filters.append(search.wrap,filter.wrap);
+      body.append(folderTools,filters,count,list,el('small','청크 이름을 누르면 편집합니다. 검색·정렬 중에는 입력하던 내용을 유지합니다.'));
+    }
+    const controls=el('div',null,{class:'pq-actions'});
+    controls.append(action(`${label} 저장`,async () => {
+      const value = {id:select.input.value || crypto.randomUUID(),name:nameValue(name.input),prompt:prompt.input.value.trim(),negativePrompt:negative.input.value.trim(),...(folder?.input.value ? {folderId:folder.input.value} : {})};
       if (!value.prompt && !value.negativePrompt) throw new Error(`${label} 프롬프트나 네거티브를 입력해 주세요.`);
       const next = copy(library); const index = next[key].findIndex(item => item.id === value.id);
       if (index < 0) next[key].push(value); else next[key][index] = value;
-      await commit(next,`${label} 프롬프트를 저장했습니다.`); select.input.value = value.id;
-    }),action(`새 ${label}`,() => {select.input.value = '';fill(null);}),action(`선택 ${label} 삭제`,async () => {
+      await commit(next,`${label} 프롬프트를 저장했습니다.`); select.input.value = value.id;renderManager();for (const refresh of orderRefreshers) refresh();
+    }),action(`새 ${label}`,() => {select.input.value = '';fill(null);for (const refresh of orderRefreshers) refresh();}));
+    const remove=action(`선택 ${label} 삭제`,async () => {
       const id = select.input.value;
       if (!id) throw new Error(`삭제할 ${label}을 선택해 주세요.`);
       const next = copy(library); next[key] = next[key].filter(item => item.id !== id);
       await commit(next,`${label}을 삭제했습니다. 이미 등록한 대기열은 유지됩니다.`); fill(null);
-    }));
-    return {key,select:select.input,label,fill};
+    });
+    controls.append(remove);orderRefreshers.push(()=>available(remove,library[key].some(item=>item.id===select.input.value)));
+    body.append(select.wrap,name.wrap,...(folder ? [folder.wrap] : []),prompt.wrap,negative.wrap,controls,orderControls(key,()=>select.input.value,`선택 ${label}`));
+    return {key,select:select.input,label,fill,resetView,refresh:()=>{selectOptions(select.input,key==='scenes' ? orderedChunks(library) : library[key],`새 ${label}`,select.input.value);refreshFolders();}};
   }
   const characterEditor = promptEditor('characters','③ 캐릭터 프롬프트','캐릭터','외모, 의상, 캐릭터 고유 특징');
   const chunkEditor = promptEditor('scenes','④ 프롬프트 청크','청크','표정, 행동, 구도, 배경 등 함께 쓸 프롬프트 조각');
@@ -1006,43 +1164,70 @@ function mountPresetEditor(parent, io) {
   const reservePreset = field('예약 프리셋','select');
   const reserveCharacter = field('예약 캐릭터','select');
   const chunkList = el('div',null,{class:'pq-chunk-list','aria-label':'예약 청크 목록'});
-  const chunkCount = el('small');
+  const chunkSearch = field('예약 청크 검색','input',{type:'search',placeholder:'함께 쓸 청크 이름·프롬프트 검색'});
+  const chunkFilter = field('예약 청크 폴더 필터','select');
+  const chunkCount = el('div',null,{class:'pq-selected-chunks','aria-label':'선택한 청크 요약','role':'status'});
+  const pickerClosed = new Set();
+  let groupSummaries = new Map();
   let selectedChunkIds = new Set();
   const reserveCount = field('이 조합의 생성 횟수','input',{type:'number',min:'1',max:'100',value:'1'});
   const combined = el('div',null,{class:'pq-preview','aria-label':'저장한 프롬프트 조합 미리보기'});
   const reservations = el('div');
+  const visibleChunks = () => filterChunks(chunkSearch.input.value,chunkFilter.input.value).filter(chunk=>!pickerClosed.has(chunk.folderId || ''));
+  const selectVisible = action('보이는 청크 모두 선택',()=>{for (const chunk of visibleChunks()) selectedChunkIds.add(chunk.id);renderChunkChoices();preview();});
+  const clearSelected = action('청크 선택 전부 해제',()=>{selectedChunkIds.clear();renderChunkChoices();preview();});
+  const choiceActions=el('div',null,{class:'pq-actions'});choiceActions.append(selectVisible,clearSelected);
   function preview() {
     const preset = library.presets.find(item => item.id === reservePreset.input.value);
     const character = library.characters.find(item => item.id === reserveCharacter.input.value);
-    const chunks = library.scenes.filter(item => selectedChunkIds.has(item.id));
+    const chunks = orderedChunks(library).filter(item => selectedChunkIds.has(item.id));
     const {prompt,negativePrompt} = composePresetPrompts(library.common,character || {},chunks,preset || {loras:[]});
-    chunkCount.textContent = `청크 ${chunks.length}개 선택 · 목록 순서로 한 프롬프트에 합칩니다.`;
+    const visible=visibleChunks(),visibleIds=new Set(visible.map(chunk=>chunk.id)),hidden=chunks.filter(chunk=>!visibleIds.has(chunk.id)).length;
+    chunkCount.textContent = chunks.length ? `${chunks.length}개 선택 · ${chunks.map(chunk=>chunk.name).join(' · ')}` : '선택한 청크 없음 · 청크 없이 예약할 수 있습니다.';
+    chunkCount.append(el('small',hidden ? `현재 목록 밖에 선택 ${hidden}개가 있습니다. 선택한 청크는 모두 함께 예약됩니다.` : '미분류 → 폴더 순서 → 폴더 안 목록 순서로 합칩니다.'));
+    selectVisible.title=`검색·필터에 맞고 펼쳐진 목록의 청크 ${visible.length}개를 추가 선택합니다. 기존 선택도 유지합니다.`;
+    available(selectVisible,visible.some(chunk=>!selectedChunkIds.has(chunk.id)));available(clearSelected,chunks.length>0);
+    for (const group of chunkGroups()) {
+      const all=library.scenes.filter(chunk=>(chunk.folderId || '')===group.id),selected=all.filter(chunk=>selectedChunkIds.has(chunk.id)).length;
+      const summary=groupSummaries.get(group.id);
+      if (summary) summary.textContent=`${group.name} · 선택 ${selected} / 전체 ${all.length}개`;
+    }
     combined.textContent = `전송 프롬프트\n${prompt || '(비어 있음)'}${negativePrompt ? `\n\n네거티브\n${negativePrompt}` : ''}`;
   }
   for (const select of [reservePreset.input,reserveCharacter.input]) select.addEventListener('change',preview);
   function renderChunkChoices() {
     selectedChunkIds = new Set(library.scenes.filter(item=>selectedChunkIds.has(item.id)).map(item=>item.id));
-    chunkList.replaceChildren();
-    if (!library.scenes.length) chunkList.append(el('small','④에서 청크를 저장해 주세요. 청크 없이 예약할 수도 있습니다.'));
-    for (const chunk of library.scenes) {
-      const checkbox = el('input',null,{type:'checkbox','data-edit':'','aria-label':`청크 선택: ${chunk.name}`});
-      checkbox.checked = selectedChunkIds.has(chunk.id);
-      checkbox.addEventListener('change',()=>{
-        if (checkbox.checked) selectedChunkIds.add(chunk.id); else selectedChunkIds.delete(chunk.id);
-        preview();
-      });
-      const name = el('span',chunk.name);
-      name.append(el('small',chunk.prompt || `네거티브: ${chunk.negativePrompt}`));
-      const label = el('label',null,{class:'pq-chunk-option'}); label.append(checkbox,name);
-      chunkList.append(label);
+    chunkList.replaceChildren();groupSummaries=new Map();
+    const visible=filterChunks(chunkSearch.input.value,chunkFilter.input.value);
+    if (!visible.length) chunkList.append(el('small',library.scenes.length ? '검색에 맞는 청크가 없습니다. 기존 선택은 위 요약에 유지됩니다.' : '④에서 청크를 저장해 주세요. 청크 없이 예약할 수도 있습니다.',{class:'pq-empty'}));
+    for (const group of chunkGroups()) {
+      const chunks=visible.filter(chunk=>(chunk.folderId || '')===group.id);
+      if (!chunks.length) continue;
+      const details=el('details',null,{class:'pq-folder-group','data-picker-folder':group.id});details.open=!pickerClosed.has(group.id);
+      const summary=el('summary');groupSummaries.set(group.id,summary);details.append(summary);
+      details.addEventListener('toggle',()=>{if (details.open) pickerClosed.delete(group.id);else pickerClosed.add(group.id);preview();});
+      for (const chunk of chunks) {
+        const checkbox = el('input',null,{type:'checkbox','data-edit':'','aria-label':`청크 선택: ${chunk.name}`});
+        checkbox.disabled=!!io.isBusy?.();
+        checkbox.checked = selectedChunkIds.has(chunk.id);
+        checkbox.addEventListener('change',()=>{
+          if (checkbox.checked) selectedChunkIds.add(chunk.id); else selectedChunkIds.delete(chunk.id);
+          preview();
+        });
+        const name = el('span',chunk.name);name.append(el('small',chunk.prompt || `네거티브: ${chunk.negativePrompt}`));
+        const label = el('label',null,{class:'pq-chunk-option'});label.append(checkbox,name);details.append(label);
+      }
+      chunkList.append(details);
     }
   }
+  chunkSearch.input.addEventListener('input',()=>{renderChunkChoices();preview();});
+  chunkFilter.input.addEventListener('change',()=>{renderChunkChoices();preview();});
   function refreshLists() {
     selectOptions(presetSelect.input,library.presets,'새 프리셋',presetSelect.input.value);
-    for (const editor of [characterEditor,chunkEditor]) selectOptions(editor.select,library[editor.key],`새 ${editor.label}`,editor.select.value);
+    for (const editor of [characterEditor,chunkEditor]) editor.refresh();
     selectOptions(reservePreset.input,library.presets,'프리셋을 저장해 주세요',reservePreset.input.value,true);
     selectOptions(reserveCharacter.input,library.characters,'캐릭터를 저장해 주세요',reserveCharacter.input.value,true);
-    renderChunkChoices();
+    folderFilterOptions(chunkFilter.input);renderChunkChoices();for (const refresh of orderRefreshers) refresh();
   }
   function renderReservations() {
     reservations.replaceChildren();
@@ -1056,14 +1241,15 @@ function mountPresetEditor(parent, io) {
         el('small',`${preset?.name || '(삭제된 프리셋)'} · ${reservation.count}회`),action('이 예약 제외',async () => {
           const next = copy(library); next.reservations = next.reservations.filter(item => item.id !== reservation.id);
           await commit(next,'선택한 예약을 제외했습니다. 이미 등록한 대기열은 유지됩니다.');
-        }));
+        }),orderControls('reservations',()=>reservation.id,`예약 ${character?.name || '삭제된 캐릭터'} ${chunkNames.join(' + ') || '청크 없음'}`,false,true));
       reservations.append(row);
     }
   }
-  reserveBody.append(reservePreset.wrap,reserveCharacter.wrap,el('strong','함께 쓸 청크'),chunkList,chunkCount,reserveCount.wrap,combined,
+  const choiceFilters=el('div',null,{class:'pq-inline'});choiceFilters.append(chunkSearch.wrap,chunkFilter.wrap);
+  reserveBody.append(reservePreset.wrap,reserveCharacter.wrap,el('strong','함께 쓸 청크'),choiceFilters,choiceActions,chunkCount,chunkList,reserveCount.wrap,combined,
     action('이 조합 예약 추가',async () => {
       const presetId = reservePreset.input.value, characterId = reserveCharacter.input.value;
-      const sceneIds = library.scenes.filter(item=>selectedChunkIds.has(item.id)).map(item=>item.id);
+      const sceneIds = orderedChunks(library).filter(item=>selectedChunkIds.has(item.id)).map(item=>item.id);
       if (!library.presets.some(item => item.id === presetId) || !library.characters.some(item => item.id === characterId)) throw new Error('저장한 프리셋·캐릭터를 모두 선택해 주세요.');
       const next = copy(library);
       next.reservations.push({id:crypto.randomUUID(),presetId,characterId,sceneIds,count:repeatValue(reserveCount.input)});
@@ -1079,6 +1265,8 @@ function mountPresetEditor(parent, io) {
     reload:() => {
       const next=normalizePresetLibrary(io.load() || makePresetLibrary());
       library=next;selectedChunkIds=new Set();
+      chunkSearch.input.value='';chunkFilter.input.value='';pickerClosed.clear();
+      for (const editor of [characterEditor,chunkEditor]) editor.resetView();
       refreshLists();
       commonPrompt.input.value=library.common.prompt;commonNegative.input.value=library.common.negativePrompt;
       fillPreset(library.presets.find(item=>item.id===presetSelect.input.value));
@@ -1088,7 +1276,7 @@ function mountPresetEditor(parent, io) {
   };
 }
 
-  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -1421,7 +1609,7 @@ function mountPresetEditor(parent, io) {
       }));
       list.append(row);
     }
-    for (const element of panel.querySelectorAll('[data-edit], [data-start]')) element.disabled = running || starting || settingsBusy;
+    for (const element of panel.querySelectorAll('[data-edit], [data-start]')) element.disabled = running || starting || settingsBusy || element.getAttribute('data-unavailable') === 'true';
     const choose = panel.querySelector('[data-choose-folder]');
     choose.disabled = running || starting || settingsBusy || choosingFolder;
     choose.textContent = storage.mode === 'download'
@@ -1436,8 +1624,9 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.3.3 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.4.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
+    style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #dbc0f4;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#c4a6df;background:#524064}#local-pixai-queue [data-primary]{background:#b799d4;color:#1f1529;border-color:#b799d4;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#d0b1ed;color:#1f1529}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#211d2b}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
     style.textContent += '#local-pixai-queue [data-launcher]{display:none;width:52px;height:52px;margin:0;padding:12px;border:1px solid #8c72a7;border-radius:50%;line-height:0;background:#413250;touch-action:none;user-select:none}#local-pixai-queue [data-launcher][data-dragging]{cursor:grabbing}#local-pixai-queue [data-launcher]:focus-visible,#local-pixai-queue [data-collapse]:focus-visible{outline:2px solid #e2c7ff;outline-offset:3px}#local-pixai-queue[data-minimized="true"]{width:52px;height:52px;max-height:none;padding:0;border:0;border-radius:50%;overflow:visible}#local-pixai-queue[data-minimized="true"]>:not([data-launcher]){display:none!important}#local-pixai-queue[data-minimized="true"]>[data-launcher]{display:block}';
     function iconControl(label, attribute, path) {
@@ -1504,10 +1693,11 @@ function mountPresetEditor(parent, io) {
       jobs.push(...added); persist(); prompts.value=''; message=`${added.length}개 작업을 추가했습니다.`; render();
     }));
     add.dataset.edit='';
-    const run = button('시작 / 같은 작업 재개', start); run.dataset.start='';
+    const run = button('시작 / 같은 작업 재개', start); run.dataset.start=''; run.dataset.primary='';
     simple.append(add);
     const editorSlot=node('div');panel.append(editorSlot);
     function mountEditor() { try { presetEditor=mountPresetEditor(editorSlot, {
+      isBusy:() => running || starting || settingsBusy,
       load:readLibrary,save:saveLibrary,button,
       notify:text=>{message=text;render();},
       captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
@@ -1532,14 +1722,14 @@ function mountPresetEditor(parent, io) {
     });
     panel.append(exportQueue);
     const backups=node('details');backups.append(node('summary','설정 내보내기 · 불러오기'));
-    backups.append(node('small','저장한 공통문·프리셋·캐릭터·청크·예약과 크레딧 상한·파일 이름·반복 횟수를 JSON으로 보관합니다. 편집한 항목은 먼저 저장해 주세요.'));
+    backups.append(node('small','저장한 공통문·프리셋·캐릭터·청크·폴더·목록 순서·예약과 크레딧 상한·파일 이름·반복 횟수를 JSON으로 보관합니다. 편집한 항목은 먼저 저장해 주세요.'));
     const settingsStore=createSettingsStore(localStorage,{library:LIBRARY_KEY,options:OPTIONS_KEY,previous:PREVIOUS_SETTINGS_KEY});
     function idleSettings() {
       if (running || starting || settingsBusy || choosingFolder) throw new Error('진행 중인 작업이 끝난 뒤 설정을 불러오거나 내보내 주세요.');
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.3.3',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.4.0',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -1588,7 +1778,7 @@ function mountPresetEditor(parent, io) {
           if (stopRequested) throw new Error('설정 파일 읽기가 중지됐습니다.');
           pendingSettings={data,libraryBefore:localStorage.getItem(LIBRARY_KEY),optionsBefore:localStorage.getItem(OPTIONS_KEY)};
           const library=data.library;
-          preview.append(node('strong',file.name),node('p',`프리셋 ${library.presets.length}개 · 캐릭터 ${library.characters.length}개 · 청크 ${library.scenes.length}개 · 예약 ${library.reservations.length}개`),
+          preview.append(node('strong',file.name),node('p',`프리셋 ${library.presets.length}개 · 캐릭터 ${library.characters.length}개 · 청크 ${library.scenes.length}개 · 폴더 ${library.chunkFolders.length}개 · 예약 ${library.reservations.length}개`),
             node('small','적용하면 현재 저장한 항목과 편집 중인 내용이 교체됩니다. 적용 전 설정은 이 브라우저에 보관합니다. 생성 작업·저장 폴더 권한은 가져오지 않습니다.'),
             node('small',data.options ? `크레딧 상한 ${data.options.maxCredits ?? '제한 없음'} · 반복 ${data.options.repeat}회` : '이전 백업 형식: 현재 크레딧 상한·파일 이름·반복 횟수를 유지합니다.'),applyImport,
             backupButton('불러오기 취소',()=>{clearImport();message='설정 불러오기를 취소했습니다.';render();}));
@@ -1634,7 +1824,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.3.3', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.4.0', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

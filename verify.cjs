@@ -267,6 +267,7 @@ function panelFixture(nativePicker, gm={}) {
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
     getAttribute(key){if(key.startsWith('data-')){const data=key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase());if(data in this.dataset)return this.dataset[data];}return this.attrs[key]??null;}
     append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}}
+    prepend(...children){for(const child of children)child.parentElement=this;this.children.unshift(...children);}
     replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
     after(child){if(!this.parentElement)return;const siblings=this.parentElement.children;child.parentElement=this.parentElement;siblings.splice(siblings.indexOf(this)+1,0,child);}
     remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(child=>child!==this);this.parentElement=null;}
@@ -459,6 +460,19 @@ test('Start stays clickable with missing Firefox settings and explains setup bef
   assert.match(f.message(),/Browser API/);assert.equal(f.siteQueries.length,0);assert.equal(f.generateCalls,0);
   f.press(f.panel.querySelector('[data-choose-folder]'));assert.match(f.message(),/Browser API/);
   assert.equal(f.pickerCalls,0);assert.equal(f.networkCalls,0);
+});
+
+test('generic runtime renders keep unavailable edit controls disabled and restore available controls when idle',async()=>{
+  const f=panelFixture(),available=runtimeField(f,'공통 프롬프트');
+  const unavailable=f.panel.querySelectorAll('button').find(button=>button.getAttribute('aria-label')==='선택 프리셋 위로');
+  assert.ok(unavailable);assert.equal(unavailable.getAttribute('data-unavailable'),'true');
+  unavailable.disabled=false;available.disabled=true;
+  f.press(f.panel.querySelector('[data-start]'));await runtimeFlush();
+  assert.match(f.message(),/Browser API/);
+  assert.equal(unavailable.disabled,true);assert.equal(available.disabled,false);
+  f.press(f.panel.querySelector('[data-choose-folder]'));
+  assert.equal(unavailable.disabled,true);assert.equal(available.disabled,false);
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
 });
 
 test('queue button handles direct pointer release even when no click is delivered; empty prompt shows validation',async()=>{
