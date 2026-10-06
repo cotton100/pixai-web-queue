@@ -250,8 +250,10 @@ function panelFixture(nativePicker, gm={}) {
     constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';}
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
     getAttribute(key){return this.attrs[key]??null;}
-    append(...children){this.children.push(...children);}
-    replaceChildren(...children){this.children=children;}
+    append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}}
+    replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
+    after(child){if(!this.parentElement)return;const siblings=this.parentElement.children;child.parentElement=this.parentElement;siblings.splice(siblings.indexOf(this)+1,0,child);}
+    remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(child=>child!==this);this.parentElement=null;}
     contains(target){return this===target||this.children.some(child=>child.contains(target));}
     querySelectorAll(selector){
       const selectors=selector.split(',').map(s=>s.trim());
@@ -275,6 +277,7 @@ function panelFixture(nativePicker, gm={}) {
   }
   const body=new Element('body'), records=new Map();
   if(gm.queue)records.set('local.pixai-web-queue.v1',JSON.stringify({version:1,jobs:gm.queue}));
+  if(gm.rawQueue)records.set('local.pixai-web-queue.v1',gm.rawQueue);
   const model=new Element('a');model.textContent='Fixture model';model.setAttribute('href','/ko/model/fixture');
   const generate=new Element('button');generate.textContent='생성!7,800Ctrl+⏎작업 제출';generate.click=()=>{generateCalls++;};
   const document={body,readyState:'complete',createElement:tag=>new Element(tag),
@@ -294,7 +297,7 @@ function panelFixture(nativePicker, gm={}) {
     Blob, GM_download:gm.download, GM_info:gm.info};
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
-  return {panel,siteQueries,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
+  return {panel,siteQueries,records,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
     press(button){button.fire('pointerdown');button.fire('pointerup');},
     message:()=>panel.querySelector('[data-message]').textContent};
 }
@@ -313,6 +316,23 @@ test('queue button handles direct pointer release even when no click is delivere
   f.press(add);assert.match(f.message(),/입력 확인/);
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(f.message(),/프롬프트/);assert.equal(f.networkCalls,0);
+  const feedback=f.panel.querySelector('[data-action-message]');
+  assert.equal(feedback.textContent,f.message());
+  assert.equal(add.parentElement.children[add.parentElement.children.indexOf(add)+1],feedback);
+});
+
+test('damaged queue data is preserved while the complete panel still mounts and accepts preset read input',async()=>{
+  const f=panelFixture(null,{rawQueue:'{broken queue'});
+  assert.match(f.message(),/대기열 읽기 실패/);
+  assert.equal(f.records.get('local.pixai-web-queue.v1'),'{broken queue');
+  const read=f.panel.querySelectorAll('button').find(b=>b.textContent==='사이트의 현재 설정 읽기');
+  assert.equal(read.disabled,false);f.press(read);
+  assert.match(f.message(),/읽는 중/);
+  f.press(f.panel.querySelectorAll('button').find(b=>b.textContent==='중지'));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/중지/);
+  assert.equal(f.records.get('local.pixai-web-queue.v1'),'{broken queue');
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
 });
 
 test('supported full UI calls picker once on release and renders cancellation without network',async()=>{
@@ -689,9 +709,10 @@ function fixture(options={}) {
     }
     opened.append(button('확인',{},()=>{if(pending)state.loras.push({...pending});renderRows();close();}));
   }
-  const tab=button('모델',{role:'tab','aria-selected':options.modelTabHidden?'false':'true'},()=>{tab.setAttribute('aria-selected','true');allModel.hidden=false;allLora.hidden=false;});
+  const tab=button('모델',{role:'tab','aria-selected':options.modelTabHidden?'false':'true'},()=>{tab.setAttribute('aria-selected','true');allModel.hidden=false;allLora.hidden=false;modelLink.hidden=false;rows.hidden=false;});
   const allModel=button('전체 모델 보기',{},openModel),allLora=button('전체 LoRA 보기',{},openLora);
   allModel.hidden=!!options.modelTabHidden||!!options.noModelButton;allLora.hidden=!!options.modelTabHidden;
+  modelLink.hidden=rows.hidden=!!options.modelTabHidden;
   main.append(tab,modelLink,rows,allModel,allLora,button('생성! 7,800',{},()=>{state.paidClicks++;}));
   refreshModel();renderRows();
   let negative=null;
@@ -790,8 +811,14 @@ test('negative prompt opens visible advanced controls and uses textarea value se
 });
 test('missing model controls times out before changing settings or submitting',async()=>{
   const f=fixture({noModelButton:true});
+  f.modelLink.hidden=true;
   await assert.rejects(f.adapter.apply(configuration()),/모델 패널.*시간 초과/);
   assert.equal(f.state.mutations,0);assert.equal(f.state.paidClicks,0);assert.equal(f.state.model.id,'1');
+});
+test('readable current settings do not depend on a model picker button or change the site',async()=>{
+  const f=fixture({noModelButton:true});
+  assert.deepEqual(plain(await f.adapter.capture()),configuration());
+  assert.equal(f.state.mutations,0);assert.equal(f.state.paidClicks,0);
 });
 test('failed card search closes its popup and does not submit or falsely accept a model',async()=>{
   const f=fixture({noCards:true});
@@ -937,3 +964,130 @@ test('known refusal before the paid click stays queued; an uncertain click still
   await assert.rejects(processJob(j,io));assert.equal(j.state,'queued');assert.ok(!j.taskId);assert.ok(!calls.includes('poll'));
   const k=job();const other=fixture(k,{submit:async()=>{throw new Error('click response lost')}});await assert.rejects(processJob(k,other.io));assert.equal(k.state,'unknown');
 });
+
+// Preset capture layout and queue-independence regressions.
+(() => {
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const vm=require('node:vm');
+const mainSource=fs.readFileSync(path.join(__dirname,'pixai-web-queue.user.js'),'utf8');
+const verifySource=fs.readFileSync(path.join(__dirname,'verify.cjs'),'utf8');
+const moduleContext={module:{exports:{}}};vm.runInNewContext(mainSource,moduleContext);
+const core=moduleContext.module.exports;
+
+// Reuse the committed fake-DOM fixture without registering its tests.
+// These cases demonstrate code behavior under possible layouts, not the user's live DOM.
+const helperStart=verifySource.indexOf('function selectorParts(selector)');
+const helperEnd=verifySource.indexOf("test('model links retain exact numeric ID/version",helperStart);
+assert.ok(helperStart>=0&&helperEnd>helperStart,'settings fake-DOM fixture not found');
+const helperContext={core};
+vm.runInNewContext(`${verifySource.slice(helperStart,helperEnd)}\nthis.helpers={fixture,Element,Input,configuration,win};`,helperContext);
+const {fixture,Element,configuration,win}=helperContext.helpers;
+const plain=value=>JSON.parse(JSON.stringify(value));
+function visibility(element) {
+  for(let current=element;current;current=current.parentElement)if(current.visibility==='hidden'||current.visibility==='collapse')return current.visibility;
+  return 'visible';
+}
+win.getComputedStyle=element=>({visibility:visibility(element),display:element.hidden?'none':'block',opacity:'1'});
+Element.prototype.checkVisibility=function(){return this.getClientRects().length>0&&visibility(this)==='visible';};
+const append=Element.prototype.append;
+Element.prototype.append=function(...children){const result=append.call(this,...children);const doc=this.ownerDocument||(this.tagName==='DOCUMENT'?this:null);for(const child of children){child.ownerDocument=doc;}return result;};
+Element.prototype.addEventListener=function(type,handler){this.listeners??={};(this.listeners[type]??=[]).push(handler);};
+Element.prototype.after=function(...siblings){
+  if(!this.parentElement)return;
+  const parent=this.parentElement,index=parent.children.indexOf(this);
+  for(const sibling of siblings){sibling.remove();sibling.parentElement=parent;sibling.ownerDocument=this.ownerDocument;}
+  parent.children.splice(index+1,0,...siblings);
+};
+Object.defineProperty(Element.prototype,'isConnected',{get(){let root=this;while(root.parentElement)root=root.parentElement;return root.tagName==='DOCUMENT';}});
+function docSetup(f){f.doc.defaultView=win;f.doc.ownerDocument=f.doc;for(const node of f.doc.querySelectorAll('*'))node.ownerDocument=f.doc;return f;}
+function compareCapture(f,expected=configuration()) {
+  return f.adapter.capture().then(result=>{assert.deepEqual(plain(result),plain(expected));assert.equal(f.state.paidClicks,0);});
+}
+
+test('baseline: a single visible model panel is captured without paid generation',async()=>{
+  const f=docSetup(fixture());await compareCapture(f);
+});
+test('regression: hidden first main must not block a later visible main model panel',async()=>{
+  const f=docSetup(fixture()),hiddenMain=new Element('main');hiddenMain.hidden=true;hiddenMain.ownerDocument=f.doc;
+  hiddenMain.append(new Element('button',{},'전체 모델 보기'));hiddenMain.parentElement=f.doc;f.doc.children.unshift(hiddenMain);
+  await compareCapture(f);
+});
+test('regression: visibility-hidden model menu button must not cause an ambiguous panel timeout',async()=>{
+  const f=docSetup(fixture()),ghost=new Element('button',{},'전체 모델 보기');ghost.visibility='hidden';f.main.append(ghost);
+  assert.ok(ghost.getClientRects().length>0,'visibility:hidden deliberately retains a layout box');
+  await compareCapture(f);
+});
+test('regression: duplicated responsive links with the same exact model/version still identify one model',async()=>{
+  const f=docSetup(fixture());f.main.append(new Element('a',{href:'/ko/model/1/11'},'현재 모델'));
+  await compareCapture(f);
+});
+test('distinct visible model identities remain ambiguous and must never be guessed',async()=>{
+  const f=docSetup(fixture());f.main.append(new Element('a',{href:'/ko/model/2/22'},'다른 모델'));
+  await assert.rejects(f.adapter.capture(),/현재 모델 버전|모델.*확인/);assert.equal(f.state.paidClicks,0);
+});
+test('regression: a visibility-hidden retained LoRA row must not become a duplicate selected LoRA',async()=>{
+  const selected={id:'10',versionId:'101',name:'LoRA',weight:0};
+  const f=docSetup(fixture({state:{loras:[{...selected},{...selected}]}}));f.rows.children[1].visibility='hidden';
+  assert.ok(f.rows.children[1].querySelector('input').getClientRects().length>0);
+  await compareCapture(f,configuration(undefined,[selected]));
+});
+
+function settingsWrapper(storageValue) {
+  const begin=mainSource.indexOf('  async function settingsAction(');
+  const end=mainSource.indexOf('  async function request(',begin);
+  assert.ok(begin>=0&&end>begin,'settingsAction wrapper not found');
+  const ctx={navigator:{locks:{request:async(_name,_options,run)=>run({})}},localStorage:{getItem:()=>storageValue,setItem(){}},recover:core.recover};
+  vm.runInNewContext(`let running=false,starting=false,settingsBusy=false,stopRequested=false,jobs=[];const KEY='test-queue',LOCK='test-lock';function render(){}\n${mainSource.slice(begin,end)}\nthis.run=settingsAction;`,ctx);
+  return ctx.run;
+}
+test('regression: reading current settings must not parse unrelated damaged queue JSON',async()=>{
+  let called=0;const run=settingsWrapper('{damaged queue JSON');
+  const result=await run(async()=>{called++;return 'visible settings';},{readOnly:true});
+  assert.equal(result,'visible settings');assert.equal(called,1);
+});
+test('diagnosis baseline: normal queue JSON does not prevent settings wrapper execution',async()=>{
+  let called=0;const run=settingsWrapper('{"version":1,"jobs":[]}');
+  assert.equal(await run(async()=>{called++;return 'visible settings';},{readOnly:true}),'visible settings');assert.equal(called,1);
+});
+test('applying/default settings wrapper still rejects damaged queue JSON before the action',async()=>{
+  let called=0;const run=settingsWrapper('{damaged queue JSON');
+  await assert.rejects(run(async()=>{called++;return 'settings mutation';}),/JSON|property|format|대기열/);
+  assert.equal(called,0);
+});
+
+function uiButton(action) {
+  const begin=mainSource.indexOf('  function button(text, action)');
+  const end=mainSource.indexOf('  function render()',begin);
+  assert.ok(begin>=0&&end>begin,'runtime button factory not found');
+  const doc=new Element('document'),panel=new Element('aside'),status=new Element('div',{'data-message':''});doc.append(panel);panel.append(status);
+  status.getBoundingClientRect=()=>({top:-260,bottom:-210,left:0,right:300});
+  const ctx={bindFolderActivation:core.bindFolderActivation,panel,node:(tag,text,attrs)=>new Element(tag,attrs,text)};
+  vm.runInNewContext(`let message='';function render(){panel.querySelector('[data-message]').textContent=message;const feedback=panel.querySelector('[data-action-message]');if(feedback)feedback.textContent=message;}\n${mainSource.slice(begin,end)}\nthis.make=button;`,ctx);
+  const button=ctx.make('사이트의 현재 설정 읽기',action);
+  panel.append(button);
+  function click(){for(const handler of button.listeners?.click||[])handler({type:'click',target:button,detail:0,timeStamp:100,isTrusted:true,preventDefault(){},stopImmediatePropagation(){}});}
+  return {button,status,click,panel,feedback:()=>panel.querySelector('[data-action-message]')};
+}
+test('diagnosis: an activated read button records confirmation even if the shared status is scrolled outside view',async()=>{
+  let called=0;const ui=uiButton(()=>{called++;});ui.click();await Promise.resolve();
+  assert.equal(called,1);assert.equal(ui.status.textContent,'입력 확인: 사이트의 현재 설정 읽기');
+  assert.ok(ui.status.getBoundingClientRect().bottom<0);
+  assert.equal(ui.feedback().textContent,ui.status.textContent);
+  assert.equal(ui.panel.children[ui.panel.children.indexOf(ui.button)+1],ui.feedback());
+});
+test('diagnosis: disabled preset read button skips both action and input confirmation',async()=>{
+  let called=0;const ui=uiButton(()=>{called++;});ui.button.disabled=true;ui.click();await Promise.resolve();
+  assert.equal(called,0);assert.equal(ui.status.textContent,'');
+  assert.equal(ui.feedback(),null);
+});
+test('diagnosis: synchronous capture error is recorded in the same shared status',async()=>{
+  const ui=uiButton(()=>{throw new Error('현재 모델 버전 확인 실패');});ui.click();await Promise.resolve();
+  assert.equal(ui.status.textContent,'현재 모델 버전 확인 실패');
+  assert.equal(ui.feedback().textContent,ui.status.textContent);
+  assert.equal(ui.panel.children[ui.panel.children.indexOf(ui.button)+1],ui.feedback());
+});
+
+})();

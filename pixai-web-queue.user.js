@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.2.0
+// @version      0.2.1
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -410,9 +410,18 @@
   }
   // This adapter only uses visible site controls. It never submits or accesses React state.
   function createPixaiSettingsAdapter(doc, io) {
-    const shown = e => !!e && e.getClientRects().length > 0;
+    const shown = e => {
+      if (!e || !e.getClientRects().length) return false;
+      for (let current=e; current; current=current.parentElement) {
+        if (current.hidden || current.inert || current.getAttribute('aria-hidden') === 'true') return false;
+        const style=io.win.getComputedStyle?.(current);
+        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse')) return false;
+      }
+      return true;
+    };
     const list = (scope, selector) => [...scope.querySelectorAll(selector)];
     const buttons = (scope, text) => list(scope,'button').filter(e => shown(e) && e.textContent.trim() === text);
+    const mainButtons = text => list(doc,'main button').filter(e => shown(e) && e.textContent.trim() === text);
     function only(items, label) {
       if (items.length !== 1) throw new Error(`${label}을 하나로 확인할 수 없습니다. PixAI 한국어 새 에디터를 확인해 주세요.`);
       return items[0];
@@ -429,22 +438,28 @@
     async function revealModelPanel() {
       const tabs=list(doc,'main [role="tab"]').filter(e=>shown(e)&&e.textContent.trim()==='모델');
       if (tabs.length === 1 && tabs[0].getAttribute('aria-selected') !== 'true') click(tabs[0]);
-      await waitFor(()=>buttons(doc.querySelector('main') || doc,'전체 모델 보기').length === 1,'모델 패널');
+      await waitFor(()=>modelLinks(loraRows()).length > 0,'모델 패널');
     }
     function loraRows() {
       return list(doc,'main input[type="number"][aria-label="비중"]').filter(shown).map(input=>{
         let row=input.parentElement;
         while (row && !(row.querySelector('a[href*="/model/"]') && row.querySelector('button[aria-label="제거"]'))) row=row.parentElement;
         if (!row || row.tagName === 'MAIN' || row.tagName === 'BODY') throw new Error('선택 LoRA 행을 확인할 수 없습니다.');
-        const link=list(row,'a[href*="/model/"]').find(e=>e.textContent.trim());
+        const link=list(row,'a[href*="/model/"]').find(e=>shown(e)&&e.textContent.trim());
         const model=parseModelLink(link?.getAttribute('href'));
         if (!model) throw new Error('선택 LoRA 버전을 확인할 수 없습니다.');
         return {row,input,...model,name:link.textContent.trim(),weight:Number(input.value)};
       });
     }
-    function read(allowIncompatible = false) {
-      const loras=loraRows();
+    function modelLinks(loras) {
       const links=list(doc,'main a[href*="/model/"]').filter(e=>shown(e)&&e.textContent.trim()&&parseModelLink(e.getAttribute('href'))&&!loras.some(item=>item.row.contains(e)));
+      return [...new Map(links.map(link=>{
+        const model=parseModelLink(link.getAttribute('href'));
+        return [`${model.id}/${model.versionId}`,link];
+      })).values()];
+    }
+    function read(allowIncompatible = false) {
+      const loras=loraRows(), links=modelLinks(loras);
       const link=only(links,'현재 모델 버전');
       const config=validatePresetConfiguration({model:{...parseModelLink(link.getAttribute('href')),name:link.textContent.trim()},loras:loras.map(({id,versionId,name,weight})=>({id,versionId,name,weight}))});
       if (!allowIncompatible && loras.some(item=>item.row.querySelector('[class*="text-danger"]'))) throw new Error('호환되지 않거나 사용할 수 없는 LoRA가 표시돼 있습니다.');
@@ -480,7 +495,7 @@
     async function applyModel(model) {
       const current=read(true).model;
       if (current.id === model.id && current.versionId === model.versionId) return;
-      click(only(buttons(doc.querySelector('main'),'전체 모델 보기'),'전체 모델 보기 버튼'));
+      click(only(mainButtons('전체 모델 보기'),'전체 모델 보기 버튼'));
       const d=await waitFor(dialog,'모델 선택창');
       const selectedName=await selectCard(d,model,'radio');
       await waitFor(()=>buttons(d,'이 모델 사용').length === 1 && (!selectedName || buttons(d,selectedName).length > 0),'모델 상세');
@@ -507,7 +522,7 @@
       }
       for (const target of config.loras) {
         if (!loraRows().some(item=>item.id === target.id)) {
-          click(only(buttons(doc.querySelector('main'),'전체 LoRA 보기'),'전체 LoRA 보기 버튼'));
+          click(only(mainButtons('전체 LoRA 보기'),'전체 LoRA 보기 버튼'));
           const d=await waitFor(dialog,'LoRA 선택창');
           await selectCard(d,target,'checkbox');
           await waitFor(()=>!!d.querySelector(`[id="weight-slider-${target.id}"]`),'LoRA 선택');
@@ -523,8 +538,10 @@
       }
     }
     async function capture() {
+      io.check();
       if (dialog()) throw new Error('열린 사이트 선택창을 먼저 닫아 주세요.');
-      await revealModelPanel(); return read();
+      if (!modelLinks(loraRows()).length) await revealModelPanel();
+      return read();
     }
     async function apply(value) {
       const config=validatePresetConfiguration(value);
@@ -541,7 +558,7 @@
     async function captureNegative() {
       let input=negativeField();
       if (!input) {
-        const advanced=buttons(doc.querySelector('main'),'고급');
+        const advanced=mainButtons('고급');
         if (advanced.length === 1 && advanced[0].getAttribute('aria-expanded') !== 'true') { click(advanced[0]); await io.sleep(200); }
         input=negativeField();
       }
@@ -675,9 +692,10 @@ function mountPresetEditor(parent, io) {
   presetBody.append(presetSelect.wrap,presetName.wrap,
     el('small','PixAI 화면에서 모델·LoRA를 선택한 뒤 읽어오세요. 읽어오기와 설정 확인은 이미지를 생성하지 않습니다.'),
     action('사이트의 현재 설정 읽기',async () => {
+      io.notify('현재 모델·LoRA를 읽는 중…');
       const settings = await io.captureSettings();
       fillPreset({...settings,name:presetName.input.value});
-      io.notify('현재 모델과 LoRA를 읽었습니다. 이름을 붙이고 저장해 주세요.');
+      io.notify(`${settings.model.name || settings.model.id} · LoRA ${settings.loras.length}개를 읽었습니다. 이름을 붙이고 저장해 주세요.`);
     }),modelName.wrap,modelIdentity,loraList,action('LoRA 추가',() => addLora()));
   if (io.applySettings) presetBody.append(action('화면에 설정 적용 · 생성 안 함',async () => {
     await io.applySettings(readPreset()); io.notify('프리셋을 화면에 적용했습니다. 이미지는 생성하지 않았습니다.');
@@ -816,10 +834,10 @@ function mountPresetEditor(parent, io) {
   });
   function readLibrary() { return normalizePresetLibrary(JSON.parse(localStorage.getItem(LIBRARY_KEY) || JSON.stringify(makePresetLibrary()))); }
   function saveLibrary(value) { localStorage.setItem(LIBRARY_KEY,JSON.stringify(normalizePresetLibrary(value))); }
-  async function settingsAction(action) {
+  async function settingsAction(action, {readOnly = false} = {}) {
     if (running || starting || settingsBusy) throw new Error('실행 중인 작업이 끝난 뒤 설정을 편집해 주세요.');
     settingsBusy=true; stopRequested=false; render();
-    try { return await locked(action); } finally {settingsBusy=false;render();}
+    try { return await (readOnly ? action() : locked(action)); } finally {settingsBusy=false;render();}
   }
   function load() {
     const stored = JSON.parse(localStorage.getItem(KEY) || '{"version":1,"jobs":[]}');
@@ -1068,7 +1086,11 @@ function mountPresetEditor(parent, io) {
     const element = node('button', text, {type:'button'});
     bindFolderActivation(element, () => element, () => {
       message = `입력 확인: ${text}`;
-      if (panel) panel.querySelector('[data-message]').textContent = message;
+      if (panel) {
+        panel.querySelector('[data-action-message]')?.remove();
+        element.after(node('div',message,{'data-action-message':''}));
+        panel.querySelector('[data-message]').textContent = message;
+      }
       return action();
     }, error => { message = error.message; render(); });
     return element;
@@ -1076,6 +1098,8 @@ function mountPresetEditor(parent, io) {
   function render() {
     if (!panel) return;
     panel.querySelector('[data-message]').textContent = message;
+    const feedback=panel.querySelector('[data-action-message]');
+    if (feedback) feedback.textContent=message;
     panel.querySelector('[data-folder]').textContent = storage.mode === 'download'
       ? `자동 다운로드 · ${downloadsReady ? '준비 확인 완료' : '준비 확인 필요'} · 브라우저 설정 폴더`
       : (folder ? `저장 폴더: ${folder.name}` : '저장 폴더 미선택');
@@ -1116,14 +1140,15 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.2.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.2.1 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{position:sticky;top:0;background:#211d2b;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
-    panel.append(style, dragHandle, node('small','제목줄을 드래그해서 이동 · 조합별 모델·LoRA를 적용합니다. 해상도·이미지 수 등은 사이트 설정을 확인하세요.'));
+    style.textContent += '#local-pixai-queue [data-drag-handle]{z-index:2}#local-pixai-queue [data-message]{position:sticky;top:34px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
+    panel.append(style, dragHandle, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}), node('small','제목줄을 드래그해서 이동 · 조합별 모델·LoRA를 적용합니다. 해상도·이미지 수 등은 사이트 설정을 확인하세요.'));
     panel.append(node('div','저장 폴더 미선택',{'data-folder':''}));
     const choose = button('저장 폴더 선택', chooseFolder);
     choose.dataset.chooseFolder = '';
     choose.dataset.edit = '';
-    panel.append(choose, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}));
+    panel.append(choose);
     const title = node('input',null,{placeholder:'파일 이름 / 작업 이름', 'data-edit':'', 'aria-label':'대기열 작업 이름'});
     const prompts = node('textarea',null,{placeholder:'프롬프트 입력\n여러 작업은 한 줄 --- 로 구분', 'data-edit':'', 'aria-label':'대기열 프롬프트'});
     const repeat = node('input',null,{type:'number',min:'1',max:'100',value:'1','data-edit':'', 'aria-label':'각 프롬프트 반복 횟수'});
@@ -1149,7 +1174,7 @@ function mountPresetEditor(parent, io) {
     try { presetEditor=mountPresetEditor(panel, {
       load:readLibrary,save:saveLibrary,button,
       notify:text=>{message=text;render();},
-      captureSettings:()=>settingsAction(()=>settings.capture()),
+      captureSettings:()=>settingsAction(()=>settings.capture(),{readOnly:true}),
       applySettings:value=>settingsAction(()=>settings.apply(value)),
       enqueue:value=>locked(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
@@ -1170,7 +1195,8 @@ function mountPresetEditor(parent, io) {
     });
     panel.append(exportQueue);
     document.body.append(panel);
-    load(); render();
+    try { load(); } catch(error) { message=`대기열 읽기 실패: ${error.message}\n프리셋 읽기·편집은 사용할 수 있습니다. 대기열 원본은 유지했습니다.`; }
+    render();
     bindPanelDrag(panel, dragHandle, {
       viewport:() => ({width:window.innerWidth,height:window.innerHeight}),
       load:() => JSON.parse(localStorage.getItem('local.pixai-web-queue.position.v1') || 'null'),
@@ -1187,14 +1213,14 @@ function mountPresetEditor(parent, io) {
     choosingFolder = true;
     const choose = panel.querySelector('[data-choose-folder]');
     choose.disabled = true; choose.textContent = storage.mode === 'download' ? '확인 파일 다운로드 중…' : '폴더 선택 중…';
-    const notify = text => { message = text; panel.querySelector('[data-message]').textContent = text; };
+    const notify = text => { message = text; render(); };
     try {
       if (storage.mode === 'download') {
         downloadsReady = false;
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.2.0', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.2.1', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
