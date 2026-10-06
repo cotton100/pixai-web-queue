@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.5.0
+// @version      0.6.0
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -418,6 +418,46 @@
     if (!library.chunkFolders.some(item => item.id === folderId)) throw new Error('삭제할 청크 폴더가 없습니다.');
     library.chunkFolders = library.chunkFolders.filter(item => item.id !== folderId);
     for (const chunk of library.scenes) if (chunk.folderId === folderId) delete chunk.folderId;
+    return library;
+  }
+  function selectedChunks(library, ids) {
+    if (!Array.isArray(ids) || !ids.length) throw new Error('청크를 하나 이상 선택해 주세요.');
+    const selected=new Set(ids.map(id=>presetIdentifier(id,'선택한 청크')));
+    if (selected.size!==ids.length || ids.some(id=>!library.scenes.some(item=>item.id===id))) throw new Error('선택한 청크가 없거나 중복됐습니다.');
+    return orderedChunks(library).filter(item=>selected.has(item.id));
+  }
+  function moveChunksTo(value, ids, folderId, targetId = null, after = false) {
+    const library=normalizePresetLibrary(value),chunks=selectedChunks(library,ids),selected=new Set(ids);
+    if (typeof folderId!=='string' || (folderId && !library.chunkFolders.some(item=>item.id===folderId))) throw new Error('이동할 청크 폴더가 없습니다.');
+    if (typeof after!=='boolean') throw new Error('청크를 놓을 위치를 확인해 주세요.');
+    const target=targetId===null ? null : library.scenes.find(item=>item.id===presetIdentifier(targetId,'대상 청크'));
+    if (targetId!==null && (!target || (target.folderId || '')!==folderId)) throw new Error('청크를 놓을 대상과 폴더를 확인해 주세요.');
+    if (target && selected.has(target.id)) return library;
+    library.scenes=library.scenes.filter(item=>!selected.has(item.id));
+    for (const chunk of chunks) {if (folderId) chunk.folderId=folderId;else delete chunk.folderId;}
+    let position=library.scenes.length;
+    if (target) position=library.scenes.findIndex(item=>item.id===target.id)+(after ? 1 : 0);
+    else {
+      const last=library.scenes.map((item,itemIndex)=>(item.folderId || '')===folderId ? itemIndex : -1).filter(itemIndex=>itemIndex>=0).at(-1);
+      if (last!==undefined) position=last+1;
+    }
+    library.scenes.splice(position,0,...chunks);return library;
+  }
+  function removeChunks(value,ids) {
+    const library=normalizePresetLibrary(value);selectedChunks(library,ids);
+    const selected=new Set(ids);library.scenes=library.scenes.filter(item=>!selected.has(item.id));return library;
+  }
+  function duplicateChunks(value,ids,idFactory=()=>crypto.randomUUID()) {
+    const library=normalizePresetLibrary(value),chunks=selectedChunks(library,ids),copies=new Map();
+    const names=new Set(library.scenes.map(item=>item.name)),identities=new Set(library.scenes.map(item=>item.id));
+    for (const chunk of chunks) {
+      const id=presetIdentifier(idFactory(),'복제 청크');
+      if (identities.has(id)) throw new Error('복제 청크 ID가 중복됐습니다.');identities.add(id);
+      let name=`${chunk.name} (복사본)`,number=2;
+      while (names.has(name)) name=`${chunk.name} (복사본 ${number++})`;
+      names.add(name);copies.set(chunk.id,{...chunk,id,name});
+    }
+    library.scenes=library.scenes.flatMap(chunk=>copies.has(chunk.id) ? [chunk,copies.get(chunk.id)] : [chunk]);
     return library;
   }
   function settingsBackupKeys(value, label, required, allowed = required) {
@@ -1162,27 +1202,133 @@ function mountPresetEditor(parent, io) {
       const count=el('small',null,{'aria-label':'청크 목록 개수','role':'status'});
       const list=el('div',null,{class:'pq-chunk-list','aria-label':'저장한 청크 목록'});
       const closed=new Set();
+      let draggingChunkId=null,draggingChunkIds=[],managedChunkIds=new Set(),dropBusy=false;
+      const management=el('div',null,{class:'pq-chunk-management','aria-label':'선택 청크 관리',title:'체크한 청크에 이동·복제·삭제를 함께 적용합니다.'});
+      const selectionSummary=el('small',null,{role:'status','aria-label':'관리 선택 청크 요약'});
+      const moveFolder=field('이동할 청크 폴더','select');
+      moveFolder.wrap.replaceChildren(moveFolder.input);moveFolder.input.title='이동할 청크 폴더';
+      const bulkActions=el('div',null,{class:'pq-actions'});
+      const duplicate=action('선택 복제',async()=>{
+        const before=new Set(library.scenes.map(item=>item.id)),next=duplicateChunks(library,[...managedChunkIds]);
+        await commit(next,`청크 ${managedChunkIds.size}개를 복제했습니다. 복사본을 선택했습니다.`);
+        managedChunkIds=new Set(library.scenes.filter(item=>!before.has(item.id)).map(item=>item.id));renderManager();
+      });
+      const removeSelected=action('선택 삭제',async()=>{
+        const count=managedChunkIds.size,editedRemoved=managedChunkIds.has(select.input.value);
+        await commit(removeChunks(library,[...managedChunkIds]),`선택한 청크 ${count}개를 삭제했습니다. 삭제된 청크를 참조하는 예약은 다시 구성해 주세요.`);
+        if (editedRemoved) fill(null);
+      });
+      const clearSelection=action('체크 해제',()=>{managedChunkIds.clear();renderManager();});
+      bulkActions.append(duplicate,removeSelected,clearSelection);
+      const moveRow=el('div',null,{class:'pq-bulk-move'});
+      const moveSelected=action('선택 이동',()=>moveChunks([...managedChunkIds],{folderId:moveFolder.input.value}));
+      for (const control of [duplicate,removeSelected,clearSelection,moveSelected]) control.dataset.headerFeedback='';
+      moveRow.append(moveFolder.wrap,moveSelected);management.append(selectionSummary,bulkActions,moveRow);management.hidden=true;
+      const dragType='application/x-pixai-queue-chunk';
+      function clearDropFeedback() {
+        for (const element of root.querySelectorAll('[data-drop-position]')) element.dataset.dropPosition='';
+        for (const element of root.querySelectorAll('[data-drop-active]')) element.dataset.dropActive='false';
+      }
+      function endDrag() {draggingChunkId=null;draggingChunkIds=[];clearDropFeedback();for (const element of root.querySelectorAll('[data-chunk-dragging]')) element.dataset.chunkDragging='false';}
+      function updateSelectionSummary() {
+        const visible=new Set(filterChunks(search.input.value,filter.input.value).filter(item=>!closed.has(item.folderId || '')).map(item=>item.id));
+        const hidden=[...managedChunkIds].filter(id=>!visible.has(id)).length;
+        selectionSummary.textContent=`${managedChunkIds.size}개 체크${hidden ? ` · 목록 밖 ${hidden}개 포함` : ''}`;
+      }
+      function focusChunk(id,folderId) {
+        const handle=[...list.querySelectorAll('[data-drag-chunk]')].find(element=>element.dataset.dragChunk===id);
+        const destination=[...folderButtons.querySelectorAll('[data-drop-folder]')].find(element=>element.dataset.dropFolder===folderId);
+        (handle || destination)?.focus({preventScroll:true});handle?.closest?.('.pq-manager-row')?.scrollIntoView?.({block:'nearest',inline:'nearest'});
+      }
+      async function moveChunks(ids,destination,focusId=ids[0]) {
+        if (dropBusy || io.isBusy?.()) return;
+        dropBusy=true;
+        try {
+          const edited=library.scenes.find(item=>item.id===select.input.value),oldFolder=edited?.folderId || '';
+          const originals=selectedChunks(library,ids),next=moveChunksTo(library,ids,destination.folderId,destination.targetId ?? null,!!destination.after);
+          if (library.scenes.every((item,index)=>item.id===next.scenes[index]?.id && item.folderId===next.scenes[index]?.folderId)) return;
+          const editedId=select.input.value,updateFolder=ids.includes(editedId) && folder.input.value===oldFolder;
+          const folderName=library.chunkFolders.find(item=>item.id===destination.folderId)?.name || '미분류';
+          await commit(next,`${originals.length===1 ? originals[0].name : `청크 ${originals.length}개`} → ${folderName} · 위치를 저장했습니다. 기존 예약 순서는 유지됩니다.`);
+          if (updateFolder && select.input.value===editedId && folder.input.value===oldFolder) folder.input.value=destination.folderId;
+          focusChunk(focusId,destination.folderId);
+        } catch(error) {io.notify(`청크 이동 실패: ${error.message}`);}
+        finally {dropBusy=false;clearDropFeedback();}
+      }
+      function acceptsDrag(event) {return event.isTrusted!==false && !dropBusy && !io.isBusy?.() && draggingChunkId && draggingChunkIds.every(id=>library.scenes.some(item=>item.id===id));}
+      function dropTarget(element,destination) {
+        element.addEventListener('dragover',event=>{
+          if (!acceptsDrag(event)) return;
+          const target=destination(event);if (!target || draggingChunkIds.includes(target.targetId)) return;
+          event.preventDefault();event.stopPropagation();
+          if (event.dataTransfer) event.dataTransfer.dropEffect='move';
+          clearDropFeedback();
+          if (target.targetId) element.dataset.dropPosition=target.after ? 'after' : 'before';else element.dataset.dropActive='true';
+        });
+        element.addEventListener('dragleave',event=>{
+          if (event.relatedTarget && element.contains(event.relatedTarget)) return;
+          element.dataset.dropPosition='';element.dataset.dropActive='false';
+        });
+        element.addEventListener('drop',async event=>{
+          if (!acceptsDrag(event)) return;
+          const id=draggingChunkId,ids=[...draggingChunkIds],target=destination(event);
+          if (!target) return;
+          event.preventDefault();event.stopPropagation();
+          try {
+            if (event.dataTransfer?.getData(dragType)!==JSON.stringify(ids)) return;
+            endDrag();await moveChunks(ids,target,id);
+          } catch(error) {io.notify(`청크 이동 실패: ${error.message}`);}
+          finally {endDrag();}
+        });
+      }
       renderManager=()=>{
+        managedChunkIds=new Set(library.scenes.filter(item=>managedChunkIds.has(item.id)).map(item=>item.id));
         folderButtons.replaceChildren();
         const folders=[{id:'',name:'전체',count:library.scenes.length},{id:'unfiled',name:'미분류',count:library.scenes.filter(item=>!item.folderId).length},...library.chunkFolders.map(item=>({id:`folder:${item.id}`,name:item.name,count:library.scenes.filter(chunk=>chunk.folderId===item.id).length}))];
         for (const item of folders) {
           const control=el('button',`${item.name} · ${item.count}`,{type:'button','aria-label':`폴더 보기: ${item.name}`,'aria-pressed':String(filter.input.value===item.id)});
+          if (item.id) {control.dataset.dropFolder=item.id==='unfiled' ? '' : item.id.slice(7);dropTarget(control,()=>({folderId:control.dataset.dropFolder}));}
           control.addEventListener('click',()=>{filter.input.value=item.id;renderManager();});folderButtons.append(control);
         }
         const visible=filterChunks(search.input.value,filter.input.value);list.replaceChildren();
-        count.textContent=`검색 결과 ${visible.length} / 전체 ${library.scenes.length}개 · 폴더 안에서 위·아래로 정렬`;
+        updateSelectionSummary();
+        management.hidden=!managedChunkIds.size;
+        selectOptions(moveFolder.input,library.chunkFolders,'미분류',moveFolder.input.value);
+        for (const control of [duplicate,removeSelected,clearSelection,moveSelected]) available(control,managedChunkIds.size>0);
+        count.textContent=`검색 결과 ${visible.length} / 전체 ${library.scenes.length}개 · ⠿ 이동`;count.title='청크 옆 ⠿ 손잡이를 드래그해 순서를 바꾸거나 폴더로 옮깁니다.';
         if (!visible.length) list.append(el('small',library.scenes.length ? '검색에 맞는 청크가 없습니다. 검색어나 폴더 필터를 바꿔 주세요.' : '아래 이름과 프롬프트를 입력해 첫 청크를 저장하세요.',{class:'pq-empty'}));
         for (const group of chunkGroups()) {
           const chunks=visible.filter(item=>(item.folderId || '')===group.id);
           if (!chunks.length) continue;
           const details=el('details',null,{class:'pq-folder-group','data-chunk-folder':group.id});details.open=!closed.has(group.id);
-          details.append(el('summary',`${group.name} · ${chunks.length} / ${library.scenes.filter(item=>(item.folderId || '')===group.id).length}개`));
-          details.addEventListener('toggle',()=>{if (details.open) closed.delete(group.id);else closed.add(group.id);});
+          const summary=el('summary',`${group.name} · ${chunks.length} / ${library.scenes.filter(item=>(item.folderId || '')===group.id).length}개`);
+          summary.dataset.dropFolder=group.id;dropTarget(summary,()=>({folderId:group.id}));details.append(summary);
+          details.addEventListener('toggle',()=>{if (details.open) closed.delete(group.id);else closed.add(group.id);updateSelectionSummary();});
           for (const chunk of chunks) {
-            const row=el('div',null,{class:'pq-manager-row','data-selected':String(select.input.value===chunk.id)});
+            const row=el('div',null,{class:'pq-manager-row','data-selected':String(select.input.value===chunk.id),'data-managed':String(managedChunkIds.has(chunk.id)),'data-chunk-id':chunk.id});
+            const checkbox=el('input',null,{type:'checkbox','data-edit':'','aria-label':`청크 관리 선택: ${chunk.name}`});checkbox.checked=managedChunkIds.has(chunk.id);checkbox.disabled=!!io.isBusy?.();
+            checkbox.addEventListener('change',()=>{if (io.isBusy?.() || dropBusy) {checkbox.checked=managedChunkIds.has(chunk.id);return;}if (checkbox.checked) managedChunkIds.add(chunk.id);else managedChunkIds.delete(chunk.id);renderManager();const current=[...list.querySelectorAll('input')].find(element=>element.getAttribute('aria-label')===`청크 관리 선택: ${chunk.name}`);current?.focus({preventScroll:true});current?.closest?.('.pq-manager-row')?.scrollIntoView?.({block:'nearest',inline:'nearest'});});
+            const handle=el('button','⠿',{type:'button',class:'pq-drag-handle',draggable:'true','data-edit':'','data-drag-chunk':chunk.id,'aria-label':`청크 이동: ${chunk.name}`,title:'드래그해서 순서·폴더 이동 · 키보드 ↑↓로 순서 변경'});
+            handle.disabled=!!io.isBusy?.();
+            handle.addEventListener('dragstart',event=>{
+              if (event.isTrusted===false || dropBusy || io.isBusy?.() || !event.dataTransfer) {event.preventDefault();return;}
+              try {
+                const ids=managedChunkIds.has(chunk.id) ? selectedChunks(library,[...managedChunkIds]).map(item=>item.id) : [chunk.id];
+                event.dataTransfer.setData(dragType,JSON.stringify(ids));event.dataTransfer.setData('text/plain',ids.join(', '));event.dataTransfer.effectAllowed='move';
+                event.dataTransfer.setDragImage?.(row,12,12);draggingChunkId=chunk.id;draggingChunkIds=ids;row.dataset.chunkDragging='true';
+              } catch {event.preventDefault();endDrag();}
+            });
+            handle.addEventListener('dragend',endDrag);
+            handle.addEventListener('keydown',async event=>{
+              if (event.isTrusted===false || !['ArrowUp','ArrowDown'].includes(event.key) || dropBusy || io.isBusy?.()) return;
+              event.preventDefault();
+              const items=library.scenes.filter(item=>item.folderId===chunk.folderId),index=items.findIndex(item=>item.id===chunk.id),after=event.key==='ArrowDown',target=items[index+(after ? 1 : -1)];
+              if (target) await moveChunks([chunk.id],{folderId:chunk.folderId || '',targetId:target.id,after});
+            });
+            dropTarget(row,event=>({folderId:chunk.folderId || '',targetId:chunk.id,after:event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2}));
             const edit=action(chunk.name,()=>{select.input.value=chunk.id;fill(chunk);setMode('edit');name.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();});edit.className='pq-name-button';edit.dataset.viewOnly='';
             edit.setAttribute('aria-label',`청크 편집: ${chunk.name}`);
-            const header=el('div',null,{class:'pq-chunk-row-head'});header.append(edit,orderControls('scenes',()=>chunk.id,`청크 ${chunk.name}`,false,true));
+            const header=el('div',null,{class:'pq-chunk-row-head'});header.append(checkbox,handle,edit,orderControls('scenes',()=>chunk.id,`청크 ${chunk.name}`,false,true));
             row.append(header,el('small',chunk.prompt || `네거티브: ${chunk.negativePrompt}`));details.append(row);
           }
           list.append(details);
@@ -1194,9 +1340,9 @@ function mountPresetEditor(parent, io) {
         selectOptions(managedFolder.input,library.chunkFolders,'새 폴더',managedFolder.input.value);
         folderFilterOptions(filter.input);renderManager();
       };
-      resetView=()=>{search.input.value='';filter.input.value='';closed.clear();folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';};
+      resetView=()=>{endDrag();managedChunkIds.clear();search.input.value='';filter.input.value='';closed.clear();folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';};
       filter.wrap.hidden=true;rail.append(folderTools,filter.wrap);
-      browse.append(search.wrap,count,list);
+      browse.append(search.wrap,count,list,management);
     } else {
       const search=field('캐릭터 검색','input',{type:'search',placeholder:'이름·프롬프트 검색'}),list=el('div',null,{class:'pq-saved-list','aria-label':'저장한 캐릭터 목록'});
       renderManager=()=>{
@@ -1361,7 +1507,7 @@ function mountPresetEditor(parent, io) {
   };
 }
 
-  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -1711,7 +1857,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.5.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.6.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #dbc0f4;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#c4a6df;background:#524064}#local-pixai-queue [data-primary]{background:#b799d4;color:#1f1529;border-color:#b799d4;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#d0b1ed;color:#1f1529}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#211d2b}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
@@ -1819,7 +1965,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.5.0',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.6.0',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -1931,6 +2077,20 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-presets .pq-manager-row{border-top:0;border-bottom:1px solid #4c4355;padding:10px 8px}
 #local-pixai-queue .pq-presets .pq-manager-row small{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-height:42px;font-size:13px}
 #local-pixai-queue .pq-presets .pq-chunk-row-head .pq-name-button{font-size:14px}
+#local-pixai-queue .pq-presets .pq-chunk-row-head input[type="checkbox"]{width:15px;height:15px;flex:none;margin:0;padding:0;accent-color:#b799d4}
+#local-pixai-queue .pq-presets .pq-chunk-row-head .pq-drag-handle{flex:none;width:20px;min-height:28px;margin:0;padding:0;border:0;background:transparent;font-size:19px;cursor:grab;color:#c7b3df}
+#local-pixai-queue .pq-presets .pq-drag-handle:active{cursor:grabbing;transform:none}
+#local-pixai-queue .pq-presets .pq-manager-row[data-managed="true"]{background:#30263d}
+#local-pixai-queue .pq-presets .pq-manager-row[data-chunk-dragging="true"]{opacity:.5}
+#local-pixai-queue .pq-presets .pq-manager-row[data-drop-position="before"]{box-shadow:inset 0 3px 0 #dbc0f4}
+#local-pixai-queue .pq-presets .pq-manager-row[data-drop-position="after"]{box-shadow:inset 0 -3px 0 #dbc0f4}
+#local-pixai-queue .pq-presets [data-drop-active="true"]{outline:2px dashed #dbc0f4;outline-offset:-3px;background:#524064}
+#local-pixai-queue .pq-chunk-management{flex:none;padding:8px;border:1px solid #756488;border-radius:8px;background:#30263d;margin:4px 0}
+#local-pixai-queue .pq-presets .pq-chunk-management .pq-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin:5px 0}
+#local-pixai-queue .pq-presets .pq-chunk-management .pq-actions button{padding:6px 3px;white-space:nowrap}
+#local-pixai-queue .pq-bulk-move{display:flex;gap:6px;align-items:flex-end}
+#local-pixai-queue .pq-bulk-move label{flex:1;min-width:0;margin:0}
+#local-pixai-queue .pq-bulk-move button{flex:none;margin:0}
 #local-pixai-queue .pq-saved-card{width:100%;display:block;text-align:left;padding:12px;margin:0 0 6px;background:transparent;border:1px solid transparent;font-weight:600;overflow-wrap:anywhere}
 #local-pixai-queue .pq-saved-card small{font-weight:400;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:13px}
 #local-pixai-queue .pq-saved-card[aria-pressed="true"]{background:#413250;border-color:#8c72a7}
@@ -2004,7 +2164,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.5.0', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.6.0', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

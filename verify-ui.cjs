@@ -20,6 +20,7 @@ class Element {
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(child=>child!==this);this.parentElement=null;}
   contains(target){return this===target||this.children.some(child=>child.contains(target));}
   focus(){globalThis.document.activeElement=this;}
+  getBoundingClientRect(){return {top:100,height:64};}
   addEventListener(type,listener){(this.listeners[type]??=[]).push(listener);}
   async emit(type,extra={}){for(const listener of this.listeners[type]||[])await listener({type,target:this,isTrusted:true,preventDefault(){},stopPropagation(){},...extra});}
   matches(selector){
@@ -71,6 +72,82 @@ function fixture(t,initial=seed()) {
     setCapture:value=>{captured=copy(value);},setSaveFailure:value=>{saveFailure=value;},
     setBusy:value=>{busy=value;for(const element of all().filter(item=>Object.hasOwn(item.dataset,'edit')))element.disabled=busy||element.dataset.unavailable==='true';}};
 }
+
+function transfer() {
+  const values=new Map();return {setData:(type,value)=>values.set(type,value),getData:type=>values.get(type)||'',setDragImage(){},effectAllowed:'',dropEffect:''};
+}
+function managedRow(f,id){const row=f.ui.root.querySelectorAll('[data-chunk-id]').find(item=>item.dataset.chunkId===id);assert(row,`Missing managed row ${id}`);return row;}
+async function dragChunk(f,name,target,after=false) {
+  const dataTransfer=transfer(),handle=f.field(`청크 이동: ${name}`);
+  await handle.emit('dragstart',{dataTransfer});await target.emit('dragover',{dataTransfer,clientY:after?160:104});
+  await target.emit('drop',{dataTransfer,clientY:after?160:104});await handle.emit('dragend');
+}
+async function manage(f,name,checked=true){const control=f.field(`청크 관리 선택: ${name}`);control.checked=checked;await control.emit('change');}
+
+test('native chunk drag reorders rows and updates future composition without erasing edited drafts or old reservations',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');
+  await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved smiling';
+  await dragChunk(f,'행동',managedRow(f,'s1'));
+  assert.deepEqual(f.library().scenes.map(item=>item.id),['s2','s1']);assert.match(f.preview(),/waving, smiling/);
+  assert.deepEqual(f.library().reservations[0].sceneIds,['s1','s2']);assert.equal(f.field('청크 프롬프트').value,'unsaved smiling');
+  assert.equal(f.field('청크 선택: 행동').checked,true);assert.equal(document.activeElement,f.field('청크 이동: 행동'));
+});
+
+test('checked chunks drag together into another folder in display order, including hidden selections, and keep editor drafts',async t=>{
+  const initial=seed();initial.chunkFolders=[{id:'empty',name:'빈 폴더'}];const f=fixture(t,initial);
+  await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='draft kept';await manage(f,'행동');await manage(f,'표정');
+  f.field('청크 검색').value='smiling';await f.field('청크 검색').emit('input');assert.match(f.field('관리 선택 청크 요약').textContent,/2개 체크 · 목록 밖 1개 포함/);
+  await dragChunk(f,'표정',f.field('폴더 보기: 빈 폴더'));
+  assert.deepEqual(f.library().scenes.map(item=>item.id),['s1','s2']);assert(f.library().scenes.every(item=>item.folderId==='empty'));
+  assert.equal(f.field('청크 폴더').value,'empty');assert.equal(f.field('청크 프롬프트').value,'draft kept');
+  assert.equal(f.field('청크 관리 선택: 표정').checked,true);assert.match(f.field('관리 선택 청크 요약').textContent,/2개 체크/);
+});
+
+test('dragging an unchecked chunk leaves the checked group in place; cancel, foreign drop and selected-target drop do not write',async t=>{
+  const f=fixture(t);await manage(f,'표정');const original=f.library(),before=f.saves.length;
+  const dataTransfer=transfer(),handle=f.field('청크 이동: 행동');await handle.emit('dragstart',{dataTransfer});await managedRow(f,'s1').emit('dragover',{dataTransfer,clientY:104});
+  assert.equal(managedRow(f,'s1').dataset.dropPosition,'before');await handle.emit('dragend');
+  assert.equal(managedRow(f,'s1').dataset.dropPosition,'');assert.equal(f.saves.length,before);
+  await managedRow(f,'s1').emit('drop',{dataTransfer:transfer(),clientY:104});assert.equal(f.saves.length,before);
+  await dragChunk(f,'표정',managedRow(f,'s1'));assert.equal(f.saves.length,before);
+  assert.deepEqual(f.library(),original);await dragChunk(f,'행동',managedRow(f,'s1'));
+  assert.deepEqual(f.library().scenes.map(item=>item.id),['s2','s1']);assert.equal(f.field('청크 관리 선택: 표정').checked,true);assert.equal(f.field('청크 관리 선택: 행동').checked,false);
+});
+
+test('drag save failure leaves folder, order, selections and drafts intact; becoming busy or untrusted during drag cannot save',async t=>{
+  const initial=seed();initial.chunkFolders=[{id:'empty',name:'빈 폴더'}];const f=fixture(t,initial);
+  await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='keep on failure';await manage(f,'표정');const original=f.library();
+  f.setSaveFailure('Storage full');await dragChunk(f,'표정',f.field('폴더 보기: 빈 폴더'));
+  assert.deepEqual(f.library(),original);assert.equal(f.field('청크 폴더').value,'');assert.equal(f.field('청크 프롬프트').value,'keep on failure');assert.match(f.messages.at(-1),/이동 실패.*Storage full/);
+  f.setSaveFailure(null);const dataTransfer=transfer(),handle=f.field('청크 이동: 표정');await handle.emit('dragstart',{dataTransfer});f.setBusy(true);
+  await f.field('폴더 보기: 빈 폴더').emit('drop',{dataTransfer});await handle.emit('dragend');assert.deepEqual(f.library(),original);assert.equal(f.saves.length,0);
+  f.setBusy(false);await handle.emit('dragstart',{dataTransfer,isTrusted:false});await f.field('폴더 보기: 빈 폴더').emit('drop',{dataTransfer});assert.equal(f.saves.length,0);
+});
+
+test('bulk move preserves a separately edited folder draft and keyboard handle movement remains available',async t=>{
+  const initial=seed();initial.chunkFolders=[{id:'one',name:'첫 폴더'},{id:'two',name:'둘째 폴더'}];const f=fixture(t,initial);
+  await f.select('저장한 청크','s1');f.field('청크 폴더').value='two';await manage(f,'표정');await f.select('이동할 청크 폴더','one');await f.press('선택 이동');
+  assert.equal(f.library().scenes.find(item=>item.id==='s1').folderId,'one');assert.equal(f.field('청크 폴더').value,'two');
+  await manage(f,'행동');await f.select('이동할 청크 폴더','');await f.press('선택 이동');
+  await f.field('청크 이동: 표정').emit('keydown',{key:'ArrowDown'});assert.deepEqual(f.library().scenes.map(item=>item.id),['s2','s1']);
+});
+
+test('bulk copies select new identities and retain generation selection; deletion prunes management and flags saved reservations',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.press('이 조합 예약 추가');await manage(f,'행동');await manage(f,'표정');
+  await f.press('선택 복제');assert.equal(f.library().scenes.length,4);assert.equal(f.field('청크 선택: 표정').checked,true);assert.equal(f.field('청크 선택: 표정 (복사본)').checked,false);
+  assert.equal(f.field('청크 관리 선택: 표정').checked,false);assert.equal(f.field('청크 관리 선택: 표정 (복사본)').checked,true);assert.equal(f.field('청크 관리 선택: 행동 (복사본)').checked,true);
+  await f.press('선택 삭제');assert.equal(f.library().scenes.length,2);assert.deepEqual(f.library().reservations[0].sceneIds,['s1']);
+  await f.select('저장한 청크','s1');await manage(f,'표정');await f.press('선택 삭제');assert.equal(f.field('청크 이름').value,'');assert.equal(f.fields('청크 선택: 표정').length,0);
+  assert(f.all().some(element=>element.className==='pq-reservation'&&element.textContent.includes('(삭제된 청크)')));
+  await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,0);
+});
+
+test('bulk storage failure and import refresh never discard originals or retain old management checks',async t=>{
+  const initial=seed();initial.chunkFolders=[{id:'dest',name:'대상 폴더'}];const f=fixture(t,initial);await manage(f,'표정');await f.select('이동할 청크 폴더','dest');const before=f.library();f.setSaveFailure('Write failed');
+  for(const action of ['선택 삭제','선택 복제','선택 이동']) {await f.press(action);assert.deepEqual(f.library(),before);assert.equal(f.field('청크 관리 선택: 표정').checked,true);}
+  f.setBusy(true);assert.equal(f.button('선택 삭제').disabled,true);assert.equal(f.field('청크 이동: 표정').disabled,true);
+  f.setBusy(false);f.setSaveFailure(null);f.ui.reload();assert.equal(f.field('청크 관리 선택: 표정').checked,false);assert.equal(f.field('관리 선택 청크 요약').textContent.startsWith('0개'),true);
+});
 
 test('workbench tabs keep one visible screen and retain every unsaved draft and checked chunk',async t=>{
   const f=fixture(t),tabs=f.all().filter(item=>item.getAttribute('role')==='tab');

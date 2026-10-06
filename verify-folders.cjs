@@ -5,7 +5,7 @@ const path=require('node:path');
 const vm=require('node:vm');
 const sandbox={module:{exports:{}},TextEncoder};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname,'pixai-web-queue.user.js'),'utf8'),sandbox);
-const {makePresetLibrary,normalizePresetLibrary,orderedChunks,moveLibraryItem,removeChunkFolder,
+const {makePresetLibrary,normalizePresetLibrary,orderedChunks,moveLibraryItem,moveChunksTo,removeChunks,duplicateChunks,removeChunkFolder,
   expandPresetReservations,makeSettingsBackup,parseSettingsBackup}=sandbox.module.exports;
 const plain=value=>JSON.parse(JSON.stringify(value));
 const ids=items=>plain(items.map(item=>item.id));
@@ -34,6 +34,58 @@ function expand(library) {let n=0;return expandPresetReservations(library,{idFac
 function parse(library) {return parseSettingsBackup(JSON.stringify(library));}
 const options={maxCredits:7800,filePrefix:'assets',repeat:1};
 const meta={appVersion:'0.4.0',exportedAt:'2026-10-07T02:03:04.000Z'};
+
+test('drag placement uses full stored order, moves before or after a target, and leaves selected-target drops unchanged',()=>{
+  const library=frozen(fixture()),original=plain(library);
+  assert.deepEqual(ids(orderedChunks(moveChunksTo(library,['a2'],'fA','a1'))),['u1','u2','b1','b2','a2','a1']);
+  assert.deepEqual(ids(orderedChunks(moveChunksTo(library,['a1'],'fA','a2',true))),['u1','u2','b1','b2','a2','a1']);
+  assert.deepEqual(plain(moveChunksTo(library,['a1'],'fA','a1',true)),original);
+  assert.deepEqual(plain(library),original);
+});
+
+test('multi-chunk folder drops follow library display order rather than click order and append to empty folders or unfiled',()=>{
+  const library=fixture();library.chunkFolders.push({id:'empty',name:'Empty'});
+  const moved=moveChunksTo(frozen(library),['a2','u1','a1'],'fB','b2');
+  assert.deepEqual(ids(orderedChunks(moved)),['u2','b1','u1','a1','a2','b2']);
+  assert(moved.scenes.filter(item=>['a2','u1','a1'].includes(item.id)).every(item=>item.folderId==='fB'));
+  const empty=moveChunksTo(library,['a2','a1'],'empty');assert.deepEqual(ids(empty.scenes.filter(item=>item.folderId==='empty')),['a1','a2']);
+  const unfiled=moveChunksTo(library,['a2','a1'],'');assert.deepEqual(ids(orderedChunks(unfiled)),['u1','u2','a1','a2','b1','b2']);
+  assert(unfiled.scenes.filter(item=>item.id.startsWith('a')).every(item=>!Object.hasOwn(item,'folderId')));
+  assert.deepEqual(plain(moved.reservations),library.reservations);
+});
+
+test('dragging changes future ordering while existing reservation prompt order and prior job snapshots remain exact',()=>{
+  const library=fixture(),jobs=expand(library),before=plain(jobs);
+  const moved=moveChunksTo(frozen(library),['b1','a1'],'fA','a2',true),next=expand(moved);
+  assert.deepEqual(ids(next[0].composition.chunks),['b1','u1','a1']);assert.equal(next[0].prompt,jobs[0].prompt);assert.equal(next[0].negativePrompt,jobs[0].negativePrompt);
+  assert.deepEqual(plain(jobs),before);assert.deepEqual(plain(moved.reservations),library.reservations);
+  assert.deepEqual(plain(parse(moved).library),plain(moved));
+});
+
+test('bulk deletion keeps other chunks and reservation references so missing selections fail instead of silently changing a prompt',()=>{
+  const library=frozen(fixture()),original=plain(library),deleted=removeChunks(library,['a1','b1']);
+  assert.deepEqual(ids(deleted.scenes),['u1','a2','u2','b2']);assert.deepEqual(plain(deleted.reservations),original.reservations);
+  assert.throws(()=>expand(deleted),/청크|존재|없/);assert.deepEqual(plain(library),original);
+});
+
+test('bulk duplication preserves exact prompts and folders, inserts copies beside originals, and generates unique readable names',()=>{
+  const library=fixture();library.scenes.push({id:'old-copy',name:'Smile (복사본)',prompt:'unrelated',negativePrompt:''});
+  let n=0;const original=plain(library),result=duplicateChunks(frozen(library),['a2','a1'],()=>`copy-${++n}`);
+  assert.deepEqual(ids(result.scenes),['a1','copy-1','u1','b1','a2','copy-2','u2','b2','old-copy']);
+  const first=result.scenes.find(item=>item.id==='copy-1'),second=result.scenes.find(item=>item.id==='copy-2');
+  assert.equal(first.name,'Smile (복사본 2)');assert.equal(second.name,'Wave (복사본)');
+  assert.equal(first.prompt,'smile, common');assert.equal(first.negativePrompt,'sad');assert.equal(first.folderId,'fA');
+  assert.deepEqual(plain(result.reservations),original.reservations);assert.deepEqual(plain(library),original);
+  assert.deepEqual(plain(parse(result).library),plain(result));
+});
+
+test('bulk helpers reject stale, duplicate, invalid targets and clone identity collisions without changing originals',()=>{
+  const library=frozen(fixture()),original=plain(library);
+  for(const ids of [[],['missing'],['a1','a1'],[null],null])for(const helper of [removeChunks,duplicateChunks])assert.throws(()=>helper(library,ids),/청크|ID|문자열/);
+  for(const [folder,target,after] of [['missing',null,false],['fA','missing',false],['fB','a2',false],['fA','a2','after']])assert.throws(()=>moveChunksTo(library,['a1'],folder,target,after),/폴더|대상|위치/);
+  assert.throws(()=>duplicateChunks(library,['a1'],()=> 'b1'),/중복/);
+  assert.throws(()=>duplicateChunks(library,['a1','a2'],()=> 'same-copy'),/중복/);assert.deepEqual(plain(library),original);
+});
 
 test('old libraries migrate missing folders to a fresh empty list without changing legacy chunk selection',()=>{
   const old=fixture();delete old.chunkFolders;for(const chunk of old.scenes)delete chunk.folderId;
