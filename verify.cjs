@@ -247,7 +247,7 @@ test('storage mode follows available browser APIs and requires managed browser d
 function panelFixture(nativePicker, gm={}) {
   let networkCalls=0,generateCalls=0,pickerCalls=0;const siteQueries=[];
   class Element {
-    constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';}
+    constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';this.scrollTop=0;}
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
     getAttribute(key){return this.attrs[key]??null;}
     append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}}
@@ -273,14 +273,17 @@ function panelFixture(nativePicker, gm={}) {
     }
     getBoundingClientRect(){return {left:600,top:200,width:340,height:450};}
     getClientRects(){return [this.getBoundingClientRect()];}
+    focus(){document.activeElement=this;}
     setPointerCapture(){} hasPointerCapture(){return false} releasePointerCapture(){}
   }
   const body=new Element('body'), records=new Map();
+  if(gm.records)for(const [key,value] of gm.records)records.set(key,value);
+  if(gm.minimized!=null)records.set('local.pixai-web-queue.minimized.v1',JSON.stringify(gm.minimized));
   if(gm.queue)records.set('local.pixai-web-queue.v1',JSON.stringify({version:1,jobs:gm.queue}));
   if(gm.rawQueue)records.set('local.pixai-web-queue.v1',gm.rawQueue);
   const model=new Element('a');model.textContent='Fixture model';model.setAttribute('href','/ko/model/fixture');
   const generate=new Element('button');generate.textContent='생성!7,800Ctrl+⏎작업 제출';generate.click=()=>{generateCalls++;};
-  const document={body,readyState:'complete',createElement:tag=>new Element(tag),
+  const document={body,readyState:'complete',createElement:tag=>new Element(tag),createElementNS:(_namespace,tag)=>new Element(tag),
     getElementById:id=>body.querySelector(`#${id}`),querySelector:s=>body.querySelector(s),querySelectorAll:s=>{
       if(s.startsWith('main '))siteQueries.push(s);
       if(s==='main a[href*="/model/"]')return [model];
@@ -290,17 +293,62 @@ function panelFixture(nativePicker, gm={}) {
   const window={innerWidth:1200,innerHeight:900,addEventListener(){}};window.top=window.self=window;
   if(nativePicker)window.showDirectoryPicker=(...args)=>{pickerCalls++;return nativePicker(...args)};
   const context={window,document,location:{hostname:'pixai.art',pathname:'/ko/generator/image'},
-    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>records.set(key,value)},
+    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);}},
     navigator:{locks:{request:async(name,options,callback)=>callback({})}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
     fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'},
     Blob, GM_download:gm.download, GM_info:gm.info};
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
-  return {panel,siteQueries,records,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
+  return {panel,document,siteQueries,records,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
     press(button){button.fire('pointerdown');button.fire('pointerup');},
     message:()=>panel.querySelector('[data-message]').textContent};
 }
+
+test('collapse keeps unsaved inputs, scroll position and status; SVG launcher restores keyboard focus without site IO',()=>{
+  const f=panelFixture();
+  const collapse=f.panel.querySelector('[data-collapse]'),launcher=f.panel.querySelector('[data-launcher]');
+  const prompt=f.panel.querySelectorAll('textarea').find(element=>element.getAttribute('aria-label')==='대기열 프롬프트');
+  prompt.value='not yet queued';f.panel.scrollTop=170;
+  const before=f.message();assert.equal(collapse.getAttribute('aria-label'),'대기열 접기');
+  assert.equal(launcher.getAttribute('aria-label'),'PixAI 대기열 열기');assert.equal(launcher.querySelector('svg').getAttribute('viewBox'),'0 0 24 24');
+  assert.equal('edit' in collapse.dataset,false);assert.equal('edit' in launcher.dataset,false);
+  f.press(collapse);assert.equal(f.panel.dataset.minimized,'true');assert.equal(f.document.activeElement,launcher);
+  assert.equal(f.message(),before);assert.equal(f.records.get('local.pixai-web-queue.minimized.v1'),'true');
+  f.panel.scrollTop=0; // A collapsed browser scroll container no longer has its old range.
+  launcher.fire('click',{detail:0});
+  assert.equal(f.panel.dataset.minimized,'false');assert.equal(prompt.value,'not yet queued');assert.equal(f.panel.scrollTop,170);
+  assert.equal(f.document.activeElement,collapse);assert.equal(f.message(),before);
+  assert.equal(f.records.has('local.pixai-web-queue.v1'),false);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
+});
+
+test('collapsed preference survives a fresh mount and malformed or failed view storage does not break folding',()=>{
+  const first=panelFixture();first.press(first.panel.querySelector('[data-collapse]'));
+  const again=panelFixture(null,{records:first.records});assert.equal(again.panel.dataset.minimized,'true');
+  again.panel.querySelector('[data-launcher]').fire('click',{detail:0});assert.equal(again.panel.dataset.minimized,'false');
+  const malformed=panelFixture(null,{records:new Map([['local.pixai-web-queue.minimized.v1','{bad view JSON']]),viewStorageFailure:true});
+  assert.equal(malformed.panel.dataset.minimized,'false');
+  malformed.press(malformed.panel.querySelector('[data-collapse]'));assert.equal(malformed.panel.dataset.minimized,'true');
+  malformed.panel.querySelector('[data-launcher]').fire('click',{detail:0});assert.equal(malformed.panel.dataset.minimized,'false');
+  assert.equal(malformed.networkCalls,0);assert.equal(malformed.generateCalls,0);
+});
+
+test('folding during a running job remains enabled and preserves its message and persisted queue without cancellation or site IO',async()=>{
+  let checks=0,finish;const folder={name:'fixture',queryPermission:()=>{checks++;return checks===4?new Promise(resolve=>{finish=resolve}):Promise.resolve('granted');}};
+  const f=panelFixture(()=>Promise.resolve(folder),{queue:[job()]});
+  f.press(f.panel.querySelector('[data-choose-folder]'));await new Promise(resolve=>setImmediate(resolve));
+  f.press(f.panel.querySelector('[data-start]'));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(checks,4);assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');
+  const collapse=f.panel.querySelector('[data-collapse]'),launcher=f.panel.querySelector('[data-launcher]');
+  const before=f.message(),queue=f.records.get('local.pixai-web-queue.v1'),queries=f.siteQueries.length;
+  assert.equal(collapse.disabled,false);assert.equal(launcher.disabled,false);
+  f.press(collapse);assert.equal(f.panel.dataset.minimized,'true');assert.equal(f.message(),before);assert.match(launcher.title,/실행 중/);
+  assert.equal(f.records.get('local.pixai-web-queue.v1'),queue);assert.equal(f.siteQueries.length,queries);
+  launcher.fire('click',{detail:0});assert.equal(f.panel.dataset.minimized,'false');assert.equal(f.message(),before);
+  assert.equal(f.panel.querySelector('[data-start]').disabled,true);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+  finish('denied');await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.panel.querySelector('[data-start]').disabled,false);assert.match(f.message(),/쓰기 권한/);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
 
 test('Start stays clickable with missing Firefox settings and explains setup before touching site',async()=>{
   const f=panelFixture();assert.match(f.message(),/Firefox/);

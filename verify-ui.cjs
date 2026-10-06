@@ -90,6 +90,21 @@ test('LoRA trigger keywords round-trip through preset save/load and are retained
   await f.press('프리셋 저장');assert.equal(f.library().presets[0].loras[0].triggerWords,undefined);
 });
 
+test('capture fills blank triggers automatically, preserves manual text, and reports per-LoRA failures without discarding settings',async t=>{
+  const f=fixture(t);await f.select('저장한 설정 프리셋','p1');
+  const capture={model:f.library().presets[0].model,loras:[{id:'301',versionId:'401',name:'LoRA',weight:0.8,triggerWords:'site trigger'}]};
+  f.setCapture(capture);await f.press('사이트의 현재 설정 읽기');
+  assert.equal(f.field('LoRA 트리거 키워드').value,'trigger one, trigger two');
+  f.field('LoRA 트리거 키워드').value='  ';await f.press('사이트의 현재 설정 읽기');
+  assert.equal(f.field('LoRA 트리거 키워드').value,'site trigger');assert.match(f.messages.at(-1),/트리거 1개 자동 입력/);
+  await f.press('프리셋 저장');assert.equal(f.library().presets[0].loras[0].triggerWords,'site trigger');
+  capture.loras[0].versionId='402';capture.loras[0].triggerWords='new version trigger';f.setCapture(capture);
+  await f.press('사이트의 현재 설정 읽기');assert.equal(f.field('LoRA 트리거 키워드').value,'new version trigger');
+  delete capture.loras[0].triggerWords;capture.triggerWarnings=['LoRA'];f.setCapture(capture);
+  await f.press('사이트의 현재 설정 읽기');assert.equal(f.field('LoRA 트리거 키워드').value,'new version trigger');
+  assert.equal(f.field('LoRA 가중치').value,'0.8');assert.match(f.messages.at(-1),/트리거 자동 읽기 실패: LoRA/);
+});
+
 test('checkbox reservations compose common, LoRA triggers, character and chunks in saved-list order regardless of click order',async t=>{
   const f=fixture(t);await f.choose('행동');await f.choose('표정');
   assert.match(f.preview(),/quality, trigger one, trigger two, character tags, smiling, waving/);

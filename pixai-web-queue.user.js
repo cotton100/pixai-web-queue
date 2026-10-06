@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.3.0
+// @version      0.3.1
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -434,6 +434,38 @@
     const increment = Number(step);
     if (step && step !== 'any' && increment > 0 && Math.abs((number - Number(min || 0)) / increment - Math.round((number - Number(min || 0)) / increment)) > 0.000001) throw new Error(`LoRA 수치는 사이트의 ${step} 간격으로 입력해 주세요.`);
   }
+  async function readLoraTriggerWords(lora, io = {}) {
+    const id=presetIdentifier(lora.id,'LoRA',true), versionId=presetIdentifier(lora.versionId,'LoRA 버전',true);
+    const url=`https://pixai.art/en/model/${id}/${versionId}`;
+    const controller=new (io.AbortController || AbortController)();
+    const timer=(io.setTimeout || setTimeout)(()=>controller.abort(),8000);
+    try {
+      // Public model-page HTML only. No account cookies, API tokens or generation requests.
+      const response=await (io.fetch || fetch)(url,{credentials:'omit',redirect:'error',signal:controller.signal});
+      if (!response.ok || response.url !== url || !response.headers.get('content-type')?.includes('text/html')) throw new Error('LoRA 공개 상세 페이지를 읽지 못했습니다.');
+      const html=await response.text();
+      const doc=io.parseHtml ? io.parseHtml(html) : new DOMParser().parseFromString(html,'text/html');
+      const canonicalHref=doc.querySelector('link[rel="canonical"]')?.getAttribute('href')?.trim();
+      if (!canonicalHref) throw new Error('LoRA 상세 페이지의 모델 정보를 확인하지 못했습니다.');
+      const canonical=new URL(canonicalHref,url);
+      if (canonical.origin !== 'https://pixai.art' || !new RegExp(`^/en/model/${id}(?:/${versionId})?/?$`).test(canonical.pathname)) throw new Error('LoRA 상세 페이지의 모델이 다릅니다.');
+      const terms=[...doc.querySelectorAll('dt')].filter(e=>e.textContent.trim()==='Trigger Words');
+      const value=terms.length === 1 ? terms[0].nextElementSibling : null;
+      if (value?.tagName !== 'DD' || value.querySelector('script,style')) throw new Error('LoRA 트리거 항목을 확인하지 못했습니다.');
+      const paragraphs=[...value.querySelectorAll('p')];
+      return presetText(paragraphs.length ? paragraphs.map(e=>e.textContent.trim()).filter(Boolean).join(', ') : value.textContent);
+    } finally { (io.clearTimeout || clearTimeout)(timer); }
+  }
+  async function capturePresetSettings(adapter, readTriggers) {
+    const config=await adapter.capture(), triggerWarnings=[];
+    const loras=await Promise.all(config.loras.map(async lora=>{
+      try { const triggerWords=await readTriggers(lora); return {...lora,...(triggerWords ? {triggerWords} : {})}; }
+      catch { triggerWarnings.push(lora.name || lora.id); return lora; }
+    }));
+    // Do not mix settings from before and after a user edit while the pages load.
+    assertConfiguration(config,await adapter.capture());
+    return {...config,loras,triggerWarnings};
+  }
   // This adapter only uses visible site controls. It never submits or accesses React state.
   function createPixaiSettingsAdapter(doc, io) {
     const shown = e => {
@@ -683,7 +715,7 @@ function mountPresetEditor(parent, io) {
     const controls = {row,id:id.input,versionId:versionId.input,name:name.input,weight:weight.input,triggerWords:triggerWords.input};
     loraRows.push(controls);
     const identity=el('details');identity.append(el('summary','LoRA ID 직접 편집'),id.wrap,versionId.wrap);
-    row.append(name.wrap,weight.wrap,triggerWords.wrap,el('small','LoRA 설명의 트리거 키워드를 입력하세요. 이 프리셋으로 조합할 때 자동으로 붙습니다.'),identity,action('이 LoRA 제외',() => {
+    row.append(name.wrap,weight.wrap,triggerWords.wrap,el('small','설정 읽기에서 공개 트리거를 자동으로 채웁니다. 직접 수정하거나 비워도 됩니다. 저장한 문구가 조합에 붙습니다.'),identity,action('이 LoRA 제외',() => {
       row.remove(); loraRows = loraRows.filter(item => item !== controls);
     }));
     loraList.append(row);
@@ -720,14 +752,18 @@ function mountPresetEditor(parent, io) {
   presetBody.append(presetSelect.wrap,presetName.wrap,
     el('small','PixAI 화면에서 모델·LoRA를 선택한 뒤 읽어오세요. 읽어오기와 설정 확인은 이미지를 생성하지 않습니다.'),
     action('사이트의 현재 설정 읽기',async () => {
-      io.notify('현재 모델·LoRA를 읽는 중…');
+      io.notify('현재 모델·LoRA와 공개 트리거를 읽는 중…');
       const triggers = loraRows.map(item=>({id:item.id.value.trim(),versionId:item.versionId.value.trim(),triggerWords:item.triggerWords.value}));
       const settings = await io.captureSettings();
+      let autoFilled=0;
       fillPreset({...settings,name:presetName.input.value,loras:settings.loras.map(lora=>{
         const previous=triggers.find(item=>item.id===lora.id&&(!item.versionId||item.versionId===lora.versionId));
-        return {...lora,triggerWords:previous?.triggerWords || ''};
+        if (previous?.triggerWords.trim()) return {...lora,triggerWords:previous.triggerWords};
+        if (lora.triggerWords) autoFilled++;
+        return {...lora,triggerWords:lora.triggerWords || ''};
       })});
-      io.notify(`${settings.model.name || settings.model.id} · LoRA ${settings.loras.length}개를 읽었습니다. 이름을 붙이고 저장해 주세요.`);
+      const warning=settings.triggerWarnings?.length ? `\n트리거 자동 읽기 실패: ${settings.triggerWarnings.join(', ')}. 기존 입력은 유지했습니다. 필요하면 직접 입력해 주세요.` : '';
+      io.notify(`${settings.model.name || settings.model.id} · LoRA ${settings.loras.length}개를 읽었습니다. 트리거 ${autoFilled}개 자동 입력. 이름을 붙이고 저장해 주세요.${warning}`);
     }),modelName.wrap,modelIdentity,loraList,action('LoRA 추가',() => addLora()));
   if (io.applySettings) presetBody.append(action('화면에 설정 적용 · 생성 안 함',async () => {
     await io.applySettings(readPreset()); io.notify('프리셋을 화면에 적용했습니다. 이미지는 생성하지 않았습니다.');
@@ -848,7 +884,7 @@ function mountPresetEditor(parent, io) {
   return {root,refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();}};
 }
 
-  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -1149,6 +1185,8 @@ function mountPresetEditor(parent, io) {
   }
   function render() {
     if (!panel) return;
+    const launcher=panel.querySelector('[data-launcher]');
+    if (launcher) launcher.title=`PixAI 대기열 열기 · ${running ? '실행 중' : starting ? '시작 준비 중' : settingsBusy ? '설정 확인 중' : '대기'}\n${message}`;
     panel.querySelector('[data-message]').textContent = message;
     const feedback=panel.querySelector('[data-action-message]');
     if (feedback) feedback.textContent=message;
@@ -1192,10 +1230,35 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.3.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
-    style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{position:sticky;top:0;background:#211d2b;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
-    style.textContent += '#local-pixai-queue [data-drag-handle]{z-index:2}#local-pixai-queue [data-message]{position:sticky;top:34px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
-    panel.append(style, dragHandle, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}), node('small','제목줄을 드래그해서 이동 · 조합별 모델·LoRA를 적용합니다. 해상도·이미지 수 등은 사이트 설정을 확인하세요.'));
+    const dragHandle = node('h2','PixAI 대기열 · 0.3.1 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
+    style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#211d2b}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
+    style.textContent += '#local-pixai-queue [data-launcher]{display:none;width:52px;height:52px;margin:0;padding:12px;border:1px solid #8c72a7;border-radius:50%;line-height:0;background:#413250}#local-pixai-queue [data-launcher]:focus-visible,#local-pixai-queue [data-collapse]:focus-visible{outline:2px solid #e2c7ff;outline-offset:3px}#local-pixai-queue[data-minimized="true"]{width:52px;height:52px;max-height:none;padding:0;border:0;border-radius:50%;overflow:visible}#local-pixai-queue[data-minimized="true"]>:not([data-launcher]){display:none!important}#local-pixai-queue[data-minimized="true"]>[data-launcher]{display:block}';
+    function iconControl(label, attribute, path) {
+      const control=node('button',null,{type:'button','aria-label':label,title:label,[attribute]:'','aria-controls':'local-pixai-queue'});
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+      for (const [key,value] of Object.entries({viewBox:'0 0 24 24',width:'100%',height:'100%',fill:'none',stroke:'currentColor','stroke-width':'1.8','stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true',focusable:'false'})) svg.setAttribute(key,value);
+      const drawing=document.createElementNS('http://www.w3.org/2000/svg','path');drawing.setAttribute('d',path);svg.append(drawing);control.append(svg);return control;
+    }
+    const collapse=iconControl('대기열 접기','data-collapse','M5 12h14');
+    const launcher=iconControl('PixAI 대기열 열기','data-launcher','M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z M7 16l4-5 3 3 2-2 2 4 M8 8h.01');
+    const header=node('div',null,{'data-header':''});header.append(dragHandle,collapse);
+    let expandedScrollTop=0;
+    function minimize(value, remember=true, focus=true) {
+      if (value) expandedScrollTop=panel.scrollTop;
+      panel.dataset.minimized=String(value);
+      collapse.setAttribute('aria-expanded',String(!value));launcher.setAttribute('aria-expanded',String(!value));
+      if (remember) {try {localStorage.setItem('local.pixai-web-queue.minimized.v1',JSON.stringify(value));} catch { /* Folding does not depend on storage access. */ }}
+      if (focus) (value ? launcher : collapse).focus({preventScroll:true});
+      if (!value) panel.scrollTop=expandedScrollTop;
+    }
+    // View-only controls stay enabled during generation and never replace its status.
+    bindFolderActivation(collapse,()=>collapse,()=>minimize(true),()=>{});
+    bindFolderActivation(launcher,()=>launcher,()=>minimize(false),()=>{});
+    let minimized=false;
+    try {minimized=JSON.parse(localStorage.getItem('local.pixai-web-queue.minimized.v1')||'false')===true;} catch { /* Ignore malformed or unavailable view preferences. */ }
+    minimize(minimized,false,false);
+    panel.append(style,launcher,header, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}), node('small','제목줄을 드래그해서 이동 · 조합별 모델·LoRA를 적용합니다. 해상도·이미지 수 등은 사이트 설정을 확인하세요.'));
     panel.append(node('div','저장 폴더 미선택',{'data-folder':''}));
     const choose = button('저장 폴더 선택', chooseFolder);
     choose.dataset.chooseFolder = '';
@@ -1226,7 +1289,7 @@ function mountPresetEditor(parent, io) {
     try { presetEditor=mountPresetEditor(panel, {
       load:readLibrary,save:saveLibrary,button,
       notify:text=>{message=text;render();},
-      captureSettings:()=>settingsAction(()=>settings.capture(),{readOnly:true}),
+      captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
       applySettings:value=>settingsAction(()=>settings.apply(value)),
       enqueue:value=>locked(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
@@ -1272,7 +1335,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.3.0', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.3.1', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
