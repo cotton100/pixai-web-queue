@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const sandbox={module:{exports:{}}};
 vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),sandbox);
-const {processJob,recover,verifyTask,outputIds,safeName,checkCost,bindPanelDrag,acceptFolder,folderError,bindFolderActivation,pickDirectory,storageSupport}=sandbox.module.exports;
+const {processJob,recover,verifyTask,outputIds,safeName,checkCost,bindPanelDrag,acceptFolder,folderError,bindFolderActivation,pickDirectory,storageSupport,managedDownload,resetDownloadProgress}=sandbox.module.exports;
 const job=()=>({id:'fixture',prompt:'1girl, smile',title:'미소',state:'queued',saved:[]});
 const task=(j,count=4)=>({id:j.taskId,status:'completed',createdAt:new Date(j.submittedAt || Date.now()).toISOString(),parameters:{prompts:j.prompt},outputs:{batch:Array.from({length:count},(_,i)=>({mediaId:String(100+i)}))}});
 function fixture(j, overrides={}) {
@@ -168,6 +168,8 @@ test('release metadata preserves install identity and pins both update URLs to t
   assert.equal(field('namespace'),'local.pixai-web-queue');
   assert.equal(field('name'),'PixAI 웹 대기열 (로컬 후보)');
   assert.equal(field('updateURL'),published);assert.equal(field('downloadURL'),published);
+  assert.match(header,/^\/\/ @grant\s+GM_download$/m);assert.match(header,/^\/\/ @grant\s+GM_info$/m);
+  assert.equal(field('sandbox'),'DOM');
   const version=JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'package.json'),'utf8')).version;
   assert.equal(field('version'),version);assert.ok(source.includes(`PixAI 대기열 · ${version} 후보`));
 });
@@ -229,14 +231,20 @@ test('missing, synchronously failing and cancelled pickers reject instead of sil
   assert.deepEqual(timers.cleared,[1]);
 });
 
-test('unsupported folder APIs are detected without attempting a picker or generation',()=>{
+test('storage mode follows available browser APIs and requires managed browser downloads for fallback',()=>{
   const firefox=storageSupport({});assert.equal(firefox.supported,false);assert.match(firefox.message,/Firefox/);
+  assert.equal(firefox.mode,'download');
   assert.equal(storageSupport({showDirectoryPicker(){}}).supported,true);
+  assert.equal(storageSupport({showDirectoryPicker(){}}).mode,'folder');
   assert.equal(storageSupport({showDirectoryPicker:true}).supported,false);
+  assert.equal(storageSupport({},()=>{}, {downloadMode:'browser'}).supported,true);
+  assert.equal(storageSupport({},()=>{}, {downloadMode:'native'}).supported,false);
+  assert.equal(storageSupport({},()=>{}, {downloadMode:'disabled'}).supported,false);
+  assert.equal(storageSupport({},null,{downloadMode:'browser'}).supported,false);
 });
 
 // Mount the complete script, rather than testing only its exported helper functions.
-function panelFixture(nativePicker) {
+function panelFixture(nativePicker, gm={}) {
   class Element {
     constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';}
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
@@ -271,7 +279,8 @@ function panelFixture(nativePicker) {
     localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>records.set(key,value)},
     navigator:{locks:{request:async(name,options,callback)=>callback({})}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
-    fetch:()=>{paid++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'}};
+    fetch:()=>{paid++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'},
+    Blob, GM_download:gm.download, GM_info:gm.info};
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
   return {panel,get paid(){return paid},get pickerCalls(){return pickerCalls},
@@ -279,10 +288,10 @@ function panelFixture(nativePicker) {
     message:()=>panel.querySelector('[data-message]').textContent};
 }
 
-test('Firefox-like full UI explains unsupported storage on mount and keeps paid start disabled',()=>{
+test('Firefox full UI explains setup without managed downloads and keeps paid start disabled',()=>{
   const f=panelFixture();assert.match(f.message(),/Firefox/);
   assert.equal(f.panel.querySelector('[data-start]').disabled,true);
-  f.press(f.panel.querySelector('[data-choose-folder]'));assert.match(f.message(),/지원하지/);
+  f.press(f.panel.querySelector('[data-choose-folder]'));assert.match(f.message(),/Browser API/);
   assert.equal(f.pickerCalls,0);assert.equal(f.paid,0);
 });
 
@@ -299,4 +308,68 @@ test('supported full UI calls picker once on release and renders cancellation wi
   assert.equal(f.pickerCalls,1);assert.match(f.message(),/선택창 여는 중/);
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(f.message(),/취소/);assert.equal(choose.disabled,false);assert.equal(f.paid,0);
+});
+
+function downloadTimers() {
+  let callback;const cleared=[];
+  return {cleared,set(fn,ms){assert.equal(ms,120000);callback=fn;return 1},clear:id=>cleared.push(id),tick:()=>callback()};
+}
+
+test('managed save waits for completion, passes validated blob, preserves collisions and uses automatic download',async()=>{
+  const timers=downloadTimers(),blob=new Blob(['asset'],{type:'image/png'});let details,finished=false;
+  const pending=managedDownload(options=>{details=options;return {}},blob,'asset.png',timers).then(name=>{finished=true;return name});
+  assert.equal(details.url,blob);assert.equal(details.saveAs,false);assert.equal(details.conflictAction,'uniquify');
+  assert.equal(finished,false);details.onload();assert.equal(await pending,'asset.png');assert.deepEqual(timers.cleared,[1]);
+});
+
+test('cancelled or rejected downloads never count as completion, including late callbacks',async()=>{
+  const timers=downloadTimers();let details;
+  const pending=managedDownload(options=>{details=options},new Blob(['asset']),'asset.png',timers);
+  details.onerror({error:'not_whitelisted'});details.onload();
+  await assert.rejects(pending,/png, jpg, webp, json/);
+  await assert.rejects(managedDownload(()=>{throw new TypeError('unsupported Blob')},new Blob(['asset']),'asset.png',downloadTimers()),/다운로드 실패/);
+});
+
+test('download timeout aborts once and rejects even if completion arrives later',async()=>{
+  const timers=downloadTimers();let details,aborts=0;
+  const pending=managedDownload(options=>{details=options;return {abort(){aborts++}}},new Blob(['asset']),'asset.png',timers);
+  timers.tick();details.onload();await assert.rejects(pending,/timeout/);assert.equal(aborts,1);
+});
+
+test('Firefox preparation downloads a harmless probe and unlocks start only after completion',async()=>{
+  let details;const f=panelFixture(null,{download:options=>{details=options},info:{downloadMode:'browser'}});
+  const start=f.panel.querySelector('[data-start]'),choose=f.panel.querySelector('[data-choose-folder]');
+  assert.equal(choose.textContent,'자동 다운로드 준비 확인');assert.equal(start.disabled,true);
+  f.press(choose);await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(details.url instanceof Blob);assert.match(details.name,/^PixAI_다운로드확인_\d+\.json$/);
+  assert.equal(start.disabled,true);assert.equal(f.paid,0);details.onload();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(start.disabled,false);assert.match(f.message(),/준비 확인 완료/);assert.equal(f.pickerCalls,0);assert.equal(f.paid,0);
+});
+
+test('Firefox probe failure leaves generation disabled and displays actionable permission error',async()=>{
+  const f=panelFixture(null,{download:options=>options.onerror({error:'not_permitted'}),info:{downloadMode:'browser'}});
+  f.press(f.panel.querySelector('[data-choose-folder]'));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.panel.querySelector('[data-start]').disabled,true);assert.match(f.message(),/권한/);assert.equal(f.paid,0);
+});
+
+test('browser-download resume preserves prior records and saves complete known outputs without paying again',async()=>{
+  const j={...job(),taskId:'900',expected:4,state:'save_failed',saved:[{mediaId:'100',file:'100.png'}]};
+  const done={...job(),state:'done',saved:[{mediaId:'200',file:'done.png'}]};
+  resetDownloadProgress([j,done]);assert.equal(j.saved.length,0);assert.equal(j.previousDownloads[0].files[0].file,'100.png');assert.equal(done.saved.length,1);
+  const {io,calls}=fixture(j);await processJob(j,io);assert.equal(j.saved.length,4);
+  assert.equal(calls.filter(x=>x==='submit').length,0);assert.equal(calls.filter(x=>x.startsWith('save:')).length,4);
+});
+
+test('failed browser image completion stops the serial queue before a second paid job',async()=>{
+  let submits=0,saves=0;const timers=downloadTimers();
+  const first=job(),second={...job(),id:'second'};
+  await assert.rejects((async()=>{
+    for(const j of [first,second]) {
+      const {io}=fixture(j,{submit:async()=>{submits++;return '900'},saveImage:async()=>{
+        saves++;return managedDownload(options=>options.onerror({error:'not_succeeded'}),new Blob(['image']),'image.png',timers);
+      }});await processJob(j,io);
+    }
+  })());assert.equal(submits,1);assert.equal(saves,1);assert.equal(first.state,'save_failed');assert.equal(second.state,'queued');
 });

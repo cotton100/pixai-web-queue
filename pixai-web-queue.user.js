@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.1.5
+// @version      0.1.6
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
-// @description  로그인된 새 이미지 에디터에서 프롬프트를 순차 생성하고 선택한 폴더에 원본을 저장합니다.
+// @description  로그인된 새 이미지 에디터에서 프롬프트를 순차 생성하고 브라우저에 맞는 방식으로 원본을 저장합니다.
 // @match        https://pixai.art/*
-// @grant        none
-// @sandbox      raw
+// @grant        GM_download
+// @grant        GM_info
+// @sandbox      DOM
 // @run-at       document-start
 // @noframes
 // ==/UserScript==
@@ -98,10 +99,52 @@
     if (error.name === 'SecurityError') return `폴더 선택이 브라우저에서 차단됐습니다. PixAI 탭에서 버튼을 직접 눌러 주세요. [SecurityError] ${error.message}`;
     return `[${error.name || 'Error'}] ${error.message}`;
   }
-  function storageSupport(win) {
-    return typeof win.showDirectoryPicker === 'function'
-      ? {supported:true, message:'저장 폴더를 선택해 주세요.'}
-      : {supported:false, message:'이 브라우저는 폴더를 선택해 직접 저장하는 기능을 지원하지 않습니다. Firefox에서는 다운로드 방식이 필요합니다. 현재 직접 저장은 데스크톱 Chrome/Edge에서 사용할 수 있습니다.'};
+  function storageSupport(win, download, info) {
+    if (typeof win.showDirectoryPicker === 'function') return {mode:'folder', supported:true, message:'폴더 직접 저장 · 저장 폴더를 선택해 주세요.'};
+    const supported = typeof download === 'function' && info?.downloadMode === 'browser';
+    return {mode:'download', supported, message:supported
+      ? '자동 다운로드 · 저장 위치는 브라우저의 다운로드 설정을 따릅니다. 준비 확인으로 작은 JSON 파일을 먼저 저장해 주세요.'
+      : '자동 다운로드 준비 필요 · Tampermonkey 최신판에서 다운로드 모드를 Browser API로 설정하고 다운로드 권한을 허용한 뒤 새로고침해 주세요. 저장 폴더는 Firefox 다운로드 설정에서 정합니다.'};
+  }
+  function downloadError(error) {
+    const code = error?.error || error?.name || 'download_failed';
+    const advice = {
+      not_enabled:'Tampermonkey 다운로드 기능을 켜 주세요.',
+      not_whitelisted:'Tampermonkey의 허용 다운로드 확장자에 png, jpg, webp, json을 추가해 주세요.',
+      not_permitted:'Tampermonkey 다운로드 권한을 허용해 주세요.',
+      not_supported:'Tampermonkey를 최신판으로 업데이트하고 다운로드 모드를 Browser API로 설정해 주세요.',
+      timeout:'다운로드 완료 확인 시간이 지났습니다. 이미 저장된 파일이 있을 수 있습니다. 재개하면 같은 작업의 파일을 추가 사본으로 저장합니다.'
+    };
+    return new Error(`다운로드 실패 [${code}]. ${advice[code] || '최신 Tampermonkey인지 확인하고 다운로드 목록과 설정을 확인해 주세요. 취소되거나 완료를 확인하지 못한 파일은 성공으로 처리하지 않습니다.'}`);
+  }
+  function managedDownload(download, blob, name, timers = {set:setTimeout, clear:clearTimeout}) {
+    return new Promise((resolve,reject) => {
+      let settled = false, control;
+      const timer = timers.set(() => {
+        fail({error:'timeout'});
+        try { control?.abort(); } catch {}
+      }, 120000);
+      function finish(action, value) {
+        if (settled) return;
+        settled = true; timers.clear(timer); action(value);
+      }
+      function fail(error) { finish(reject, downloadError(error)); }
+      try {
+        control = download({url:blob, name, saveAs:false, conflictAction:'uniquify',
+          onload:() => finish(resolve,name), onerror:fail, ontimeout:() => fail({error:'timeout'})});
+      } catch (error) { fail(error); }
+    });
+  }
+  function resetDownloadProgress(jobs) {
+    // A browser download destination cannot be identified after reload/settings changes.
+    // Save a complete new set for a known task; preserve all prior progress and files.
+    for (const job of jobs) {
+      if (!resumable.has(job.state) || !job.saved?.length) continue;
+      if (!job.taskId) throw new Error('부분 다운로드 작업 ID가 없어 자동 재개할 수 없습니다.');
+      job.previousDownloads ??= [];
+      job.previousDownloads.push({files:job.saved, metadataFile:job.metadataFile || null, at:new Date().toISOString()});
+      job.saved = []; delete job.metadataFile;
+    }
   }
   // Direct pointer handlers also support browsers where only click delivery fails.
   function bindFolderActivation(root, getButton, action, onError) {
@@ -224,7 +267,7 @@
     }
   }
 
-  const core = {normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport};
+  const core = {normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -239,7 +282,9 @@
   let initialModel = null;
   let panel;
   let choosingFolder = false;
-  const storage = storageSupport(window);
+  const download = typeof GM_download === 'function' ? GM_download : null;
+  const storage = storageSupport(window, download, typeof GM_info === 'object' ? GM_info : null);
+  let downloadsReady = false;
   let message = storage.message;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const $ = selector => document.querySelector(selector);
@@ -308,11 +353,19 @@
     if (/단일|single/i.test(text || '')) return 1;
     throw new Error('이미지 수 선택을 확인할 수 없습니다. 한국어 새 에디터에서 실행해 주세요.');
   }
+  async function ensureDestination() {
+    if (!storage.supported) throw new Error(storage.message);
+    if (storage.mode === 'download') {
+      if (!downloadsReady) throw new Error('먼저 자동 다운로드 준비 확인을 완료해 주세요.');
+    } else if (!folder || await folder.queryPermission({mode:'readwrite'}) !== 'granted') {
+      throw new Error('저장 폴더를 다시 선택하고 쓰기 권한을 허용해 주세요.');
+    }
+  }
   async function prepare(job) {
     if (stopRequested) throw new Error('다음 작업 제출이 중지됐습니다.');
     if (!onGenerator()) throw new Error('이미지 생성 화면에서 실행해 주세요.');
     if (modelId() !== initialModel) throw new Error('실행 중 모델이 변경됐습니다.');
-    if (await folder.queryPermission({mode:'readwrite'}) !== 'granted') throw new Error('저장 폴더 권한이 필요합니다.');
+    await ensureDestination();
     const input = editor();
     internalAction = true;
     try {
@@ -382,6 +435,11 @@
     } finally { clearTimeout(timeout); }
   }
   async function writeNew(name, data) {
+    if (storage.mode === 'download') {
+      if (!storage.supported) throw new Error(storage.message);
+      const blob = data instanceof Blob ? data : new Blob([data],{type:'application/json'});
+      return managedDownload(download, blob, name);
+    }
     // Never replace an existing filename, including a file left by an interrupted save.
     for (let suffix = 0; suffix < 10000; suffix++) {
       const candidate = suffix ? name.replace(/(\.[^.]+)$/, `_${suffix}$1`) : name;
@@ -401,7 +459,7 @@
   const io = {
     persist, prepare, submit, waitTask,
     async saveImage(job, mediaId, index) {
-      if (await folder.queryPermission({mode:'readwrite'}) !== 'granted') throw new Error('폴더 쓰기 권한이 없습니다.');
+      await ensureDestination();
       job.folderToken = folderToken;
       persist(); // Bind saved progress to this folder even if remembering the handle failed.
       const blob = await imageBlob(mediaId);
@@ -411,22 +469,25 @@
     async saveMetadata(job) {
       if (job.metadataFile) return;
       job.metadataFile = await writeNew(`${safeName(job.title)}_${job.taskId}.json`, JSON.stringify({
-        taskId:job.taskId, title:job.title, prompt:job.prompt, images:job.saved, savedAt:new Date().toISOString()
+        taskId:job.taskId, title:job.title, prompt:job.prompt, images:job.saved, savedAt:new Date().toISOString(),
+        storage:{mode:storage.mode, fileNames:storage.mode === 'download' ? 'requested; browser may rename on collisions' : 'actual'},
+        previousDownloads:job.previousDownloads || []
       }, null, 2));
     }
   };
   async function start() {
     if (running) return;
     if (choosingFolder) throw new Error('폴더 선택창을 먼저 닫거나 선택을 완료해 주세요.');
-    if (!folder) throw new Error('먼저 저장 폴더를 선택해 주세요.');
+    await ensureDestination();
     if (!onGenerator()) throw new Error('이미지 생성 화면에서 실행해 주세요.');
     await locked(async () => {
-      if (await folder.queryPermission({mode:'readwrite'}) !== 'granted') throw new Error('저장 폴더를 다시 선택해 주세요.');
-      if (jobs.some(job => job.saved?.length && !['done','skipped'].includes(job.state) && job.folderToken !== folderToken)) {
+      await ensureDestination();
+      if (storage.mode === 'folder' && jobs.some(job => job.saved?.length && !['done','skipped'].includes(job.state) && job.folderToken !== folderToken)) {
         throw new Error('부분 저장 작업의 폴더를 다시 선택해 확인해 주세요.');
       }
       initialModel = modelId();
       if (!initialModel) throw new Error('선택된 모델을 확인하지 못했습니다.');
+      if (storage.mode === 'download') resetDownloadProgress(jobs);
       running = true;
       stopRequested = false;
       try {
@@ -458,7 +519,9 @@
   function render() {
     if (!panel) return;
     panel.querySelector('[data-message]').textContent = message;
-    panel.querySelector('[data-folder]').textContent = folder ? `저장 폴더: ${folder.name}` : '저장 폴더 미선택';
+    panel.querySelector('[data-folder]').textContent = storage.mode === 'download'
+      ? `자동 다운로드 · ${downloadsReady ? '준비 확인 완료' : '준비 확인 필요'} · 브라우저 설정 폴더`
+      : (folder ? `저장 폴더: ${folder.name}` : '저장 폴더 미선택');
     const list = panel.querySelector('[data-jobs]');
     list.replaceChildren();
     for (const job of jobs) {
@@ -484,15 +547,17 @@
     for (const element of panel.querySelectorAll('[data-edit], [data-start]')) element.disabled = running;
     const choose = panel.querySelector('[data-choose-folder]');
     choose.disabled = running || choosingFolder;
-    choose.textContent = choosingFolder ? '폴더 선택 중…' : '저장 폴더 선택';
+    choose.textContent = storage.mode === 'download'
+      ? (choosingFolder ? '확인 파일 다운로드 중…' : '자동 다운로드 준비 확인')
+      : (choosingFolder ? '폴더 선택 중…' : '저장 폴더 선택');
     panel.querySelector('[data-start]').textContent = running ? '실행 중' : '시작 / 같은 작업 재개';
-    if (!storage.supported) panel.querySelector('[data-start]').disabled = true;
+    if (!storage.supported || storage.mode === 'download' && !downloadsReady) panel.querySelector('[data-start]').disabled = true;
   }
   function mount() {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.1.5 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.1.6 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{position:sticky;top:0;background:#211d2b;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     panel.append(style, dragHandle, node('small','제목줄을 드래그해서 이동 · 모델·LoRA·해상도는 실행할 때의 화면 설정을 공통 사용합니다. 실행 중에는 사이트를 조작하지 마세요.'));
     panel.append(node('div','저장 폴더 미선택',{'data-folder':''}));
@@ -525,6 +590,7 @@
     panel.append(node('div',null,{'data-jobs':''}));
     const exportQueue = button('대기열 백업', async () => {
       const blob = new Blob([JSON.stringify({version:1,jobs},null,2)],{type:'application/json'});
+      if (storage.mode === 'download') { await writeNew('pixai-queue-backup.json',blob);message='대기열 백업 다운로드 완료';render();return; }
       const url = URL.createObjectURL(blob); const anchor=node('a',null,{href:url,download:'pixai-queue-backup.json'});
       anchor.click(); setTimeout(()=>URL.revokeObjectURL(url),10000);
     });
@@ -546,9 +612,21 @@
     if (!storage.supported) { message = storage.message; render(); return; }
     choosingFolder = true;
     const choose = panel.querySelector('[data-choose-folder]');
-    choose.disabled = true; choose.textContent = '폴더 선택 중…';
+    choose.disabled = true; choose.textContent = storage.mode === 'download' ? '확인 파일 다운로드 중…' : '폴더 선택 중…';
     const notify = text => { message = text; panel.querySelector('[data-message]').textContent = text; };
     try {
+      if (storage.mode === 'download') {
+        downloadsReady = false;
+        notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
+        await locked(async () => {
+          const name = `PixAI_다운로드확인_${Date.now()}.json`;
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.1.6', probe:true}));
+          downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
+          message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
+          render();
+        });
+        return;
+      }
       const chosen = await pickDirectory(window, notify);
       await locked(async () => {
         const partial = jobs.filter(job => job.saved?.length && !['done','skipped'].includes(job.state));
