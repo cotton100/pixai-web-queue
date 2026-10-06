@@ -246,10 +246,26 @@ test('storage mode follows available browser APIs and requires managed browser d
 // Mount the complete script, rather than testing only its exported helper functions.
 function panelFixture(nativePicker, gm={}) {
   let networkCalls=0,generateCalls=0,pickerCalls=0;const siteQueries=[],storageMutations=[];
+  function matchesPart(element,part) {
+    if(part.startsWith('#'))return element.getAttribute('id')===part.slice(1);
+    const tag=part.match(/^[a-z][\w-]*/i)?.[0];
+    if(tag&&element.tagName.toLowerCase()!==tag.toLowerCase())return false;
+    return [...part.matchAll(/\[([\w-]+)(\*=|=)?(?:"([^"]*)"|'([^']*)'|([^\]]*))?\]/g)].every(([,name,operator,double,single,bare])=>{
+      const actual=element.getAttribute(name),wanted=double??single??bare??'';
+      return actual!=null&&(!operator||(operator==='*='?String(actual).includes(wanted):String(actual)===wanted));
+    });
+  }
+  function matchesSelector(element,selector) {
+    const parts=selector.match(/(?:\[[^\]]*\]|[^\s[\]])+/g)||[];
+    if(!parts.length||!matchesPart(element,parts.at(-1)))return false;
+    let ancestor=element.parentElement;
+    for(let i=parts.length-2;i>=0;i--){while(ancestor&&!matchesPart(ancestor,parts[i]))ancestor=ancestor.parentElement;if(!ancestor)return false;ancestor=ancestor.parentElement;}
+    return true;
+  }
   class Element {
     constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';this.scrollTop=0;}
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
-    getAttribute(key){return this.attrs[key]??null;}
+    getAttribute(key){if(key.startsWith('data-')){const data=key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase());if(data in this.dataset)return this.dataset[data];}return this.attrs[key]??null;}
     append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}}
     replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
     after(child){if(!this.parentElement)return;const siblings=this.parentElement.children;child.parentElement=this.parentElement;siblings.splice(siblings.indexOf(this)+1,0,child);}
@@ -257,22 +273,17 @@ function panelFixture(nativePicker, gm={}) {
     contains(target){return this===target||this.children.some(child=>child.contains(target));}
     querySelectorAll(selector){
       const selectors=selector.split(',').map(s=>s.trim());
-      const matches=element=>selectors.some(s=>{
-        const data=s.match(/^\[data-([\w-]+)\]$/);
-        if(data)return data[1].replace(/-([a-z])/g,(_,c)=>c.toUpperCase()) in element.dataset;
-        if(s.startsWith('#'))return element.attrs.id===s.slice(1);
-        return element.tagName===s;
-      });
-      return this.children.flatMap(child=>[...(matches(child)?[child]:[]),...child.querySelectorAll(selector)]);
+      return this.children.flatMap(child=>[...(selectors.some(s=>matchesSelector(child,s))?[child]:[]),...child.querySelectorAll(selector)]);
     }
     querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+    closest(selector){for(let node=this;node;node=node.parentElement)if(matchesSelector(node,selector))return node;return null;}
     addEventListener(type,fn,capture){(this.events[type]??=[]).push({fn,capture});}
     fire(type,values={}){
-      const event={type,target:this,button:0,pointerId:1,isPrimary:true,isTrusted:true,timeStamp:100,detail:1,preventDefault(){},stopImmediatePropagation(){this.stopped=true},...values};
+      const event={type,target:this,button:0,pointerId:1,isPrimary:true,isTrusted:true,clientX:610,clientY:210,timeStamp:100,detail:1,preventDefault(){},stopPropagation(){this.stopped=true},stopImmediatePropagation(){this.stopped=true},...values};
       for(const {fn} of [...(this.events[type]||[])].sort((a,b)=>Number(!!b.capture)-Number(!!a.capture))){fn(event);if(event.stopped)break;}
     }
     getBoundingClientRect(){return {left:600,top:200,width:340,height:450};}
-    getClientRects(){return [this.getBoundingClientRect()];}
+    getClientRects(){for(let node=this;node;node=node.parentElement)if(node.hidden)return [];return [this.getBoundingClientRect()];}
     focus(){document.activeElement=this;}
     click(){this.clicks=(this.clicks||0)+1;}
     setPointerCapture(){} hasPointerCapture(){return false} releasePointerCapture(){}
@@ -282,12 +293,17 @@ function panelFixture(nativePicker, gm={}) {
   if(gm.minimized!=null)records.set('local.pixai-web-queue.minimized.v1',JSON.stringify(gm.minimized));
   if(gm.queue)records.set('local.pixai-web-queue.v1',JSON.stringify({version:1,jobs:gm.queue}));
   if(gm.rawQueue)records.set('local.pixai-web-queue.v1',gm.rawQueue);
-  const model=new Element('a');model.textContent='Fixture model';model.setAttribute('href','/ko/model/fixture');
+  const main=new Element('main'),modelSection=new Element('section'),stylesSection=new Element('section'),modelCard=new Element('div');
+  modelSection.setAttribute('data-section','model');stylesSection.setAttribute('data-section','styles');modelCard.setAttribute('data-testid','selected-entity-card');
+  const model=new Element('a');model.textContent='Fixture model';model.setAttribute('href','/en/model/101/201');
+  const imageLink=new Element('a');imageLink.setAttribute('href','/en/model/101/201');modelCard.append(imageLink,model);modelSection.append(modelCard);
+  const recommended=new Element('a');recommended.textContent='Recommended model';recommended.setAttribute('href','/en/model/999/9991');modelSection.append(recommended);
+  const modelTab=new Element('button');modelTab.textContent='Model';modelTab.setAttribute('role','tab');modelTab.setAttribute('aria-selected','true');
   const generate=new Element('button');generate.textContent='생성!7,800Ctrl+⏎작업 제출';generate.click=()=>{generateCalls++;};
+  main.append(modelTab,modelSection,stylesSection,generate);body.append(main);
   const document={body,readyState:'complete',createElement:tag=>new Element(tag),createElementNS:(_namespace,tag)=>new Element(tag),
     getElementById:id=>body.querySelector(`#${id}`),querySelector:s=>body.querySelector(s),querySelectorAll:s=>{
       if(s.startsWith('main '))siteQueries.push(s);
-      if(s==='main a[href*="/model/"]')return [model];
       if(s==='main button[data-react-aria-pressable]')return [generate];
       return body.querySelectorAll(s);
     },addEventListener(){}};
@@ -389,6 +405,23 @@ test('collapse keeps unsaved inputs, scroll position and status; SVG launcher re
   assert.equal(f.panel.dataset.minimized,'false');assert.equal(prompt.value,'not yet queued');assert.equal(f.panel.scrollTop,170);
   assert.equal(f.document.activeElement,collapse);assert.equal(f.message(),before);
   assert.equal(f.records.has('local.pixai-web-queue.v1'),false);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
+});
+
+test('collapsed launcher drag saves position without opening or changing inputs; a later pointer tap opens exactly once',()=>{
+  const f=panelFixture(),collapse=f.panel.querySelector('[data-collapse]'),launcher=f.panel.querySelector('[data-launcher]');
+  const prompt=runtimeField(f,'대기열 프롬프트');prompt.value='unsaved prompt';const message=f.message();
+  f.press(collapse);const before=f.records.get(runtimeSettingsKeys.queue);
+  launcher.fire('pointerdown',{clientX:610,clientY:210});launcher.fire('pointermove',{clientX:710,clientY:310});
+  launcher.fire('pointerup',{clientX:710,clientY:310});launcher.fire('click',{detail:1,pointerType:'mouse'});
+  assert.equal(f.panel.dataset.minimized,'true');assert.equal(prompt.value,'unsaved prompt');assert.equal(f.message(),message);
+  assert.deepEqual(JSON.parse(f.records.get('local.pixai-web-queue.position.v1')),{x:700,y:300});
+  assert.equal(f.records.get(runtimeSettingsKeys.queue),before);
+  const opensBefore=f.storageMutations.filter(item=>item.key==='local.pixai-web-queue.minimized.v1'&&item.value==='false').length;
+  launcher.fire('pointerdown',{clientX:710,clientY:310});launcher.fire('pointerup',{clientX:710,clientY:310});launcher.fire('click',{detail:1,pointerType:'mouse'});
+  assert.equal(f.panel.dataset.minimized,'false');
+  assert.equal(f.storageMutations.filter(item=>item.key==='local.pixai-web-queue.minimized.v1'&&item.value==='false').length,opensBefore+1);
+  assert.equal(prompt.value,'unsaved prompt');assert.equal(f.message(),message);assert.equal(f.records.get(runtimeSettingsKeys.queue),before);
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
 });
 
 test('collapsed preference survives a fresh mount and malformed or failed view storage does not break folding',()=>{
@@ -888,17 +921,20 @@ function fixture(options={}) {
   const catalogs={models:options.models||[{id:'2',versionId:'22',defaultVersion:'21',name:'대상 모델',versions:['21','22']}],
     loras:options.loras||[{id:'20',versionId:'201',name:'대상 LoRA',weight:1}]};
   const button=(text,attrs={},action=()=>{})=>{const node=new Element('button',attrs,text);node.onClick=()=>{state.clicks.push(text||attrs['aria-label']);action();};return node;};
-  const modelLink=new Element('a'),rows=new Element('div');
-  function refreshModel() {modelLink.attrs.href=`/ko/model/${state.model.id}/${state.model.versionId}`;modelLink.textContent=state.model.name;}
+  const modelSection=new Element('section',{'data-section':'model'}),stylesSection=new Element('section',{'data-section':'styles'}),settingsSection=new Element('section',{'data-section':'settings'});
+  const modelCard=new Element('div',{'data-testid':'selected-entity-card'}),modelLink=new Element('a'),modelImageLink=new Element('a'),rows=new Element('div');
+  modelCard.append(modelImageLink,modelLink);modelSection.append(modelCard);stylesSection.append(rows);
+  function refreshModel() {modelLink.attrs.href=modelImageLink.attrs.href=`/en/model/${state.model.id}/${state.model.versionId}`;modelLink.textContent=state.model.name;}
   function renderRows() {
     rows.children=[];
     for(const lora of state.loras) {
-      const row=new Element('div'),link=new Element('a',{href:`/ko/model/${lora.id}/${lora.versionId}`},lora.name);
-      const input=new Input({type:'number','aria-label':'비중',min:options.min??'-2',max:options.max??'2',step:options.step??'0.1'},lora.weight);
+      const row=new Element('div',{'data-testid':'selected-entity-card'}),link=new Element('a',{href:`/en/model/${lora.id}/${lora.versionId}`},lora.name);
+      const imageLink=new Element('a',{href:`/en/model/${lora.id}/${lora.versionId}`});
+      const input=new Input({type:'number','aria-label':options.english?'Weight':'비중',min:options.min??'-2',max:options.max??'2',step:options.step??'0.1'},lora.weight);
       input.disabled=!!options.disabledLora;input.onEvent=event=>{if(event.type==='input')lora.weight=Number(input.value);};
-      const remove=button('',{'aria-label':'제거'},()=>{state.loras=state.loras.filter(item=>item.id!==lora.id);renderRows();});
+      const remove=button('',{'aria-label':options.english?'Remove':'제거'},()=>{state.loras=state.loras.filter(item=>item.id!==lora.id);renderRows();});
       // The input is nested one level deeper than the link/remove controls.
-      row.append(link,new Element('div').append(input),remove);
+      row.append(imageLink,link,new Element('div').append(input),remove);
       if(lora.incompatible)row.append(new Element('span',{class:'text-danger'},'호환 불가'));
       rows.append(row);
     }
@@ -936,21 +972,22 @@ function fixture(options={}) {
     }
     opened.append(button('확인',{},()=>{if(pending)state.loras.push({...pending});renderRows();close();}));
   }
-  const tab=button('모델',{role:'tab','aria-selected':options.modelTabHidden?'false':'true'},()=>{tab.setAttribute('aria-selected','true');allModel.hidden=false;allLora.hidden=false;modelLink.hidden=false;rows.hidden=false;});
+  const tab=button(options.english?'Model':'모델',{role:'tab','aria-selected':options.modelTabHidden?'false':'true'},()=>{tab.setAttribute('aria-selected','true');allModel.hidden=false;allLora.hidden=false;modelCard.hidden=false;rows.hidden=false;});
   const allModel=button('전체 모델 보기',{},openModel),allLora=button('전체 LoRA 보기',{},openLora);
   allModel.hidden=!!options.modelTabHidden||!!options.noModelButton;allLora.hidden=!!options.modelTabHidden;
-  modelLink.hidden=rows.hidden=!!options.modelTabHidden;
-  main.append(tab,modelLink,rows,allModel,allLora,button('생성! 7,800',{},()=>{state.paidClicks++;}));
+  modelCard.hidden=rows.hidden=!!options.modelTabHidden;
+  modelSection.append(allModel);stylesSection.append(allLora);
+  main.append(tab,modelSection,stylesSection,settingsSection,button('생성! 7,800',{},()=>{state.paidClicks++;}));
   refreshModel();renderRows();
   let negative=null;
-  const attachNegative=()=>{if(!negative){negative=new Textarea({placeholder:'여기에 네거티브 프롬프트를 입력하세요'},options.negativeValue||'');main.append(negative);}};
+  const attachNegative=()=>{if(!negative){negative=new Textarea({placeholder:'여기에 네거티브 프롬프트를 입력하세요'},options.negativeValue||'');settingsSection.append(negative);}};
   if(options.negativeVisible)attachNegative();
   if(options.negativeAdvanced) {
-    const advanced=button('고급',{'aria-expanded':'false'},()=>{advanced.setAttribute('aria-expanded','true');attachNegative();});main.append(advanced);
+    const advanced=button('고급',{'aria-expanded':'false'},()=>{advanced.setAttribute('aria-expanded','true');attachNegative();});settingsSection.append(advanced);
   }
   if(options.openDialog){opened=new Element('div',{role:'dialog'});doc.append(opened);}
   const io={win,check(){state.checks++;if(options.cancelled)throw new Error('중단됨');},mutate(action){state.mutations++;return action();},sleep:async()=>{}};
-  return {doc,main,state,modelLink,rows,negative:()=>negative,adapter:core.createPixaiSettingsAdapter(doc,io)};
+  return {doc,main,state,modelSection,stylesSection,settingsSection,modelCard,modelLink,rows,negative:()=>negative,adapter:core.createPixaiSettingsAdapter(doc,io)};
 }
 
 test('model links retain exact numeric ID/version and reject broad or malformed URLs',()=>{
@@ -980,16 +1017,63 @@ test('numeric LoRA fields enforce range and anchored step without rounding',()=>
 });
 test('capture reads the visible model and LoRA rows, including zero, without paid clicks',async()=>{
   const f=fixture({state:{loras:[{id:'10',versionId:'101',name:'캐릭터 LoRA',weight:0}]},modelTabHidden:true});
-  const hidden=new Element('a',{href:'/ko/model/999/9991'},'숨겨진 모델');hidden.hidden=true;f.main.append(hidden);
+  const hidden=new Element('a',{href:'/ko/model/999/9991'},'숨겨진 모델');hidden.hidden=true;f.modelCard.append(hidden);
   const result=await f.adapter.capture();
   assert.deepEqual(plain(result),configuration(undefined,[{id:'10',versionId:'101',name:'캐릭터 LoRA',weight:0}]));
   assert.deepEqual(f.state.clicks,['모델']);assert.equal(f.state.paidClicks,0);
 });
 test('capture rejects ambiguous visible model links and open settings dialogs without submission',async()=>{
-  const f=fixture();f.main.append(new Element('a',{href:'/ko/model/2/22'},'추가 모델'));
+  const f=fixture();f.modelCard.append(new Element('a',{href:'/ko/model/2/22'},'추가 모델'));
   await assert.rejects(f.adapter.capture(),/현재 모델 버전/);assert.equal(f.state.paidClicks,0);
   const opened=fixture({openDialog:true});await assert.rejects(opened.adapter.capture(),/먼저 닫아/);
   await assert.rejects(opened.adapter.apply(configuration()),/먼저 닫아/);assert.equal(opened.state.mutations,0);
+});
+test('selected model card ignores recommendation/history links and the legacy model key follows only the selected version',async()=>{
+  const f=fixture();
+  const recommendation=new Element('a',{href:'/en/model/9/99'},'추천 모델');recommendation.parentElement=f.modelSection;f.modelSection.children.unshift(recommendation);
+  f.main.append(new Element('div').append(new Element('a',{href:'/en/model/8/88'},'이전 작업 모델')));
+  f.stylesSection.append(new Element('a',{href:'/en/model/7/77'},'추천 LoRA'));
+  f.settingsSection.append(new Input({type:'number','aria-label':'비중'},0.8),new Element('a',{href:'/en/model/6/66'},'다른 설정 링크'));
+  assert.deepEqual(plain(await f.adapter.capture()),configuration());assert.equal(f.adapter.modelKey(),'1/11');
+  f.modelLink.setAttribute('href','/en/model/2/22');assert.equal(f.adapter.modelKey(),'2/22');
+  assert.equal(f.state.paidClicks,0);assert.equal(f.state.mutations,0);
+});
+test('capture opens the English model tab even when visible recommended/history model links already exist',async()=>{
+  const f=fixture({english:true,modelTabHidden:true});
+  f.main.append(new Element('a',{href:'/en/model/9/99'},'visible recommendation'));
+  assert.deepEqual(plain(await f.adapter.capture()),configuration());assert.deepEqual(f.state.clicks,['Model']);assert.equal(f.state.paidClicks,0);
+});
+test('missing or malformed selected model card cannot fall back to a valid recommended model link',async()=>{
+  for(const mode of ['missing','invalid']) {
+    const f=fixture();f.modelSection.append(new Element('a',{href:'/en/model/9/99'},'valid recommendation'));
+    if(mode==='missing')f.modelCard.remove();else f.modelLink.setAttribute('href','/en/model/1/not-a-version');
+    assert.throws(()=>f.adapter.modelKey(),/현재 모델 버전/);
+    await assert.rejects(f.adapter.capture(),/선택 모델 카드.*시간 초과/);assert.equal(f.state.paidClicks,0);
+  }
+});
+test('English selected LoRA weight is captured without Korean labels and removed only inside its own card',async()=>{
+  const lora={id:'10',versionId:'101',name:'LoRA',weight:0};
+  const f=fixture({english:true,state:{loras:[{...lora}]}});
+  assert.deepEqual(plain(await f.adapter.capture()),configuration(undefined,[lora]));
+  assert.equal((await f.adapter.apply(configuration())).loras.length,0);assert.deepEqual(f.state.clicks,['Remove']);assert.equal(f.state.paidClicks,0);
+});
+test('a styles LoRA number row is read without a shared card test ID or weight aria-label',async()=>{
+  const lora={id:'10',versionId:'101',name:'LoRA',weight:0.7},f=fixture({state:{loras:[{...lora}]}});
+  delete f.rows.children[0].attrs['data-testid'];delete f.rows.querySelector('input').attrs['aria-label'];
+  assert.deepEqual(plain(await f.adapter.capture()),configuration(undefined,[lora]));assert.equal(f.state.paidClicks,0);
+});
+test('unsupported or ambiguous selected LoRA weight controls fail closed instead of silently omitting the LoRA',async()=>{
+  for(const mode of ['range','multiple','no-version']) {
+    const f=fixture({state:{loras:[{id:'10',versionId:'101',name:'LoRA',weight:0.5}]}}),row=f.rows.children[0];
+    if(mode==='range')row.querySelector('input').setAttribute('type','range');
+    if(mode==='multiple')row.append(new Input({type:'number'},0.5));
+    if(mode==='no-version')row.querySelectorAll('a').forEach(link=>link.setAttribute('href','/en/model/10'));
+    await assert.rejects(f.adapter.capture(),/선택 LoRA/);assert.equal(f.state.paidClicks,0);
+  }
+});
+test('an unrecognized styles number input cannot borrow a recommended model identity across the section boundary',async()=>{
+  const f=fixture();f.stylesSection.append(new Input({type:'number'},0.5),new Element('a',{href:'/en/model/9/99'},'style recommendation'));
+  await assert.rejects(f.adapter.capture(),/선택 LoRA 행/);assert.equal(f.state.paidClicks,0);
 });
 test('incompatible LoRA blocks capture and final apply, but extras can be removed while changing settings',async()=>{
   const row={id:'10',versionId:'101',name:'호환 불가',weight:0.5,incompatible:true};
@@ -1039,7 +1123,7 @@ test('negative prompt opens visible advanced controls and uses textarea value se
 test('missing model controls times out before changing settings or submitting',async()=>{
   const f=fixture({noModelButton:true});
   f.modelLink.hidden=true;
-  await assert.rejects(f.adapter.apply(configuration()),/모델 패널.*시간 초과/);
+  await assert.rejects(f.adapter.apply(configuration()),/선택 모델 카드.*시간 초과/);
   assert.equal(f.state.mutations,0);assert.equal(f.state.paidClicks,0);assert.equal(f.state.model.id,'1');
 });
 test('readable current settings do not depend on a model picker button or change the site',async()=>{
@@ -1239,7 +1323,9 @@ test('baseline: a single visible model panel is captured without paid generation
 });
 test('regression: hidden first main must not block a later visible main model panel',async()=>{
   const f=docSetup(fixture()),hiddenMain=new Element('main');hiddenMain.hidden=true;hiddenMain.ownerDocument=f.doc;
-  hiddenMain.append(new Element('button',{},'전체 모델 보기'));hiddenMain.parentElement=f.doc;f.doc.children.unshift(hiddenMain);
+  const hiddenSection=new Element('section',{'data-section':'model'}),hiddenCard=new Element('div',{'data-testid':'selected-entity-card'});
+  hiddenCard.append(new Element('a',{href:'/en/model/9/99'},'숨겨진 responsive 모델'));hiddenSection.append(hiddenCard,new Element('button',{},'전체 모델 보기'));
+  hiddenMain.append(hiddenSection);hiddenMain.parentElement=f.doc;f.doc.children.unshift(hiddenMain);
   await compareCapture(f);
 });
 test('regression: visibility-hidden model menu button must not cause an ambiguous panel timeout',async()=>{
@@ -1248,11 +1334,11 @@ test('regression: visibility-hidden model menu button must not cause an ambiguou
   await compareCapture(f);
 });
 test('regression: duplicated responsive links with the same exact model/version still identify one model',async()=>{
-  const f=docSetup(fixture());f.main.append(new Element('a',{href:'/ko/model/1/11'},'현재 모델'));
+  const f=docSetup(fixture());f.modelCard.append(new Element('a',{href:'/ko/model/1/11'},'현재 모델'));
   await compareCapture(f);
 });
 test('distinct visible model identities remain ambiguous and must never be guessed',async()=>{
-  const f=docSetup(fixture());f.main.append(new Element('a',{href:'/ko/model/2/22'},'다른 모델'));
+  const f=docSetup(fixture());f.modelCard.append(new Element('a',{href:'/ko/model/2/22'},'다른 모델'));
   await assert.rejects(f.adapter.capture(),/현재 모델 버전|모델.*확인/);assert.equal(f.state.paidClicks,0);
 });
 test('regression: a visibility-hidden retained LoRA row must not become a duplicate selected LoRA',async()=>{

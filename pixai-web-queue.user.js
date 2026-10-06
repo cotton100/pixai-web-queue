@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.3.2
+// @version      0.3.3
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -56,28 +56,50 @@
       const saved = io.load();
       if (Number.isFinite(saved?.x) && Number.isFinite(saved?.y)) place(saved);
     } catch { /* Ignore a malformed position record, never the generation queue. */ }
-    handle.addEventListener('pointerdown', event => {
-      if (event.button !== 0 || event.isPrimary === false || drag) return;
-      const rect = target.getBoundingClientRect();
-      drag = {id:event.pointerId, x:event.clientX - rect.left, y:event.clientY - rect.top};
-      place({x:rect.left,y:rect.top});
-      handle.setPointerCapture(event.pointerId);
-      handle.dataset.dragging = '';
-      event.preventDefault(); event.stopPropagation();
-    });
-    handle.addEventListener('pointermove', event => {
-      if (!drag || event.pointerId !== drag.id) return;
-      place({x:event.clientX - drag.x, y:event.clientY - drag.y});
-      event.preventDefault(); event.stopPropagation();
-    });
-    const finish = event => {
-      if (!drag || event.pointerId !== drag.id) return;
-      drag = null;
-      delete handle.dataset.dragging;
-      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-      remember();
-    };
-    for (const type of ['pointerup','pointercancel','lostpointercapture']) handle.addEventListener(type, finish);
+    function bindHandle(control, open) {
+      const tappable = typeof open === 'function';
+      function move(event) {
+        if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return;
+        drag.moved = true;
+        control.dataset.dragging = '';
+        place({x:event.clientX - drag.x, y:event.clientY - drag.y});
+      }
+      control.addEventListener('pointerdown', event => {
+        if (event.button !== 0 || event.isPrimary === false || drag || control.disabled || (tappable && event.isTrusted === false)) return;
+        const rect = target.getBoundingClientRect();
+        drag = {id:event.pointerId, control, x:event.clientX - rect.left, y:event.clientY - rect.top,
+          startX:event.clientX, startY:event.clientY, moved:!tappable};
+        if (!tappable) {place({x:rect.left,y:rect.top}); control.dataset.dragging = '';}
+        control.setPointerCapture(event.pointerId);
+        event.preventDefault(); event.stopPropagation();
+      });
+      control.addEventListener('pointermove', event => {
+        if (!drag || drag.control !== control || event.pointerId !== drag.id) return;
+        move(event);
+        event.preventDefault(); event.stopPropagation();
+      });
+      const finish = event => {
+        if (!drag || drag.control !== control || event.pointerId !== drag.id) return;
+        if (tappable && !drag.moved && event.type === 'pointerup') move(event);
+        const moved = drag.moved;
+        drag = null;
+        delete control.dataset.dragging;
+        if (control.hasPointerCapture(event.pointerId)) control.releasePointerCapture(event.pointerId);
+        if (moved) remember();
+        if (tappable) {
+          event.preventDefault(); event.stopPropagation();
+          if (!moved && event.type === 'pointerup' && event.isTrusted !== false && !control.disabled) open();
+        }
+      };
+      for (const type of ['pointerup','pointercancel','lostpointercapture']) control.addEventListener(type, finish);
+      if (tappable) control.addEventListener('click', event => {
+        event.preventDefault(); event.stopPropagation();
+        // Pointer taps are handled on release; keyboard/assistive clicks have no pointer detail.
+        if (event.detail === 0 && !event.pointerType && event.isTrusted !== false && !control.disabled && !drag) open();
+      });
+    }
+    bindHandle(handle);
+    if (io.launcher) bindHandle(io.launcher, io.open);
     io.onResize(() => {
       if (!positioned) return;
       const rect = target.getBoundingClientRect();
@@ -643,30 +665,52 @@
       return found.length === 1 ? found[0] : null;
     }
     async function revealModelPanel() {
-      const tabs=list(doc,'main [role="tab"]').filter(e=>shown(e)&&e.textContent.trim()==='모델');
+      const tabs=list(doc,'main [role="tab"]').filter(e=>shown(e)&&['모델','Model'].includes(e.textContent.trim()));
       if (tabs.length === 1 && tabs[0].getAttribute('aria-selected') !== 'true') click(tabs[0]);
-      await waitFor(()=>modelLinks(loraRows()).length > 0,'모델 패널');
+      await waitFor(()=>modelLinks().length > 0,'선택 모델 카드');
     }
-    function loraRows() {
-      return list(doc,'main input[type="number"][aria-label="비중"]').filter(shown).map(input=>{
-        let row=input.parentElement;
-        while (row && !(row.querySelector('a[href*="/model/"]') && row.querySelector('button[aria-label="제거"]'))) row=row.parentElement;
-        if (!row || row.tagName === 'MAIN' || row.tagName === 'BODY') throw new Error('선택 LoRA 행을 확인할 수 없습니다.');
-        const link=list(row,'a[href*="/model/"]').find(e=>shown(e)&&e.textContent.trim());
-        const model=parseModelLink(link?.getAttribute('href'));
-        if (!model) throw new Error('선택 LoRA 버전을 확인할 수 없습니다.');
-        return {row,input,...model,name:link.textContent.trim(),weight:Number(input.value)};
-      });
-    }
-    function modelLinks(loras) {
-      const links=list(doc,'main a[href*="/model/"]').filter(e=>shown(e)&&e.textContent.trim()&&parseModelLink(e.getAttribute('href'))&&!loras.some(item=>item.row.contains(e)));
+    function namedVersionLinks(scope) {
+      const links=list(scope,'a[href*="/model/"]').filter(e=>shown(e)&&e.textContent.trim()&&parseModelLink(e.getAttribute('href')));
       return [...new Map(links.map(link=>{
         const model=parseModelLink(link.getAttribute('href'));
         return [`${model.id}/${model.versionId}`,link];
       })).values()];
     }
+    const selectedCards = section => list(doc,`main [data-section="${section}"] [data-testid="selected-entity-card"]`).filter(shown);
+    function loraRows() {
+      const rows=selectedCards('styles');
+      // LoRA cards do not always expose the shared card test ID. Resolve their
+      // number field inside the styles section, never in model/settings/history.
+      for (const section of list(doc,'main [data-section="styles"]').filter(shown)) {
+        for (const input of list(section,'input[type="number"]').filter(shown)) {
+          if (rows.some(row=>row.contains(input))) continue;
+          let row=input.parentElement;
+          while (row && row!==section && !namedVersionLinks(row).length) row=row.parentElement;
+          if (!row || row===section) throw new Error('선택 LoRA 행을 확인할 수 없습니다.');
+          rows.push(row);
+        }
+      }
+      return rows.map(row=>{
+        const input=only(list(row,'input[type="number"]').filter(shown),'선택 LoRA 가중치 입력창');
+        const link=only(namedVersionLinks(row),'선택 LoRA 버전');
+        const model=parseModelLink(link?.getAttribute('href'));
+        if (!model) throw new Error('선택 LoRA 버전을 확인할 수 없습니다.');
+        return {row,input,...model,name:link.textContent.trim(),weight:Number(input.value)};
+      });
+    }
+    function modelLinks() {
+      const links=selectedCards('model').flatMap(namedVersionLinks);
+      return [...new Map(links.map(link=>{
+        const model=parseModelLink(link.getAttribute('href'));
+        return [`${model.id}/${model.versionId}`,link];
+      })).values()];
+    }
+    function modelKey() {
+      const model=parseModelLink(only(modelLinks(),'현재 모델 버전').getAttribute('href'));
+      return `${model.id}/${model.versionId}`;
+    }
     function read(allowIncompatible = false) {
-      const loras=loraRows(), links=modelLinks(loras);
+      const loras=loraRows(), links=modelLinks();
       const link=only(links,'현재 모델 버전');
       const config=validatePresetConfiguration({model:{...parseModelLink(link.getAttribute('href')),name:link.textContent.trim()},loras:loras.map(({id,versionId,name,weight})=>({id,versionId,name,weight}))});
       if (!allowIncompatible && loras.some(item=>item.row.querySelector('[class*="text-danger"]'))) throw new Error('호환되지 않거나 사용할 수 없는 LoRA가 표시돼 있습니다.');
@@ -721,9 +765,8 @@
       for (const selected of loraRows()) {
         const target=config.loras.find(item=>item.id === selected.id);
         if (!target || (target.versionId && target.versionId !== selected.versionId)) {
-          let row=selected.row;
-          while (row && !row.querySelector('button[aria-label="제거"]')) row=row.parentElement;
-          click(row?.querySelector('button[aria-label="제거"]'));
+          const remove=list(selected.row,'button').filter(e=>shown(e)&&['제거','Remove'].includes(e.getAttribute('aria-label')));
+          click(only(remove,'LoRA 제거 버튼'));
           await waitFor(()=>!loraRows().some(item=>item.id === selected.id),'LoRA 제외');
         }
       }
@@ -747,7 +790,7 @@
     async function capture() {
       io.check();
       if (dialog()) throw new Error('열린 사이트 선택창을 먼저 닫아 주세요.');
-      if (!modelLinks(loraRows()).length) await revealModelPanel();
+      await revealModelPanel();
       return read();
     }
     async function apply(value) {
@@ -782,7 +825,7 @@
       const input=negativeField();
       if ((input && normalize(input.value) !== normalize(value)) || (!input && normalize(value))) throw new Error('네거티브 프롬프트가 조합과 다릅니다. 생성하지 않습니다.');
     }
-    return {capture,apply,read,setNegative,verifyNegative,captureNegative};
+    return {capture,apply,read,modelKey,setNegative,verifyNegative,captureNegative};
   }
 
 function mountPresetEditor(parent, io) {
@@ -1077,7 +1120,7 @@ function mountPresetEditor(parent, io) {
   const onGenerator = () => /^\/(?:[a-z]{2}\/)?generator\/image\/?$/.test(location.pathname);
   const taskIds = () => new Set(all('main [data-task-id]').map(element => element.dataset.taskId));
   const taskCard = id => all('main [data-testid="mobile-task-card"]').find(element => element.dataset.taskId === id);
-  const modelId = () => all('main a[href*="/model/"]').find(element => visible(element) && element.textContent.trim())?.getAttribute('href');
+  const modelId = () => settings.modelKey();
   const settings = createPixaiSettingsAdapter(document, {
     win:window, sleep,
     check:() => { if (!onGenerator()) throw new Error('PixAI 한국어 새 이미지 생성 화면에서 실행해 주세요.'); if ((running || starting || settingsBusy) && stopRequested) throw new Error('설정 적용이 중지됐습니다.'); },
@@ -1349,7 +1392,7 @@ function mountPresetEditor(parent, io) {
   function render() {
     if (!panel) return;
     const launcher=panel.querySelector('[data-launcher]');
-    if (launcher) launcher.title=`PixAI 대기열 열기 · ${running ? '실행 중' : starting ? '시작 준비 중' : settingsBusy ? '설정 확인 중' : '대기'}\n${message}`;
+    if (launcher) launcher.title=`클릭해 PixAI 대기열 열기 · 드래그해 이동 · ${running ? '실행 중' : starting ? '시작 준비 중' : settingsBusy ? '설정 확인 중' : '대기'}\n${message}`;
     panel.querySelector('[data-message]').textContent = message;
     const feedback=panel.querySelector('[data-action-message]');
     if (feedback) feedback.textContent=message;
@@ -1393,10 +1436,10 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.3.2 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.3.3 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#211d2b}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
-    style.textContent += '#local-pixai-queue [data-launcher]{display:none;width:52px;height:52px;margin:0;padding:12px;border:1px solid #8c72a7;border-radius:50%;line-height:0;background:#413250}#local-pixai-queue [data-launcher]:focus-visible,#local-pixai-queue [data-collapse]:focus-visible{outline:2px solid #e2c7ff;outline-offset:3px}#local-pixai-queue[data-minimized="true"]{width:52px;height:52px;max-height:none;padding:0;border:0;border-radius:50%;overflow:visible}#local-pixai-queue[data-minimized="true"]>:not([data-launcher]){display:none!important}#local-pixai-queue[data-minimized="true"]>[data-launcher]{display:block}';
+    style.textContent += '#local-pixai-queue [data-launcher]{display:none;width:52px;height:52px;margin:0;padding:12px;border:1px solid #8c72a7;border-radius:50%;line-height:0;background:#413250;touch-action:none;user-select:none}#local-pixai-queue [data-launcher][data-dragging]{cursor:grabbing}#local-pixai-queue [data-launcher]:focus-visible,#local-pixai-queue [data-collapse]:focus-visible{outline:2px solid #e2c7ff;outline-offset:3px}#local-pixai-queue[data-minimized="true"]{width:52px;height:52px;max-height:none;padding:0;border:0;border-radius:50%;overflow:visible}#local-pixai-queue[data-minimized="true"]>:not([data-launcher]){display:none!important}#local-pixai-queue[data-minimized="true"]>[data-launcher]{display:block}';
     function iconControl(label, attribute, path) {
       const control=node('button',null,{type:'button','aria-label':label,title:label,[attribute]:'','aria-controls':'local-pixai-queue'});
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
@@ -1417,7 +1460,6 @@ function mountPresetEditor(parent, io) {
     }
     // View-only controls stay enabled during generation and never replace its status.
     bindFolderActivation(collapse,()=>collapse,()=>minimize(true),()=>{});
-    bindFolderActivation(launcher,()=>launcher,()=>minimize(false),()=>{});
     let minimized=false;
     try {minimized=JSON.parse(localStorage.getItem('local.pixai-web-queue.minimized.v1')||'false')===true;} catch { /* Ignore malformed or unavailable view preferences. */ }
     minimize(minimized,false,false);
@@ -1497,7 +1539,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.3.2',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.3.3',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -1569,6 +1611,7 @@ function mountPresetEditor(parent, io) {
     try { load(); } catch(error) { message=`대기열 읽기 실패: ${error.message}\n프리셋 읽기·편집은 사용할 수 있습니다. 대기열 원본은 유지했습니다.`; }
     render();
     bindPanelDrag(panel, dragHandle, {
+      launcher, open:() => minimize(false),
       viewport:() => ({width:window.innerWidth,height:window.innerHeight}),
       load:() => JSON.parse(localStorage.getItem('local.pixai-web-queue.position.v1') || 'null'),
       save:position => localStorage.setItem('local.pixai-web-queue.position.v1', JSON.stringify(position)),
@@ -1591,7 +1634,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.3.2', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.3.3', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
