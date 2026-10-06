@@ -266,7 +266,8 @@ function panelFixture(nativePicker, gm={}) {
     constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';this.scrollTop=0;}
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
     getAttribute(key){if(key.startsWith('data-')){const data=key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase());if(data in this.dataset)return this.dataset[data];}return this.attrs[key]??null;}
-    append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}}
+    append(...children){for(const child of children){child.remove();child.parentElement=this;this.children.push(child);}}
+    get id(){return this.getAttribute('id')||'';}
     prepend(...children){for(const child of children)child.parentElement=this;this.children.unshift(...children);}
     replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
     after(child){if(!this.parentElement)return;const siblings=this.parentElement.children;child.parentElement=this.parentElement;siblings.splice(siblings.indexOf(this)+1,0,child);}
@@ -335,6 +336,19 @@ function runtimeSettingsRecords() {
   return new Map([[runtimeSettingsKeys.library,JSON.stringify(runtimeSettingsLibrary())],[runtimeSettingsKeys.options,JSON.stringify({maxCredits:7800,filePrefix:'before',repeat:1})],
     [runtimeSettingsKeys.queue,JSON.stringify({version:1,jobs:[job()]})]]);
 }
+
+test('runtime workbench puts storage and backup in Settings, jobs in Queue, and run controls outside tab pages',()=>{
+  const f=panelFixture(null,{records:runtimeSettingsRecords()}),panel=f.panel;
+  const settings=panel.querySelector('[data-page="settings"]'),queue=panel.querySelector('[data-page="queue"]'),compose=panel.querySelector('[data-page="compose"]');
+  assert(settings&&queue&&compose);assert.equal(compose.hidden,false);assert.equal(settings.hidden,true);assert.equal(queue.hidden,true);
+  assert(settings.contains(panel.querySelector('[data-choose-folder]')));assert(settings.contains(runtimeField(f,'설정 백업 JSON 파일')));
+  assert(queue.contains(panel.querySelector('[data-jobs]')));assert(queue.contains(runtimeField(f,'대기열 프롬프트')));
+  const footer=panel.querySelector('[class="pq-footer"]');assert(footer.contains(panel.querySelector('[data-start]')));
+  assert.equal(panel.querySelector('[data-start]').closest('[role="tabpanel"]'),null);
+  const openSettings=panel.querySelector('[aria-label="저장 설정 열기"]');openSettings.fire('click',{detail:0});
+  assert.equal(settings.hidden,false);assert.equal(compose.hidden,true);assert.equal(f.document.activeElement.getAttribute('id'),'pq-tab-settings');
+  assert.equal(f.storageMutations.length,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
 function runtimeSettingsBackup() {
   const library=runtimeSettingsLibrary('imported common');library.presets[0].loras[0].triggerWords='imported trigger';
   return JSON.stringify(sandbox.module.exports.makeSettingsBackup(library,{maxCredits:6400,filePrefix:'imported',repeat:2},{appVersion:'fixture',exportedAt:'2026-10-07T00:00:00.000Z'}));

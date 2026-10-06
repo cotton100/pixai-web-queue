@@ -21,7 +21,7 @@ class Element {
   contains(target){return this===target||this.children.some(child=>child.contains(target));}
   focus(){globalThis.document.activeElement=this;}
   addEventListener(type,listener){(this.listeners[type]??=[]).push(listener);}
-  async emit(type){for(const listener of this.listeners[type]||[])await listener({type,target:this,isTrusted:true,preventDefault(){},stopPropagation(){}});}
+  async emit(type,extra={}){for(const listener of this.listeners[type]||[])await listener({type,target:this,isTrusted:true,preventDefault(){},stopPropagation(){},...extra});}
   matches(selector){
     if(selector.endsWith(':checked')&&!this.checked)return false;
     selector=selector.replace(/:checked$/,'');
@@ -72,9 +72,70 @@ function fixture(t,initial=seed()) {
     setBusy:value=>{busy=value;for(const element of all().filter(item=>Object.hasOwn(item.dataset,'edit')))element.disabled=busy||element.dataset.unavailable==='true';}};
 }
 
+test('workbench tabs keep one visible screen and retain every unsaved draft and checked chunk',async t=>{
+  const f=fixture(t),tabs=f.all().filter(item=>item.getAttribute('role')==='tab');
+  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','청크','캐릭터','모델·LoRA','공통문']);
+  assert.equal(tabs[0].getAttribute('aria-selected'),'true');
+  await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved chunk';
+  await f.select('저장한 캐릭터','c1');f.field('캐릭터 프롬프트').value='unsaved character';
+  await f.select('저장한 설정 프리셋','p1');f.field('LoRA 트리거 키워드').value='unsaved trigger';
+  f.field('공통 프롬프트').value='unsaved common';await f.choose('행동');
+  for (const tab of tabs) {
+    await tab.emit('click');
+    assert.equal(f.all().filter(item=>item.getAttribute('role')==='tabpanel'&&!item.hidden).length,1);
+    assert.equal(tab.getAttribute('aria-selected'),'true');assert.equal(tab.getAttribute('tabindex'),'0');
+    const page=f.all().find(item=>item.id===tab.getAttribute('aria-controls'));
+    assert(page);assert.equal(page.getAttribute('aria-labelledby'),tab.id);assert.equal(page.hidden,false);
+  }
+  assert.equal(f.field('청크 프롬프트').value,'unsaved chunk');assert.equal(f.field('캐릭터 프롬프트').value,'unsaved character');
+  assert.equal(f.field('LoRA 트리거 키워드').value,'unsaved trigger');assert.equal(f.field('공통 프롬프트').value,'unsaved common');
+  assert.equal(f.field('청크 선택: 행동').checked,true);assert.equal(f.saves.length,0);assert.equal(f.jobs.length,0);
+});
+
+test('tab arrows wrap, Home and End move focus, and view navigation remains available during generation',async t=>{
+  const f=fixture(t);f.ui.addPage('queue','대기열');f.ui.addPage('settings','설정');f.setBusy(true);
+  const tabs=f.all().filter(item=>item.getAttribute('role')==='tab');
+  await tabs[0].emit('keydown',{key:'ArrowLeft'});assert.equal(document.activeElement,tabs.at(-1));
+  assert.equal(tabs.at(-1).getAttribute('aria-selected'),'true');assert.equal(tabs.at(-1).disabled,false);
+  await tabs.at(-1).emit('keydown',{key:'ArrowRight'});assert.equal(document.activeElement,tabs[0]);
+  await tabs[0].emit('keydown',{key:'End'});assert.equal(document.activeElement,tabs.at(-1));
+  await tabs.at(-1).emit('keydown',{key:'Home'});assert.equal(document.activeElement,tabs[0]);
+  assert.equal(f.button('프리셋 저장').disabled,true);assert.equal(f.saves.length,0);assert.equal(f.jobs.length,0);
+});
+
+test('folder rail changes the browsed list without resetting the edited chunk or unsaved text',async t=>{
+  const initial=seed();initial.chunkFolders=[{id:'face',name:'표정 폴더'}];initial.scenes[0].folderId='face';
+  const f=fixture(t,initial);await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='draft retained';
+  await f.field('폴더 보기: 미분류').emit('click');
+  assert.equal(f.field('청크 폴더 필터').value,'unfiled');
+  const list=f.field('저장한 청크 목록');assert(!list.textContent.includes('smiling'),list.textContent);assert(list.textContent.includes('waving'));
+  assert.equal(f.field('저장한 청크').value,'s1');assert.equal(f.field('청크 프롬프트').value,'draft retained');
+  assert.equal(f.field('폴더 보기: 미분류').getAttribute('aria-pressed'),'true');
+  await f.field('폴더 보기: 표정 폴더').emit('click');assert(list.textContent.includes('smiling'));assert(!list.textContent.includes('waving'));
+  assert.equal(f.saves.length,0);
+});
+
+test('saved character cards load the selected content and search preserves the draft outside the results',async t=>{
+  const initial=seed();initial.characters.push({id:'c2',name:'Bob',prompt:'black hair',negativePrompt:''});const f=fixture(t,initial);
+  await f.field('캐릭터 편집: Bob').press();assert.equal(f.field('저장한 캐릭터').value,'c2');assert.equal(f.field('캐릭터 프롬프트').value,'black hair');
+  assert.equal(document.activeElement,f.field('캐릭터 이름'));f.field('캐릭터 프롬프트').value='unsaved black hair';
+  f.field('캐릭터 검색').value='character tags';await f.field('캐릭터 검색').emit('input');
+  assert.equal(f.fields('캐릭터 편집: Bob').length,0);assert.equal(f.fields('캐릭터 편집: Alice').length,1);
+  assert.equal(f.field('캐릭터 이름').value,'Bob');assert.equal(f.field('캐릭터 프롬프트').value,'unsaved black hair');assert.equal(f.saves.length,0);
+});
+
+test('saved preset cards expose model summaries, load triggers, and highlight a newly saved preset',async t=>{
+  const f=fixture(t);assert.match(f.field('프리셋 편집: Asset').textContent,/Model · LoRA 1개/);
+  await f.field('프리셋 편집: Asset').press();assert.equal(f.field('LoRA 트리거 키워드').value,'trigger one, trigger two');
+  await f.press('새 프리셋');f.field('프리셋 이름').value='New';f.field('모델 ID').value='101';f.field('모델 버전 ID').value='201';
+  await f.press('프리셋 저장');assert.equal(f.field('프리셋 편집: New').getAttribute('aria-pressed'),'true');
+  f.field('프리셋 검색').value='Asset';await f.field('프리셋 검색').emit('input');
+  assert.equal(f.fields('프리셋 편집: New').length,0);assert.equal(f.field('프리셋 이름').value,'New');
+});
+
 test('the production editor names reusable scenes as prompt chunks and saves edits in the existing scenes array',async t=>{
   const f=fixture(t);
-  assert(f.all().some(element=>element.tagName==='SUMMARY'&&element.textContent==='④ 프롬프트 청크'));
+  assert(f.all().some(element=>element.getAttribute('role')==='tab'&&element.textContent==='청크'));
   assert.equal(f.fields('예약 씬').length,0);
   assert.equal(f.field('청크 선택: 표정').checked,false);assert.equal(f.field('청크 선택: 행동').checked,false);
   await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='laughing';await f.press('청크 저장');
