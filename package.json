@@ -1,9 +1,9 @@
 {
   "name": "pixai-web-queue",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "PixAI 웹 프롬프트 대기열 유저스크립트",
   "scripts": {
-    "test": "node --check pixai-web-queue.user.js && node --test verify.cjs"
+    "test": "node --check pixai-web-queue.user.js && node --test verify.cjs verify-ui.cjs"
   }
 }

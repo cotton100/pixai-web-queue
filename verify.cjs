@@ -500,7 +500,10 @@ test('orphan references remain editable, but missing or empty references fail ex
   for (const key of ['presetId','characterId','sceneId']) {
     for (const value of ['', 'missing']) {
       const library = fixture(); library.reservations[0][key] = value;
-      if (value) assert.equal(core.normalizePresetLibrary(library).reservations[0][key], value);
+      if (value) {
+        const normalized = core.normalizePresetLibrary(library).reservations[0];
+        assert.equal(key === 'sceneId' ? normalized.sceneIds[0] : normalized[key], value);
+      }
       assert.throws(() => expand(library), /ID|없습니다/);
     }
   }
@@ -578,6 +581,113 @@ test('unsupported versions, malformed lists, nonstring prompts, and duplicate ge
   const second = fixture(); second.common.prompt = {toString:() => 'surprise'};
   assert.throws(() => expand(second), /문자열/);
   assert.throws(() => expand(fixture(), {idFactory:() => 'same'}), /중복/);
+});
+
+test('legacy single-scene reservations normalize into sceneIds without changing version-one stored sources', () => {
+  const library = fixture(), original = plain(library);
+  const normalized = core.normalizePresetLibrary(library);
+  assert.equal(normalized.version, 1);
+  assert.deepEqual(plain(normalized.scenes), library.scenes);
+  assert.deepEqual(plain(normalized.reservations.map(item => item.sceneIds)), [['s1'], ['s2']]);
+  assert.equal('sceneId' in normalized.reservations[0], false);
+  assert.deepEqual(library, original);
+  const result = expand(library);
+  assert.equal(result[0].composition.version, 2);
+  assert.deepEqual(plain(result[0].composition.chunks), [library.scenes[0]]);
+  assert.equal('scene' in result[0].composition, false);
+  assert.equal(result[0].title, '캐릭터1_표정_설정1_1');
+});
+test('multiple chunks form one prompt in selection order, with count generation jobs rather than chunk multiplication', () => {
+  const library = fixture(); library.reservations = [{...library.reservations[0], sceneIds:['s2','s1']}];
+  const result = expand(library);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].prompt, 'masterpiece, 1girl, (blue hair:1.2), running\n(arms up:1.2), smile, masterpiece');
+  assert.equal(result[0].negativePrompt, 'lowres, red hair, sad');
+  assert.equal(result[0].title, '캐릭터1_행동+표정_설정1_1');
+  assert.deepEqual(plain(result[0].composition.reservation.sceneIds), ['s2','s1']);
+  assert.deepEqual(plain(result[0].composition.chunks.map(item => item.id)), ['s2','s1']);
+});
+test('zero chunks explicitly overrides legacy scene selection and keeps common plus character prompting', () => {
+  const library = fixture(); library.reservations = [{...library.reservations[0], sceneId:'missing legacy value', sceneIds:[]}];
+  const result = expand(library);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].prompt, 'masterpiece, 1girl, (blue hair:1.2)');
+  assert.equal(result[0].negativePrompt, 'lowres, red hair');
+  assert.equal(result[0].title, '캐릭터1_설정1_1');
+  assert.deepEqual(plain(result[0].composition.chunks), []);
+});
+test('sceneIds must be an array when present; invalid canonical values never fall back to legacy sceneId', () => {
+  for (const sceneIds of [undefined, null, 's1', 1, {}, true]) {
+    const library = fixture(); library.reservations[0].sceneIds = sceneIds;
+    assert.throws(() => core.normalizePresetLibrary(library), /목록 형식/);
+  }
+});
+test('duplicate and empty chunk IDs are rejected, while orphan chunk references remain editable until enqueue', () => {
+  for (const sceneIds of [['s1','s1'], ['s1',' s1 '], [''], [null], [1]]) {
+    const library = fixture(); library.reservations[0].sceneIds = sceneIds;
+    assert.throws(() => expand(library), /중복|ID|문자열/);
+  }
+  const orphan = fixture(); orphan.reservations[0].sceneIds = ['s1','missing'];
+  assert.deepEqual(plain(core.normalizePresetLibrary(orphan).reservations[0].sceneIds), ['s1','missing']);
+  assert.throws(() => expand(orphan), /청크가 없습니다: missing/);
+});
+test('LoRA triggers survive JSON round trips, normalize CRLF, and omit blank triggers', () => {
+  const library = fixture();
+  library.presets[0].loras[0].triggerWords = '  (style:0.7), line one\r\nline two  ';
+  library.presets[0].loras.push({id:'20', name:'blank trigger', weight:0.7, triggerWords:' \r\n '});
+  const normalized = core.normalizePresetLibrary(library);
+  const restored = core.normalizePresetLibrary(JSON.parse(JSON.stringify(normalized)));
+  assert.equal(restored.presets[0].loras[0].triggerWords, '(style:0.7), line one\nline two');
+  assert.equal('triggerWords' in restored.presets[0].loras[1], false);
+  assert.deepEqual(plain(restored), plain(normalized));
+  const config = expand(restored)[0].configuration;
+  assert.equal(config.loras[0].triggerWords, '(style:0.7), line one\nline two');
+  assert.equal(config.loras[0].weight, 0);
+});
+test('common, LoRA triggers, character, and chunk positives preserve order and duplicate weighted tags', () => {
+  const library = fixture();
+  library.presets[0].loras[0].triggerWords = 'masterpiece, (trigger:1.2)';
+  library.presets[0].loras.push({id:'20', name:'second', weight:0.7, triggerWords:'second trigger\n(masterpiece:0.8)'});
+  library.reservations = [{...library.reservations[0], sceneIds:['s2','s1']}];
+  const result = expand(library);
+  assert.equal(result[0].prompt, 'masterpiece, masterpiece, (trigger:1.2), second trigger\n(masterpiece:0.8), 1girl, (blue hair:1.2), running\n(arms up:1.2), smile, masterpiece');
+  assert.equal(result[0].negativePrompt, 'lowres, red hair, sad');
+});
+test('nonstring LoRA trigger values fail validation and direct prompt composition', () => {
+  for (const triggerWords of [null, undefined, 1, false, [], {}]) {
+    const library = fixture(); library.presets[0].loras[0].triggerWords = triggerWords;
+    assert.throws(() => core.normalizePresetLibrary(library), /트리거.*문자열/);
+    assert.throws(() => core.composePresetPrompts(library.common, library.characters[0], [], library.presets[0]), /트리거.*문자열/);
+  }
+});
+test('legacy three-argument composition remains compatible and empty chunk arrays are accepted', () => {
+  const library = fixture();
+  assert.deepEqual(plain(core.composePresetPrompts(library.common, library.characters[0], library.scenes[0])), {
+    prompt:'masterpiece, 1girl, (blue hair:1.2), smile, masterpiece', negativePrompt:'lowres, red hair, sad'
+  });
+  assert.deepEqual(plain(core.composePresetPrompts(library.common, library.characters[0], [])), {
+    prompt:'masterpiece, 1girl, (blue hair:1.2)', negativePrompt:'lowres, red hair'
+  });
+});
+test('chunk and trigger snapshots are isolated from library edits, other jobs, and configuration edits', () => {
+  const library = fixture(); library.presets[0].loras[0].triggerWords = 'original trigger';
+  library.reservations = [{...library.reservations[0], sceneIds:['s1','s2']}];
+  const jobs = expand(library), second = plain(jobs[1]);
+  library.presets[0].loras[0].triggerWords = 'new trigger'; library.scenes[0].prompt = 'new expression';
+  library.reservations[0].sceneIds.reverse();
+  jobs[0].configuration.loras[0].triggerWords = 'changed job config';
+  jobs[0].composition.chunks[0].prompt = 'changed job chunk';
+  jobs[0].composition.reservation.sceneIds.reverse();
+  assert.deepEqual(plain(jobs[1]), second);
+  assert.equal(jobs[0].composition.preset.loras[0].triggerWords, 'original trigger');
+  assert.equal(jobs[0].prompt, 'masterpiece, original trigger, 1girl, (blue hair:1.2), smile, masterpiece, running\n(arms up:1.2)');
+});
+test('displayed configuration verification continues to compare model/version/LoRA numbers independent of triggers', () => {
+  const preset = fixture().presets[0], expected = {...preset, loras:[{...preset.loras[0], triggerWords:'prompt-only trigger'}]};
+  const actual = {...preset, loras:[{...preset.loras[0]}]};
+  assert.equal(core.assertConfiguration(expected, actual).loras[0].weight, 0);
+  actual.loras[0].weight = 0.1;
+  assert.throws(() => core.assertConfiguration(expected, actual), /LoRA/);
 });
 
 })();
