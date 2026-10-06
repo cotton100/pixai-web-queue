@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const sandbox={module:{exports:{}}};
 vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),sandbox);
-const {processJob,recover,verifyTask,outputIds,safeName,checkCost,bindPanelDrag,acceptFolder,folderError}=sandbox.module.exports;
+const {processJob,recover,verifyTask,outputIds,safeName,checkCost,bindPanelDrag,acceptFolder,folderError,bindFolderActivation,pickDirectory}=sandbox.module.exports;
 const job=()=>({id:'fixture',prompt:'1girl, smile',title:'미소',state:'queued',saved:[]});
 const task=(j,count=4)=>({id:j.taskId,status:'completed',createdAt:new Date(j.submittedAt || Date.now()).toISOString(),parameters:{prompts:j.prompt},outputs:{batch:Array.from({length:count},(_,i)=>({mediaId:String(100+i)}))}});
 function fixture(j, overrides={}) {
@@ -170,4 +170,61 @@ test('release metadata preserves install identity and pins both update URLs to t
   assert.equal(field('updateURL'),published);assert.equal(field('downloadURL'),published);
   const version=JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'package.json'),'utf8')).version;
   assert.equal(field('version'),version);assert.ok(source.includes(`PixAI 대기열 · ${version} 후보`));
+});
+
+function activationFixture() {
+  const listeners={},target={};let calls=0;const errors=[];
+  const button={disabled:false,contains:element=>element===target};
+  bindFolderActivation({addEventListener(type,fn,capture){assert.equal(capture,true);listeners[type]=fn}},
+    ()=>button,()=>{calls++},error=>errors.push(error));
+  return {button,errors,get calls(){return calls},fire(type,values={}){
+    const event={type,target,button:0,pointerId:1,isPrimary:true,isTrusted:true,timeStamp:100,detail:1,
+      preventDefault(){this.prevented=true},stopImmediatePropagation(){this.stopped=true},...values};
+    listeners[type](event);return event;
+  }};
+}
+test('folder activation occurs at capture before site bubble handlers; pointerup plus click invokes once',()=>{
+  const f=activationFixture();f.fire('pointerdown');const up=f.fire('pointerup');
+  assert.equal(f.calls,1);assert.equal(up.stopped,true);
+  f.fire('click',{timeStamp:110});assert.equal(f.calls,1);
+  f.fire('pointerdown',{timeStamp:200});f.fire('pointerup',{timeStamp:210});assert.equal(f.calls,2);
+});
+test('keyboard activation and an unrelated page click are handled separately',()=>{
+  const f=activationFixture();const other=f.fire('click',{target:{}});
+  assert.equal(f.calls,0);assert.equal(other.stopped,undefined);
+  f.fire('click',{detail:0});assert.equal(f.calls,1);
+});
+test('disabled, synthetic or cancelled folder gestures never open a picker',()=>{
+  const f=activationFixture();f.button.disabled=true;f.fire('click',{detail:0});assert.equal(f.calls,0);
+  f.button.disabled=false;f.fire('click',{detail:0,isTrusted:false});assert.equal(f.calls,0);assert.equal(f.errors.length,1);
+  f.fire('pointerdown');f.fire('pointercancel');f.fire('pointerup');assert.equal(f.calls,0);
+  f.fire('pointerup',{button:2});assert.equal(f.calls,0);
+});
+test('dragging from another area onto folder button cannot activate on pointerup',()=>{
+  const f=activationFixture();f.fire('pointerdown',{target:{}});f.fire('pointerup');assert.equal(f.calls,0);
+});
+function pickerTimers() {
+  let callback;const cleared=[];
+  return {cleared,set(fn,ms){assert.equal(ms,8000);callback=fn;return 1},clear:id=>cleared.push(id),tick:()=>callback()};
+}
+test('native folder picker is invoked immediately in the gesture before any awaits',async()=>{
+  const events=[],timers=pickerTimers(),chosen={name:'assets'};
+  const win={showDirectoryPicker(options){assert.equal(this,win);assert.equal(options.mode,'readwrite');events.push('native');return Promise.resolve(chosen)}};
+  const pending=pickDirectory(win,text=>events.push(text),timers);
+  assert.equal(events[1],'native');assert.match(events[0],/입력 전달됨/);
+  assert.equal(await pending,chosen);assert.match(events[2],/권한/);assert.deepEqual(timers.cleared,[1]);
+});
+test('unresolved picker displays waiting status but never retries or reports selection success',async()=>{
+  let finish,calls=0;const messages=[],timers=pickerTimers(),chosen={name:'assets'};
+  const pending=pickDirectory({showDirectoryPicker(){calls++;return new Promise(resolve=>{finish=resolve})}},text=>messages.push(text),timers);
+  timers.tick();assert.equal(calls,1);assert.match(messages.at(-1),/응답 대기/);
+  assert.ok(!messages.some(text=>text.startsWith('폴더 선택됨')));
+  finish(chosen);assert.equal(await pending,chosen);assert.equal(calls,1);
+});
+test('missing, synchronously failing and cancelled pickers reject instead of silently succeeding',async()=>{
+  const timers=pickerTimers(),messages=[];
+  await assert.rejects(pickDirectory({},text=>messages.push(text),timers),/API/);
+  await assert.rejects(pickDirectory({showDirectoryPicker(){throw new Error('Illegal invocation')}},()=>{},timers),/Illegal invocation/);
+  await assert.rejects(pickDirectory({showDirectoryPicker:()=>Promise.reject(Object.assign(new Error('cancel'),{name:'AbortError'}))},()=>{},timers));
+  assert.deepEqual(timers.cleared,[1]);
 });
