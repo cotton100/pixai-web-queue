@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.3.1
+// @version      0.3.2
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -358,6 +358,93 @@
     if (library.reservations.reduce((sum, item) => sum + item.count, 0) > 1000) throw new Error('예약 작업은 한 번에 1,000개까지 만들 수 있습니다.');
     return library;
   }
+  function settingsBackupKeys(value, label, required, allowed = required) {
+    const source = presetObject(value, label);
+    if (required.some(key => !Object.prototype.hasOwnProperty.call(source, key)) || Object.keys(source).some(key => !allowed.includes(key))) {
+      throw new Error(`${label}의 필수 항목이나 형식을 확인해 주세요.`);
+    }
+    return source;
+  }
+  function normalizeSettingsOptions(value) {
+    const source = settingsBackupKeys(value, '대기열 옵션', ['maxCredits','filePrefix','repeat']);
+    if (source.maxCredits !== null && (typeof source.maxCredits !== 'number' || !Number.isSafeInteger(source.maxCredits) || source.maxCredits < 1)) {
+      throw new Error('크레딧 상한은 양의 정수 또는 제한 없음이어야 합니다.');
+    }
+    if (typeof source.filePrefix !== 'string') throw new Error('파일 이름은 문자열이어야 합니다.');
+    if (typeof source.repeat !== 'number') throw new Error('반복 횟수는 1~100의 정수여야 합니다.');
+    return {maxCredits:source.maxCredits, filePrefix:presetText(source.filePrefix), repeat:presetInteger(source.repeat, '반복 횟수', 1, 100)};
+  }
+  function settingsBackupStrings(value, keys, label) {
+    if (keys.some(key => Object.prototype.hasOwnProperty.call(value, key) && typeof value[key] !== 'string')) {
+      throw new Error(`${label}은 문자열이어야 합니다.`);
+    }
+  }
+  function settingsBackupLibrary(value) {
+    const source = settingsBackupKeys(value, '프리셋 라이브러리', ['version','common','presets','characters','scenes','reservations']);
+    settingsBackupKeys(source.common, '공통 프롬프트', ['prompt','negativePrompt']);
+    settingsBackupStrings(source.common, ['prompt','negativePrompt'], '공통 프롬프트');
+    const library = normalizePresetLibrary(source);
+    for (const item of source.presets) {
+      settingsBackupKeys(item, '설정 프리셋', ['id','name','model','loras']);
+      settingsBackupStrings(item, ['name'], '프리셋 이름');
+      settingsBackupKeys(item.model, '모델', ['id','name','versionId'], ['id','name','versionId','family']);
+      settingsBackupStrings(item.model, ['name','family'], '모델 이름');
+      for (const lora of item.loras) {
+        settingsBackupKeys(lora, 'LoRA', ['id','name','weight'], ['id','name','weight','versionId','triggerWords']);
+        settingsBackupStrings(lora, ['name','triggerWords'], 'LoRA 이름·트리거');
+      }
+    }
+    for (const key of ['characters','scenes']) for (const item of source[key]) {
+      settingsBackupKeys(item, '캐릭터·청크 프롬프트', ['id','name','prompt','negativePrompt']);
+      settingsBackupStrings(item, ['name','prompt','negativePrompt'], '캐릭터·청크 프롬프트');
+    }
+    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds']);
+    return library;
+  }
+  function settingsBackupMeta(value) {
+    const source = settingsBackupKeys(value, '백업 정보', ['appVersion','exportedAt']);
+    if (typeof source.appVersion !== 'string' || !source.appVersion.trim()) throw new Error('백업의 스크립트 버전을 확인해 주세요.');
+    if (typeof source.exportedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(source.exportedAt)) {
+      throw new Error('백업의 저장 시각을 확인해 주세요.');
+    }
+    const timestamp = Date.parse(source.exportedAt);
+    if (!Number.isFinite(timestamp)) throw new Error('백업의 저장 시각을 확인해 주세요.');
+    const exportedAt = new Date(timestamp).toISOString();
+    const padded = source.exportedAt.replace(/(\.\d{1,3})?Z$/, (_match, fraction) => `${fraction ? fraction.padEnd(4,'0') : '.000'}Z`);
+    if (padded !== exportedAt) throw new Error('백업의 저장 시각을 확인해 주세요.');
+    return {appVersion:source.appVersion.trim(), exportedAt};
+  }
+  function makeSettingsBackup(library, options, meta) {
+    return {format:'pixai-web-queue-settings', version:1, ...settingsBackupMeta(meta),
+      library:settingsBackupLibrary(library), options:normalizeSettingsOptions(options)};
+  }
+  function parseSettingsBackup(text) {
+    if (typeof text !== 'string') throw new Error('설정 파일 내용을 읽을 수 없습니다.');
+    const maxBytes = 5 * 1024 * 1024;
+    if (text.length > maxBytes || new TextEncoder().encode(text).byteLength > maxBytes) throw new Error('설정 파일은 5MiB 이하만 불러올 수 있습니다.');
+    let value, forbiddenKey = false;
+    try {
+      value = JSON.parse(text.replace(/^\uFEFF/, ''), (key, item) => {
+        if (['__proto__','prototype','constructor'].includes(key)) { forbiddenKey = true; throw new Error('허용하지 않는 객체 속성'); }
+        return item;
+      });
+    } catch {
+      throw new Error(forbiddenKey ? '설정 파일에 허용하지 않는 객체 속성이 있습니다.' : '설정 파일의 JSON 형식을 확인해 주세요.');
+    }
+    presetObject(value, '설정 백업');
+    if (Object.prototype.hasOwnProperty.call(value, 'format')) {
+      if (value.format !== 'pixai-web-queue-settings' || value.version !== 1) throw new Error('지원하지 않는 설정 백업 형식 또는 버전입니다.');
+      settingsBackupKeys(value, '설정 백업', ['format','version','appVersion','exportedAt','library','options']);
+      return {source:'settings', ...settingsBackupMeta({appVersion:value.appVersion, exportedAt:value.exportedAt}),
+        library:settingsBackupLibrary(value.library), options:normalizeSettingsOptions(value.options)};
+    }
+    if (Object.prototype.hasOwnProperty.call(value, 'library') || Object.prototype.hasOwnProperty.call(value, 'jobs')) {
+      settingsBackupKeys(value, '예전 대기열 백업', ['version','jobs','library']);
+      if (value.version !== 1 || !Array.isArray(value.jobs)) throw new Error('예전 대기열 백업 형식 또는 버전을 확인해 주세요.');
+      return {source:'queue', appVersion:null, exportedAt:null, library:settingsBackupLibrary(value.library), options:null};
+    }
+    return {source:'library', appVersion:null, exportedAt:null, library:settingsBackupLibrary(value), options:null};
+  }
   function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}) {
     const commonPart = presetObject(common, '공통');
     const characterPart = presetObject(character, '캐릭터');
@@ -433,6 +520,68 @@
     if (!Number.isFinite(number) || (min != null && number < Number(min)) || (max != null && number > Number(max))) throw new Error(`LoRA 수치는 사이트의 ${min ?? '?'}~${max ?? '?'} 범위 안이어야 합니다.`);
     const increment = Number(step);
     if (step && step !== 'any' && increment > 0 && Math.abs((number - Number(min || 0)) / increment - Math.round((number - Number(min || 0)) / increment)) > 0.000001) throw new Error(`LoRA 수치는 사이트의 ${step} 간격으로 입력해 주세요.`);
+  }
+  function createSettingsStore(storage, keys) {
+    if (!keys || ['library','options','previous'].some(name => typeof keys[name] !== 'string' || !keys[name].trim()) || new Set(Object.values(keys)).size !== 3) {
+      throw new Error('설정 저장 키를 확인해 주세요.');
+    }
+    const validRaw = value => value === null || typeof value === 'string';
+    function snapshot() {
+      const value = {library:storage.getItem(keys.library), options:storage.getItem(keys.options)};
+      if (!validRaw(value.library) || !validRaw(value.options)) throw new Error('현재 설정 저장 형식을 확인해 주세요.');
+      return value;
+    }
+    function previous() {
+      const raw = storage.getItem(keys.previous);
+      if (raw === null) throw new Error('복원할 이전 설정이 없습니다.');
+      let value;
+      try { value = JSON.parse(raw); } catch { throw new Error('이전 설정 복구 사본의 형식을 확인해 주세요.'); }
+      if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2 || !Object.hasOwn(value,'library') || !Object.hasOwn(value,'options') || !validRaw(value.library) || !validRaw(value.options)) {
+        throw new Error('이전 설정 복구 사본의 형식을 확인해 주세요.');
+      }
+      return value;
+    }
+    function write(name, raw) {
+      if (raw === null) storage.removeItem(keys[name]); else storage.setItem(keys[name], raw);
+    }
+    function rollback(original) {
+      const errors = [];
+      for (const name of ['library','options']) {
+        try { write(name, original[name]); } catch (error) { errors.push(error); }
+      }
+      return errors;
+    }
+    function failure(label, error, rollbackErrors) {
+      const restored = !rollbackErrors.length;
+      const result = new Error(`${label}에 실패했습니다 [${error.name || 'Error'}]. ${restored ? '원래 설정으로 되돌렸습니다.' : '원본 복원도 실패해 일부 설정이 바뀌었을 수 있습니다. 저장 공간·권한을 확인하고 이전 설정 복원을 다시 시도해 주세요.'} 이전 설정 복구 사본은 보존했습니다.`);
+      result.cause = error;
+      result.rollbackFailed = !restored;
+      return result;
+    }
+    return {
+      apply(parsed) {
+        const library = normalizePresetLibrary(parsed?.library);
+        const options = parsed?.options === null ? null : normalizeSettingsOptions(parsed?.options);
+        const nextLibrary = JSON.stringify(library), nextOptions = options === null ? null : JSON.stringify(options);
+        const original = snapshot();
+        try { storage.setItem(keys.previous, JSON.stringify(original)); }
+        catch (error) { throw new Error(`이전 설정 복구 사본을 저장하지 못했습니다 [${error.name || 'Error'}]. 현재 설정은 바꾸지 않았습니다.`); }
+        try {
+          if (options !== null) write('options', nextOptions);
+          write('library', nextLibrary);
+        } catch (error) { throw failure('설정 가져오기', error, rollback(original)); }
+        return {library, options};
+      },
+      undo() {
+        const target = previous(), original = snapshot();
+        try { write('options', target.options); write('library', target.library); }
+        catch (error) { throw failure('이전 설정 복원', error, rollback(original)); }
+        return true;
+      },
+      hasPrevious() {
+        try { previous(); return true; } catch { return false; }
+      }
+    };
   }
   async function readLoraTriggerWords(lora, io = {}) {
     const id=presetIdentifier(lora.id,'LoRA',true), versionId=presetIdentifier(lora.versionId,'LoRA 버전',true);
@@ -806,7 +955,7 @@ function mountPresetEditor(parent, io) {
       const next = copy(library); next[key] = next[key].filter(item => item.id !== id);
       await commit(next,`${label}을 삭제했습니다. 이미 등록한 대기열은 유지됩니다.`); fill(null);
     }));
-    return {key,select:select.input,label};
+    return {key,select:select.input,label,fill};
   }
   const characterEditor = promptEditor('characters','③ 캐릭터 프롬프트','캐릭터','외모, 의상, 캐릭터 고유 특징');
   const chunkEditor = promptEditor('scenes','④ 프롬프트 청크','청크','표정, 행동, 구도, 배경 등 함께 쓸 프롬프트 조각');
@@ -881,14 +1030,28 @@ function mountPresetEditor(parent, io) {
       await io.enqueue(copy(library));
     }));
   refreshLists(); renderReservations(); preview(); parent.append(root);
-  return {root,refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();}};
+  return {
+    root,
+    refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();},
+    reload:() => {
+      const next=normalizePresetLibrary(io.load() || makePresetLibrary());
+      library=next;selectedChunkIds=new Set();
+      refreshLists();
+      commonPrompt.input.value=library.common.prompt;commonNegative.input.value=library.common.negativePrompt;
+      fillPreset(library.presets.find(item=>item.id===presetSelect.input.value));
+      for (const editor of [characterEditor,chunkEditor]) editor.fill(library[editor.key].find(item=>item.id===editor.select.value));
+      reserveCount.input.value='1';renderReservations();preview();
+    }
+  };
 }
 
-  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
   const LIBRARY_KEY = 'local.pixai-web-queue.presets.v1';
+  const OPTIONS_KEY = 'local.pixai-web-queue.options.v1';
+  const PREVIOUS_SETTINGS_KEY = 'local.pixai-web-queue.before-import.v1';
   const LOCK = 'local.pixai-web-queue.runner.v1';
   const LABELS = {queued:'대기', submitting:'제출 중', waiting:'완료 확인', saving:'저장 중', save_failed:'저장 재시도 필요', done:'저장 완료', unknown:'제출 결과 확인 필요', skipped:'건너뜀'};
   let jobs = [];
@@ -1230,7 +1393,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #5b536c;border-radius:14px;background:#211d2b;color:#f4effa;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #595063;border-radius:7px;background:#15121b;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #706080;border-radius:7px;background:#413250;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#cfc1dc}#local-pixai-queue .pq-job{border-top:1px solid #4c4355;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#c7b3df}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#ddd0ec;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.3.1 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.3.2 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#211d2b}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #5b536c;border-radius:7px;background:#211d2b}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #b799d4;background:#30263d;color:#f4effa}';
     style.textContent += '#local-pixai-queue [data-launcher]{display:none;width:52px;height:52px;margin:0;padding:12px;border:1px solid #8c72a7;border-radius:50%;line-height:0;background:#413250}#local-pixai-queue [data-launcher]:focus-visible,#local-pixai-queue [data-collapse]:focus-visible{outline:2px solid #e2c7ff;outline-offset:3px}#local-pixai-queue[data-minimized="true"]{width:52px;height:52px;max-height:none;padding:0;border:0;border-radius:50%;overflow:visible}#local-pixai-queue[data-minimized="true"]>:not([data-launcher]){display:none!important}#local-pixai-queue[data-minimized="true"]>[data-launcher]{display:block}';
@@ -1270,6 +1433,21 @@ function mountPresetEditor(parent, io) {
     const simple=node('details');simple.append(node('summary','통짜 프롬프트 · 간단 대기열'),title,prompts,node('small','반복 횟수 (생성 버튼을 누르는 횟수)'),repeat);
     const budget = node('input',null,{type:'number',min:'1',value:'7800','data-edit':'','aria-label':'생성 1회 크레딧 상한'});
     panel.append(node('small','생성 1회 크레딧 상한 (빈칸은 제한 없음)'),budget);
+    function readOptions() {
+      return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value)});
+    }
+    function fillOptions(value) {
+      budget.value=value.maxCredits == null ? '' : String(value.maxCredits);
+      title.value=value.filePrefix;repeat.value=String(value.repeat);
+    }
+    function loadOptions() {
+      fillOptions(normalizeSettingsOptions(JSON.parse(localStorage.getItem(OPTIONS_KEY) || '{"maxCredits":7800,"filePrefix":"","repeat":1}')));
+    }
+    try {loadOptions();} catch {message='기본 옵션을 읽지 못했습니다. 설정 불러오기로 복구하거나 입력값을 확인해 주세요.';}
+    for (const input of [budget,title,repeat]) input.addEventListener('change',()=>{
+      try {localStorage.setItem(OPTIONS_KEY,JSON.stringify(readOptions()));}
+      catch(error) {message=`기본 옵션 저장 실패: ${error.message}`;render();}
+    });
     const add = button('대기열 추가', async () => locked(() => {
       const parts = prompts.value.split(/\n\s*---+\s*\n/).map(normalize).filter(Boolean);
       const count = Number(repeat.value);
@@ -1286,7 +1464,8 @@ function mountPresetEditor(parent, io) {
     add.dataset.edit='';
     const run = button('시작 / 같은 작업 재개', start); run.dataset.start='';
     simple.append(add);
-    try { presetEditor=mountPresetEditor(panel, {
+    const editorSlot=node('div');panel.append(editorSlot);
+    function mountEditor() { try { presetEditor=mountPresetEditor(editorSlot, {
       load:readLibrary,save:saveLibrary,button,
       notify:text=>{message=text;render();},
       captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
@@ -1299,7 +1478,8 @@ function mountPresetEditor(parent, io) {
         saveLibrary({...value,reservations:[]});presetEditor.refresh();
         message=`조합 ${added.length}개를 대기열에 등록했습니다. 예약은 비웠고 작업별 설정은 보존했습니다.`;render();
       })
-    }); } catch(error) { message=`프리셋 라이브러리 읽기 실패: ${error.message}`; }
+    }); } catch(error) { message=`프리셋 라이브러리 읽기 실패: ${error.message}`; } }
+    mountEditor();
     panel.append(simple,run,button('중지',()=>{stopRequested=true;message='다음 제출 중지 요청. 진행 중인 서버 작업은 취소하지 않습니다.';render();}));
     panel.append(node('div',null,{'data-jobs':''}));
     const exportQueue = button('대기열 백업', async () => {
@@ -1309,6 +1489,82 @@ function mountPresetEditor(parent, io) {
       anchor.click(); setTimeout(()=>URL.revokeObjectURL(url),10000);
     });
     panel.append(exportQueue);
+    const backups=node('details');backups.append(node('summary','설정 내보내기 · 불러오기'));
+    backups.append(node('small','저장한 공통문·프리셋·캐릭터·청크·예약과 크레딧 상한·파일 이름·반복 횟수를 JSON으로 보관합니다. 편집한 항목은 먼저 저장해 주세요.'));
+    const settingsStore=createSettingsStore(localStorage,{library:LIBRARY_KEY,options:OPTIONS_KEY,previous:PREVIOUS_SETTINGS_KEY});
+    function idleSettings() {
+      if (running || starting || settingsBusy || choosingFolder) throw new Error('진행 중인 작업이 끝난 뒤 설정을 불러오거나 내보내 주세요.');
+    }
+    function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
+    const saveSettings=backupButton('설정 내보내기',async()=>{
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.3.2',exportedAt:new Date().toISOString()});
+      const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
+      const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+      const blob=new Blob([text],{type:'application/json'});
+      if (download) {await managedDownload(download,blob,name);message='설정 JSON 다운로드 완료';}
+      else {
+        const url=URL.createObjectURL(blob),anchor=node('a',null,{href:url,download:name});
+        document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
+        message='설정 JSON 다운로드를 요청했습니다. 브라우저의 다운로드 목록을 확인해 주세요.';
+      }
+      render();
+    });
+    const input=node('input',null,{type:'file',accept:'.json,application/json','aria-label':'설정 백업 JSON 파일','data-edit':''});input.hidden=true;
+    const preview=node('div',null,{'data-import-preview':'','aria-live':'polite'});preview.hidden=true;
+    let pendingSettings=null;
+    function clearImport() {pendingSettings=null;preview.replaceChildren();preview.hidden=true;}
+    const openSettings=backupButton('설정 불러오기',()=>{clearImport();input.value='';input.click();});
+    async function editSettings(action) {
+      await settingsAction(async()=>{
+        if (!navigator.locks) throw new Error('이 브라우저는 중복 실행 방지 기능을 지원하지 않습니다.');
+        await navigator.locks.request(LOCK,{ifAvailable:true},async lock=>{
+          if (!lock) throw new Error('다른 PixAI 탭에서 대기열이 실행 중입니다.');
+          if (stopRequested) throw new Error('설정 불러오기가 중지됐습니다.');
+          action();
+          loadOptions();
+          if (presetEditor) presetEditor.reload();else mountEditor();
+        });
+      },{readOnly:true});
+      clearImport();
+    }
+    const applyImport=backupButton('이 설정으로 교체',async()=>{
+      if (!pendingSettings) throw new Error('설정 파일을 먼저 선택해 주세요.');
+      await editSettings(()=>{
+        if (localStorage.getItem(LIBRARY_KEY)!==pendingSettings.libraryBefore || localStorage.getItem(OPTIONS_KEY)!==pendingSettings.optionsBefore) throw new Error('파일을 선택한 뒤 설정이 바뀌었습니다. 파일을 다시 선택해 주세요.');
+        settingsStore.apply(pendingSettings.data);
+      });
+      message='설정을 불러왔습니다. 가져오기 전 설정 복구로 되돌릴 수 있습니다. 이미 등록한 대기열은 유지됩니다.';render();
+    });
+    input.addEventListener('change',async()=>{
+      clearImport();
+      const file=input.files?.[0];if (!file) return;
+      try {
+        idleSettings();
+        await settingsAction(async()=>{
+          if (file.size>5*1024*1024) throw new Error('설정 파일은 5MiB까지 불러올 수 있습니다.');
+          const data=parseSettingsBackup(await file.text());
+          if (stopRequested) throw new Error('설정 파일 읽기가 중지됐습니다.');
+          pendingSettings={data,libraryBefore:localStorage.getItem(LIBRARY_KEY),optionsBefore:localStorage.getItem(OPTIONS_KEY)};
+          const library=data.library;
+          preview.append(node('strong',file.name),node('p',`프리셋 ${library.presets.length}개 · 캐릭터 ${library.characters.length}개 · 청크 ${library.scenes.length}개 · 예약 ${library.reservations.length}개`),
+            node('small','적용하면 현재 저장한 항목과 편집 중인 내용이 교체됩니다. 적용 전 설정은 이 브라우저에 보관합니다. 생성 작업·저장 폴더 권한은 가져오지 않습니다.'),
+            node('small',data.options ? `크레딧 상한 ${data.options.maxCredits ?? '제한 없음'} · 반복 ${data.options.repeat}회` : '이전 백업 형식: 현재 크레딧 상한·파일 이름·반복 횟수를 유지합니다.'),applyImport,
+            backupButton('불러오기 취소',()=>{clearImport();message='설정 불러오기를 취소했습니다.';render();}));
+          preview.hidden=false;message='파일 확인 완료. 내용을 확인한 뒤 이 설정으로 교체를 누르세요.';
+        },{readOnly:true});
+      } catch(error) {clearImport();message=`설정 파일 읽기 실패: ${error.message}`;render();}
+    });
+    const undoSettings=backupButton('가져오기 전 설정 복구',async()=>{
+      await editSettings(()=>{
+        const previous=JSON.parse(localStorage.getItem(PREVIOUS_SETTINGS_KEY) || 'null');
+        try {
+          if (previous?.library != null) normalizePresetLibrary(JSON.parse(previous.library));
+          if (previous?.options != null) normalizeSettingsOptions(JSON.parse(previous.options));
+        } catch {throw new Error('이전 설정 원본에 읽기 오류가 있어 복구하지 않았습니다. 원본 사본과 현재 설정은 유지했습니다.');}
+        settingsStore.undo();
+      });message='가져오기 전 설정으로 복구했습니다.';render();
+    });
+    backups.append(saveSettings,openSettings,input,preview,undoSettings);panel.append(backups);
     document.body.append(panel);
     try { load(); } catch(error) { message=`대기열 읽기 실패: ${error.message}\n프리셋 읽기·편집은 사용할 수 있습니다. 대기열 원본은 유지했습니다.`; }
     render();
@@ -1335,7 +1591,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.3.1', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.3.2', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

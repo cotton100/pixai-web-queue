@@ -44,12 +44,13 @@ function seed() {
 }
 function fixture(t,initial=seed()) {
   let library=core.normalizePresetLibrary(copy(initial)),captured=copy({model:library.presets[0].model,loras:library.presets[0].loras});
+  let loadResult;
   const messages=[],jobs=[];let sequence=0;
   const parent=new Element('aside');const previousDocument=globalThis.document;
   globalThis.document={createElement:tag=>new Element(tag)};
   t.after(()=>{if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument;});
   const ui=core.mountPresetEditor(parent,{
-    load:()=>copy(library),save:value=>{library=core.normalizePresetLibrary(copy(value));},
+    load:()=>copy(loadResult===undefined?library:loadResult),save:value=>{library=core.normalizePresetLibrary(copy(value));},
     captureSettings:async()=>copy(captured),applySettings:async()=>{},notify:message=>messages.push(message),
     enqueue:async value=>{jobs.push(...core.expandPresetReservations(value,{idFactory:()=>`job-${++sequence}`,maxCredits:7800}));},
     button:(text,action)=>{const element=new Element('button');element.textContent=text;element.press=async()=>{if(element.disabled)return;try{await action();}catch(error){messages.push(error.message);}};return element;}
@@ -63,6 +64,7 @@ function fixture(t,initial=seed()) {
   return {ui,parent,all,field,fields,press,select,choose,messages,jobs,
     preview:()=>field('저장한 프롬프트 조합 미리보기').textContent,
     library:()=>copy(library),setLibrary:value=>{library=core.normalizePresetLibrary(copy(value));},
+    setLoadResult:value=>{loadResult=value===undefined?undefined:copy(value);},
     setCapture:value=>{captured=copy(value);}};
 }
 
@@ -144,4 +146,58 @@ test('legacy sceneId reservations normalize to a one-element sceneIds array and 
   const f=fixture(t,initial);assert.deepEqual(f.library().reservations[0].sceneIds,['s2']);assert.equal(f.library().reservations[0].sceneId,undefined);
   assert(!f.parent.textContent.includes('(삭제된 청크)'));await f.press('예약 전부를 대기열에 등록');
   assert.equal(f.jobs.length,1);assert.equal(f.jobs[0].prompt,'quality, trigger one, trigger two, character tags, waving');
+});
+
+test('explicit import reload replaces same-ID editor fields, clears checkbox drafts, and displays only imported reservations',async t=>{
+  const f=fixture(t);await f.select('저장한 설정 프리셋','p1');await f.select('저장한 캐릭터','c1');await f.select('저장한 청크','s1');
+  await f.choose('행동');await f.press('이 조합 예약 추가');
+  f.field('공통 프롬프트').value='unsaved old common';f.field('캐릭터 프롬프트').value='unsaved old character';f.field('청크 프롬프트').value='unsaved old chunk';f.field('LoRA 트리거 키워드').value='unsaved old trigger';
+  f.field('이 조합의 생성 횟수').value='7';
+  const imported=seed();imported.common={prompt:'import common',negativePrompt:'import common bad'};
+  imported.presets[0]={id:'p1',name:'Imported preset',model:{id:'102',versionId:'202',name:'Imported model'},loras:[{id:'302',versionId:'402',name:'Imported LoRA',weight:0.3,triggerWords:'import trigger'}]};
+  imported.characters[0]={id:'c1',name:'Imported character',prompt:'import character',negativePrompt:'import character bad'};
+  imported.scenes[0]={id:'s1',name:'Imported chunk',prompt:'import chunk',negativePrompt:'import chunk bad'};
+  imported.reservations=[{id:'imported-reservation',presetId:'p1',characterId:'c1',sceneIds:['s1'],count:3}];
+  f.setLibrary(imported);f.ui.reload();
+  assert.equal(f.field('공통 프롬프트').value,'import common');assert.equal(f.field('공통 네거티브').value,'import common bad');
+  assert.equal(f.field('저장한 설정 프리셋').value,'p1');assert.equal(f.field('프리셋 이름').value,'Imported preset');
+  assert.equal(f.field('모델 ID').value,'102');assert.equal(f.field('모델 버전 ID').value,'202');assert.equal(f.field('모델 이름').value,'Imported model');
+  assert.equal(f.field('LoRA ID').value,'302');assert.equal(f.field('LoRA 가중치').value,'0.3');assert.equal(f.field('LoRA 트리거 키워드').value,'import trigger');
+  assert.equal(f.field('캐릭터 이름').value,'Imported character');assert.equal(f.field('캐릭터 프롬프트').value,'import character');assert.equal(f.field('캐릭터 네거티브').value,'import character bad');
+  assert.equal(f.field('청크 이름').value,'Imported chunk');assert.equal(f.field('청크 프롬프트').value,'import chunk');assert.equal(f.field('청크 네거티브').value,'import chunk bad');
+  assert.equal(f.field('청크 선택: Imported chunk').checked,false);assert.equal(f.field('청크 선택: 행동').checked,false);assert.equal(f.field('이 조합의 생성 횟수').value,'1');
+  assert.match(f.preview(),/import common, import trigger, import character/);assert(!f.preview().includes('import chunk'));
+  const rows=f.all().filter(element=>element.className.split(/\s+/).includes('pq-reservation'));assert.equal(rows.length,1);assert.match(rows[0].textContent,/Imported character.*Imported chunk/);
+  await f.press('캐릭터 저장');assert.equal(f.library().characters[0].prompt,'import character');
+  await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,3);assert.equal(f.jobs[0].prompt,'import common, import trigger, import character, import chunk');
+});
+
+test('import reload clears editors for removed IDs and selects valid replacement reservation entries without stale fields',async t=>{
+  const f=fixture(t);await f.select('저장한 설정 프리셋','p1');await f.select('저장한 캐릭터','c1');await f.select('저장한 청크','s1');await f.choose('표정');
+  const imported=seed();imported.presets[0].id='p2';imported.characters[0].id='c2';imported.scenes=[{id:'s3',name:'New chunk',prompt:'new chunk',negativePrompt:''}];
+  f.setLibrary(imported);f.ui.reload();
+  for(const name of ['저장한 설정 프리셋','프리셋 이름','모델 ID','모델 버전 ID','모델 이름','모델 계열 (선택)','저장한 캐릭터','캐릭터 이름','캐릭터 프롬프트','캐릭터 네거티브','저장한 청크','청크 이름','청크 프롬프트','청크 네거티브'])assert.equal(f.field(name).value,'',name);
+  assert.equal(f.fields('LoRA 트리거 키워드').length,0);assert.equal(f.fields('청크 선택: 표정').length,0);
+  assert.equal(f.field('예약 프리셋').value,'p2');assert.equal(f.field('예약 캐릭터').value,'c2');assert.equal(f.field('청크 선택: New chunk').checked,false);
+  assert(!f.preview().includes('smiling'));assert(!f.preview().includes('new chunk'));assert.equal(f.library().presets.length,1);assert.equal(f.jobs.length,0);
+});
+
+test('invalid imported library fails before changing editor drafts, selected chunks, reservations or preview',async t=>{
+  const f=fixture(t);await f.select('저장한 설정 프리셋','p1');await f.select('저장한 캐릭터','c1');await f.select('저장한 청크','s1');await f.choose('행동');await f.press('이 조합 예약 추가');
+  f.field('공통 프롬프트').value='keep draft common';f.field('LoRA 트리거 키워드').value='keep draft trigger';f.field('캐릭터 프롬프트').value='keep draft character';f.field('청크 프롬프트').value='keep draft chunk';
+  const beforeLibrary=f.library(),beforePreview=f.preview(),beforeRows=f.all().filter(element=>element.className.split(/\s+/).includes('pq-reservation')).map(element=>element.textContent);
+  const invalid=seed();invalid.presets[0].model.versionId='invalid';f.setLoadResult(invalid);
+  assert.throws(()=>f.ui.reload(),/모델 버전/);
+  assert.equal(f.field('공통 프롬프트').value,'keep draft common');assert.equal(f.field('LoRA 트리거 키워드').value,'keep draft trigger');assert.equal(f.field('캐릭터 프롬프트').value,'keep draft character');assert.equal(f.field('청크 프롬프트').value,'keep draft chunk');
+  assert.equal(f.field('청크 선택: 행동').checked,true);assert.equal(f.field('저장한 설정 프리셋').value,'p1');assert.equal(f.preview(),beforePreview);assert.deepEqual(f.library(),beforeLibrary);
+  assert.deepEqual(f.all().filter(element=>element.className.split(/\s+/).includes('pq-reservation')).map(element=>element.textContent),beforeRows);
+  f.setLoadResult(undefined);await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,1);assert.equal(f.jobs[0].prompt,'quality, trigger one, trigger two, character tags, waving');
+});
+
+test('ordinary refresh retains unfinished editor drafts and checkbox selections instead of performing import reload',async t=>{
+  const f=fixture(t);await f.select('저장한 설정 프리셋','p1');await f.select('저장한 캐릭터','c1');await f.select('저장한 청크','s1');await f.choose('행동');
+  f.field('공통 프롬프트').value='draft common';f.field('LoRA 트리거 키워드').value='draft trigger';f.field('캐릭터 프롬프트').value='draft character';f.field('청크 프롬프트').value='draft chunk';f.field('이 조합의 생성 횟수').value='8';
+  const next=f.library();next.common.prompt='stored common changed';next.characters[0].prompt='stored character changed';f.setLibrary(next);f.ui.refresh();
+  assert.equal(f.field('공통 프롬프트').value,'draft common');assert.equal(f.field('LoRA 트리거 키워드').value,'draft trigger');assert.equal(f.field('캐릭터 프롬프트').value,'draft character');assert.equal(f.field('청크 프롬프트').value,'draft chunk');
+  assert.equal(f.field('청크 선택: 행동').checked,true);assert.equal(f.field('이 조합의 생성 횟수').value,'8');assert.match(f.preview(),/stored common changed, trigger one, trigger two, stored character changed, waving/);
 });

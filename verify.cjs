@@ -245,7 +245,7 @@ test('storage mode follows available browser APIs and requires managed browser d
 
 // Mount the complete script, rather than testing only its exported helper functions.
 function panelFixture(nativePicker, gm={}) {
-  let networkCalls=0,generateCalls=0,pickerCalls=0;const siteQueries=[];
+  let networkCalls=0,generateCalls=0,pickerCalls=0;const siteQueries=[],storageMutations=[];
   class Element {
     constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';this.scrollTop=0;}
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
@@ -274,6 +274,7 @@ function panelFixture(nativePicker, gm={}) {
     getBoundingClientRect(){return {left:600,top:200,width:340,height:450};}
     getClientRects(){return [this.getBoundingClientRect()];}
     focus(){document.activeElement=this;}
+    click(){this.clicks=(this.clicks||0)+1;}
     setPointerCapture(){} hasPointerCapture(){return false} releasePointerCapture(){}
   }
   const body=new Element('body'), records=new Map();
@@ -293,17 +294,85 @@ function panelFixture(nativePicker, gm={}) {
   const window={innerWidth:1200,innerHeight:900,addEventListener(){}};window.top=window.self=window;
   if(nativePicker)window.showDirectoryPicker=(...args)=>{pickerCalls++;return nativePicker(...args)};
   const context={window,document,location:{hostname:'pixai.art',pathname:'/ko/generator/image'},
-    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);}},
-    navigator:{locks:{request:async(name,options,callback)=>callback({})}},
+    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
+    navigator:{locks:{request:async(name,options,callback)=>callback(gm.lockUnavailable?null:{})}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
     fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'},
-    Blob, GM_download:gm.download, GM_info:gm.info};
+    Blob,TextEncoder,URL, GM_download:gm.download, GM_info:gm.info};
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
-  return {panel,document,siteQueries,records,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
+  return {panel,document,siteQueries,records,storageMutations,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
     press(button){button.fire('pointerdown');button.fire('pointerup');},
     message:()=>panel.querySelector('[data-message]').textContent};
 }
+
+const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1'};
+function runtimeSettingsLibrary(prompt='saved common') {
+  const library=sandbox.module.exports.makePresetLibrary();library.common={prompt,negativePrompt:'saved negative'};
+  library.presets=[{id:'preset',name:'Asset',model:{id:'101',versionId:'201',name:'Model'},loras:[{id:'301',versionId:'401',name:'LoRA',weight:0.7,triggerWords:'saved trigger'}]}];
+  library.characters=[{id:'character',name:'Character',prompt:'character tags',negativePrompt:''}];
+  library.scenes=[{id:'chunk',name:'Chunk',prompt:'chunk tags',negativePrompt:''}];
+  library.reservations=[{id:'reservation',presetId:'preset',characterId:'character',sceneIds:['chunk'],count:1}];return library;
+}
+function runtimeSettingsRecords() {
+  return new Map([[runtimeSettingsKeys.library,JSON.stringify(runtimeSettingsLibrary())],[runtimeSettingsKeys.options,JSON.stringify({maxCredits:7800,filePrefix:'before',repeat:1})],
+    [runtimeSettingsKeys.queue,JSON.stringify({version:1,jobs:[job()]})]]);
+}
+function runtimeSettingsBackup() {
+  const library=runtimeSettingsLibrary('imported common');library.presets[0].loras[0].triggerWords='imported trigger';
+  return JSON.stringify(sandbox.module.exports.makeSettingsBackup(library,{maxCredits:6400,filePrefix:'imported',repeat:2},{appVersion:'fixture',exportedAt:'2026-10-07T00:00:00.000Z'}));
+}
+function runtimeField(f,label) {
+  const element=f.panel.querySelectorAll('input, textarea, select').find(item=>item.getAttribute('aria-label')===label);assert.ok(element,`Missing runtime field ${label}`);return element;
+}
+function runtimePress(f,label) {
+  const element=f.panel.querySelectorAll('button').find(item=>item.textContent===label);assert.ok(element,`Missing runtime button ${label}`);f.press(element);
+}
+const runtimeFlush=()=>new Promise(resolve=>setImmediate(resolve));
+async function runtimeChooseFile(f,text) {
+  const input=runtimeField(f,'설정 백업 JSON 파일');input.files=[{name:'fixture-settings.json',size:new TextEncoder().encode(text).length,text:async()=>text}];input.fire('change');await runtimeFlush();
+}
+
+test('runtime settings export downloads saved library and current option fields without queue or settings writes',async()=>{
+  let details;const records=runtimeSettingsRecords();const f=panelFixture(null,{records,info:{downloadMode:'browser'},download:options=>{details=options;options.onload();}});
+  runtimeField(f,'공통 프롬프트').value='unsaved draft';runtimeField(f,'생성 1회 크레딧 상한').value='6500';runtimeField(f,'대기열 작업 이름').value='current name';runtimeField(f,'각 프롬프트 반복 횟수').value='3';
+  runtimePress(f,'설정 내보내기');await runtimeFlush();
+  assert.ok(details.url instanceof Blob);assert.match(details.name,/^PixAI_설정_.*\.json$/);assert.equal(details.saveAs,false);
+  const exported=JSON.parse(await details.url.text());assert.equal(exported.format,'pixai-web-queue-settings');
+  assert.deepEqual(exported.library,JSON.parse(records.get(runtimeSettingsKeys.library)));assert.deepEqual(exported.options,{maxCredits:6500,filePrefix:'current name',repeat:3});assert.equal(exported.jobs,undefined);
+  assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);assert.match(f.message(),/설정 JSON 다운로드 완료/);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime file preview writes nothing until Apply; Apply and Undo update UI/library/options while preserving the exact queue',async()=>{
+  const records=runtimeSettingsRecords(),f=panelFixture(null,{records}),queue=records.get(runtimeSettingsKeys.queue);
+  runtimeField(f,'공통 프롬프트').value='stale unsaved draft';
+  await runtimeChooseFile(f,runtimeSettingsBackup());
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);assert.match(f.message(),/파일 확인 완료/);assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);
+  runtimePress(f,'이 설정으로 교체');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.library)).common.prompt,'imported common');assert.deepEqual(JSON.parse(f.records.get(runtimeSettingsKeys.options)),{maxCredits:6400,filePrefix:'imported',repeat:2});
+  assert.equal(runtimeField(f,'공통 프롬프트').value,'imported common');assert.equal(runtimeField(f,'생성 1회 크레딧 상한').value,'6400');assert.equal(runtimeField(f,'대기열 작업 이름').value,'imported');
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);assert.equal(f.records.get(runtimeSettingsKeys.queue),queue);assert.ok(f.records.has(runtimeSettingsKeys.previous));
+  runtimePress(f,'가져오기 전 설정 복구');await runtimeFlush();
+  assert.equal(f.records.get(runtimeSettingsKeys.library),records.get(runtimeSettingsKeys.library));assert.equal(f.records.get(runtimeSettingsKeys.options),records.get(runtimeSettingsKeys.options));
+  assert.equal(runtimeField(f,'공통 프롬프트').value,'saved common');assert.equal(runtimeField(f,'생성 1회 크레딧 상한').value,'7800');assert.equal(runtimeField(f,'대기열 작업 이름').value,'before');
+  assert.equal(f.records.get(runtimeSettingsKeys.queue),queue);assert(!f.storageMutations.some(item=>item.key===runtimeSettingsKeys.queue));assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime malformed file, preview cancellation, and empty file selection leave original library/options/queue untouched',async()=>{
+  const records=runtimeSettingsRecords(),f=panelFixture(null,{records});
+  await runtimeChooseFile(f,'{malformed JSON');assert.match(f.message(),/설정 파일 읽기 실패/);assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);assert.deepEqual([...f.records],[...records]);
+  await runtimeChooseFile(f,runtimeSettingsBackup());runtimePress(f,'불러오기 취소');await runtimeFlush();
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);assert.match(f.message(),/취소/);
+  const input=runtimeField(f,'설정 백업 JSON 파일');input.files=[];input.fire('change');await runtimeFlush();
+  runtimePress(f,'설정 불러오기');assert.equal(input.clicks,1);assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime settings preview remains readable but a cross-tab lock refusal blocks Apply without storage changes',async()=>{
+  const records=runtimeSettingsRecords(),f=panelFixture(null,{records,lockUnavailable:true});await runtimeChooseFile(f,runtimeSettingsBackup());
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);runtimePress(f,'이 설정으로 교체');await runtimeFlush();
+  assert.match(f.message(),/다른 PixAI 탭/);assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);assert.equal(f.panel.querySelector('[data-start]').disabled,false);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
 
 test('collapse keeps unsaved inputs, scroll position and status; SVG launcher restores keyboard focus without site IO',()=>{
   const f=panelFixture();
