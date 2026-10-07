@@ -129,7 +129,7 @@ test('production generation controls recognize both site languages and reject am
     let buttons=[{textContent:english?'SubmittingGenerate3,200Ctrl+⏎Task submitted':'생성!3,200Ctrl+⏎작업 제출',getAttribute:()=>null}];
     let choice=english?'Single':'단일';
     const radio={getAttribute:()=>null,get textContent(){return choice;}},group={querySelector:()=>radio};
-    const context={visible:()=>true,groupName:()=>english?'Number of images':'이미지 수',all:selector=>selector.includes('button')?buttons:[group]};
+    const context={settings:{readImageCount:()=>{if (/x4|×4/.test(choice))return 4;if (/단일|single/i.test(choice))return 1;throw new Error('이미지 수 확인 실패');}},visible:()=>true,groupName:()=>english?'Number of images':'이미지 수',all:selector=>selector.includes('button')?buttons:[group]};
     vm.runInNewContext(`${source.slice(begin,end)};this.button=generateButton;this.count=expectedCount;`,context);
     assert.equal(context.button(),buttons[0]);assert.equal(context.count(),1);choice='Batch (x4)';assert.equal(context.count(),4);
     buttons[0].disabled=true;assert.throws(()=>context.button(),/생성 버튼/);buttons[0].disabled=false;
@@ -568,7 +568,7 @@ test('runtime settings export downloads saved library and current option fields 
   runtimePress(f,'설정 내보내기');await runtimeFlush();
   assert.ok(details.url instanceof Blob);assert.match(details.name,/^PixAI_설정_.*\.json$/);assert.equal(details.saveAs,false);
   const exported=JSON.parse(await details.url.text());assert.equal(exported.format,'pixai-web-queue-settings');
-  assert.deepEqual(exported.library,JSON.parse(records.get(runtimeSettingsKeys.library)));assert.deepEqual(exported.options,{maxCredits:6500,filePrefix:'current name',repeat:3});assert.equal(exported.jobs,undefined);
+  assert.deepEqual(exported.library,JSON.parse(records.get(runtimeSettingsKeys.library)));assert.deepEqual(exported.options,{maxCredits:6500,filePrefix:'current name',repeat:3,maxInFlight:3,imageCount:4});assert.equal(exported.jobs,undefined);
   assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);assert.match(f.message(),/설정 JSON 다운로드 완료/);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
 });
 
@@ -1293,6 +1293,7 @@ function fixture(options={}) {
         if(model.versions?.length)opened.append(selected);
         opened.append(button(model.name),button(options.english?'Use this model':'이 모델 사용',{},()=>{
           state.model={id:model.id,versionId:model.versions?.length?selected.value:model.defaultVersion||model.versionId,name:model.name};
+          options.onModelApplied?.();
           refreshModel();close();
         }));
       };
@@ -1333,6 +1334,17 @@ test('model links retain exact numeric ID/version and reject broad or malformed 
   assert.deepEqual(plain(core.parseModelLink('/ko/model/12345678901234567890/23456789012345678901?x=1')),{id:'12345678901234567890',versionId:'23456789012345678901'});
   assert.deepEqual(plain(core.parseModelLink('/model/1/11/')),{id:'1',versionId:'11'});
   for(const url of ['/ko/model/1','/ko/model/1/abc','/ko/model/1/11/extra','https://evil.test/ko/model/1/11','/ko/model/1x/11'])assert.equal(core.parseModelLink(url),null);
+});
+
+test('image count adapter restores four-image batch after model selection resets the site to Single',async()=>{
+  let reset;const f=fixture({onModelApplied:()=>reset()}),group=new Element('div',{role:'group','aria-label':'Number of images'});
+  const batch=new Element('button',{role:'radio','aria-checked':'true'},'Batch (x4)'),single=new Element('button',{role:'radio','aria-checked':'false'},'Single');
+  const choose=value=>{batch.setAttribute('aria-checked',String(value===4));single.setAttribute('aria-checked',String(value===1));};
+  batch.onClick=()=>choose(4);single.onClick=()=>choose(1);reset=()=>choose(1);group.append(batch,single);f.main.append(group);
+  assert.equal(f.adapter.readImageCount(),4);await f.adapter.apply(configuration({id:'2',versionId:'22',name:'대상 모델'}));
+  assert.equal(f.adapter.readImageCount(),4);assert.equal(f.state.paidClicks,0);
+  await f.adapter.setImageCount(1);assert.equal(f.adapter.readImageCount(),1);await assert.rejects(f.adapter.setImageCount(2),/이미지 수/);
+  single.setAttribute('aria-checked','false');assert.throws(()=>f.adapter.readImageCount(),/이미지 수/);
 });
 test('model version mismatch rejects the same model ID',()=>{
   assert.throws(()=>core.assertConfiguration(configuration(),configuration({id:'1',versionId:'12',name:'same'})),/모델 버전/);
@@ -1545,7 +1557,9 @@ function startFixture(options = {}) {
     baseline:copy(baseline)};
   vm.runInNewContext(`
     let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false,oneJobRun=false;
-    let initialModel=null,baselineSettings=null,baselineNegative=null,message='';
+    let initialModel=null,runImageCount=null,baselineSettings=null,baselineNegative=null,message='';
+    const panel={querySelector:selector=>({value:selector==='[data-image-count]' ? String(options.imageCount ?? 4) : String(options.maxInFlight ?? 3)})};
+    const expectedCount=()=>options.siteImageCount ?? 1;
     let jobs=loadStored(),currentModel='/ko/model/11/111';
     const storage={mode:'folder'},folderToken='fixture-folder',folderRestoration=options.folderRestoration || Promise.resolve();
     const io={};
@@ -1567,6 +1581,8 @@ function startFixture(options = {}) {
       if(options.stopAfterPreset&&job.id==='preset')stopRequested=true;
       if(options.process)await options.process(job);
     };
+    // start() wiring fixture; paid scheduling itself is exercised by verify-queue.cjs.
+    const runQueue=async (items,unused,config)=>{facts.queueOptions={limit:config.limit,oneJob:config.oneJob,imageCount:runImageCount};for(const job of items){if(['done','skipped'].includes(job.state))continue;if(config.stopped())return;await processJob(job);if(config.oneJob)return;}};
     ${source.slice(begin,end)}
     globalThis.run=start;
     globalThis.stop=()=>{stopRequested=true;};

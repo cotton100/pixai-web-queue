@@ -1,9 +1,9 @@
 {
   "name": "pixai-web-queue",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "private": true,
   "description": "PixAI 웹 프롬프트 대기열 유저스크립트",
   "scripts": {
-    "test": "node --check pixai-web-queue.user.js && node --test verify.cjs verify-ui.cjs verify-trigger.cjs verify-backup.cjs verify-backup-storage.cjs verify-drag.cjs verify-folders.cjs verify-layout.cjs verify-combinations.cjs verify-query.cjs"
+    "test": "node --check pixai-web-queue.user.js && node --test verify.cjs verify-ui.cjs verify-trigger.cjs verify-backup.cjs verify-backup-storage.cjs verify-drag.cjs verify-folders.cjs verify-layout.cjs verify-combinations.cjs verify-query.cjs verify-queue.cjs"
   }
 }

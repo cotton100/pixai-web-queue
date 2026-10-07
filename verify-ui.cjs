@@ -143,6 +143,34 @@ function fixture(t,initial=seed()) {
     setBusy:value=>{busy=value;for(const element of all().filter(item=>Object.hasOwn(item.dataset,'edit')))element.disabled=busy||element.dataset.unavailable==='true';}};
 }
 
+test('library folders, characters and presets drag directly before/after targets while keeping drafts and reservations',async t=>{
+  const initial=folderSeed();initial.presets.push({...copy(initial.presets[0]),id:'p2',name:'Other'});initial.characters.push({id:'c2',name:'Bob',prompt:'boy',negativePrompt:''});
+  const f=fixture(t,initial);await f.choose('표정');await f.press('이 조합 예약 추가');const reservation=copy(f.library().reservations[0]);
+  await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved draft';
+  const drag=async (label,sourceId,targetId,after=false)=>{
+    const data=new Map(),dataTransfer={setData:(k,v)=>data.set(k,v),getData:k=>data.get(k)||'',setDragImage(){}};
+    await f.field(label).emit('dragstart',{dataTransfer});
+    const target=f.all().find(el=>el.dataset.libraryItem===targetId);assert(target);
+    await target.emit('dragover',{dataTransfer,clientY:after?160:110});assert.equal(target.dataset.dropPosition,after?'after':'before');
+    await target.emit('drop',{dataTransfer,clientY:after?160:110});
+  };
+  await drag('폴더 이동: 행동 폴더','f2','f1');assert.deepEqual(f.library().chunkFolders.map(i=>i.id),['f2','f1']);
+  await drag('캐릭터 이동: Bob','c2','c1');assert.deepEqual(f.library().characters.map(i=>i.id),['c2','c1']);
+  await drag('프리셋 이동: Asset','p1','p2',true);assert.deepEqual(f.library().presets.map(i=>i.id),['p2','p1']);
+  assert.equal(f.field('청크 프롬프트').value,'unsaved draft');assert.deepEqual(f.library().reservations[0],reservation);assert.equal(f.jobs.length,0);
+});
+
+test('library reordering rejects busy/synthetic/foreign drags and preserves the original on storage failure',async t=>{
+  const initial=folderSeed(),f=fixture(t,initial),before=f.library();
+  const data=new Map(),dataTransfer={setData:(k,v)=>data.set(k,v),getData:k=>data.get(k)||'',setDragImage(){}};
+  let handle=f.field('폴더 이동: 행동 폴더');await handle.emit('dragstart',{dataTransfer,isTrusted:false});assert.equal(data.size,0);
+  f.setBusy(true);await handle.emit('dragstart',{dataTransfer});assert.equal(data.size,0);f.setBusy(false);
+  handle=f.field('폴더 이동: 행동 폴더');await handle.emit('dragstart',{dataTransfer});
+  const target=f.all().find(el=>el.dataset.libraryItem==='f1');
+  await target.emit('drop',{dataTransfer:{getData:()=>'{foreign}'},clientY:110});assert.deepEqual(f.library(),before);
+  f.setSaveFailure('disk full');await target.emit('drop',{dataTransfer,clientY:110});assert.deepEqual(f.library(),before);assert.match(f.messages.at(-1),/disk full/);
+});
+
 function transfer() {
   const values=new Map();return {setData:(type,value)=>values.set(type,value),getData:type=>values.get(type)||'',setDragImage(){},effectAllowed:'',dropEffect:''};
 }

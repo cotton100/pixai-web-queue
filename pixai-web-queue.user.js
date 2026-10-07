@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.8.4
+// @version      0.8.5
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -267,7 +267,7 @@
   }
 
   // Dependency-injected runner: the browser adapter is the only code that clicks Generate.
-  async function processJob(job, io) {
+  async function submitJob(job, io) {
     if (!resumable.has(job.state)) throw new Error(job.error || '이 작업은 자동으로 재개할 수 없습니다.');
     if (job.state === 'queued') {
       const prepared = await io.prepare(job);
@@ -285,6 +285,9 @@
         throw error;
       }
     }
+  }
+  async function processJob(job, io) {
+    await submitJob(job, io);
     try {
       const task = await io.waitTask(job);
       verifyTask(job, task);
@@ -311,6 +314,31 @@
       job.error = error.message;
       io.persist();
       throw error;
+    }
+  }
+
+  async function runQueue(jobs, io, {limit=3, oneJob=false, stopped=()=>false}={}) {
+    presetInteger(limit,'미리 등록할 작업 수',1,10);
+    const pending = () => jobs.filter(job=>!['done','skipped'].includes(job.state));
+    // Resolve existing paid IDs before spending credits on any new work after a restart.
+    for (const job of pending()) {
+      if (stopped()) return;
+      if (!resumable.has(job.state)) throw new Error(job.error || '확인 필요한 작업을 먼저 해결해 주세요.');
+      if (oneJob) {await processJob(job,io);return;}
+      if (job.state !== 'queued') await processJob(job,io);
+    }
+    while (!stopped() && pending().length) {
+      const current=pending();
+      if (current.some(job=>!resumable.has(job.state))) throw new Error('확인 필요한 작업을 먼저 해결해 주세요.');
+      let active=current.filter(job=>job.state!=='queued').length;
+      for (const job of current) {
+        if (stopped() || active>=limit) break;
+        if (job.state==='queued') {await submitJob(job,io);active++;}
+      }
+      if (stopped()) return;
+      const first=pending().find(job=>job.state!=='queued');
+      if (!first) return;
+      await processJob(first,io);
     }
   }
 
@@ -487,6 +515,16 @@
     if (target !== undefined) [items[index], items[target]] = [items[target], items[index]];
     return library;
   }
+
+  function placeLibraryItem(value,key,id,targetId,after=false) {
+    if (!['presets','characters','chunkFolders','reservations'].includes(key)) throw new Error('순서를 바꿀 목록을 확인해 주세요.');
+    const next=normalizePresetLibrary(value),items=next[key];
+    if (!items.some(item=>item.id===id) || !items.some(item=>item.id===targetId)) throw new Error('이동할 항목을 확인해 주세요.');
+    if (id===targetId) return next;
+    const [item]=items.splice(items.findIndex(item=>item.id===id),1);
+    items.splice(items.findIndex(item=>item.id===targetId)+(after ? 1 : 0),0,item);
+    return next;
+  }
   function removeChunkFolder(value, id) {
     const library = normalizePresetLibrary(value), folderId = presetIdentifier(id, '청크 폴더');
     if (!library.chunkFolders.some(item => item.id === folderId)) throw new Error('삭제할 청크 폴더가 없습니다.');
@@ -637,13 +675,19 @@
     return source;
   }
   function normalizeSettingsOptions(value) {
-    const source = settingsBackupKeys(value, '대기열 옵션', ['maxCredits','filePrefix','repeat']);
+    const source = settingsBackupKeys(value, '대기열 옵션', ['maxCredits','filePrefix','repeat'], ['maxCredits','filePrefix','repeat','maxInFlight','imageCount']);
     if (source.maxCredits !== null && (typeof source.maxCredits !== 'number' || !Number.isSafeInteger(source.maxCredits) || source.maxCredits < 1)) {
       throw new Error('크레딧 상한은 양의 정수 또는 제한 없음이어야 합니다.');
     }
     if (typeof source.filePrefix !== 'string') throw new Error('파일 이름은 문자열이어야 합니다.');
     if (typeof source.repeat !== 'number') throw new Error('반복 횟수는 1~100의 정수여야 합니다.');
-    return {maxCredits:source.maxCredits, filePrefix:presetText(source.filePrefix), repeat:presetInteger(source.repeat, '반복 횟수', 1, 100)};
+    const extra={};
+    if (Object.hasOwn(source,'maxInFlight')) extra.maxInFlight=presetInteger(source.maxInFlight,'미리 등록할 작업 수',1,10);
+    if (Object.hasOwn(source,'imageCount')) {
+      extra.imageCount=presetInteger(source.imageCount,'생성당 이미지 수',0,4);
+      if (![0,1,4].includes(extra.imageCount)) throw new Error('생성당 이미지 수는 사이트 선택·1장·4장 중 골라 주세요.');
+    }
+    return {maxCredits:source.maxCredits, filePrefix:presetText(source.filePrefix), repeat:presetInteger(source.repeat, '반복 횟수', 1, 100),...extra};
   }
   function settingsBackupStrings(value, keys, label) {
     if (keys.some(key => Object.prototype.hasOwnProperty.call(value, key) && typeof value[key] !== 'string')) {
@@ -1065,7 +1109,8 @@
       const config=validatePresetConfiguration(value);
       if (dialog()) throw new Error('열린 사이트 선택창을 먼저 닫아 주세요.');
       await revealModelPanel();
-      try { await applyModel(config.model); await applyLoras(config); return assertConfiguration(config,read()); }
+      const imageCount=readImageCount(true);
+      try { await applyModel(config.model); await applyLoras(config); if (imageCount!=null) await setImageCount(imageCount); return assertConfiguration(config,read()); }
       catch(error) {
         const d=dialog(), close=d?.querySelector('button[aria-label="닫기"]') || d?.querySelector('button[aria-label="Close"]');
         if (close) { try { io.mutate(()=>close.click()); } catch {} }
@@ -1093,7 +1138,28 @@
       const input=negativeField();
       if ((input && normalize(input.value) !== normalize(value)) || (!input && normalize(value))) throw new Error('네거티브 프롬프트가 조합과 다릅니다. 생성하지 않습니다.');
     }
-    return {capture,apply,read,modelKey,revealModelPanel,setNegative,verifyNegative,captureNegative};
+    function imageControls(optional=false) {
+      const groups=list(doc,'main [role="group"]').filter(e=>shown(e)&&['이미지 수','Number of images'].includes((e.getAttribute('aria-label') || (e.getAttribute('aria-labelledby') || '').split(/\s+/).map(id=>doc.getElementById(id)?.textContent || '').join(' ')).trim()));
+      if (optional && !groups.length) return [];
+      const group=only(groups,'이미지 수 선택');
+      return [...new Set([...list(group,'[role="radio"]'),...list(group,'input[type="radio"]')])].filter(shown).map(element=>{
+        const text=element.getAttribute('aria-label') || element.textContent || element.closest?.('label')?.textContent || '';
+        return {element,count:/x4|×4/i.test(text) ? 4 : /단일|single/i.test(text) ? 1 : null};
+      }).filter(item=>item.count);
+    }
+    function readImageCount(optional=false) {
+      const controls=imageControls(optional);
+      if (optional && !controls.length) return null;
+      const selected=only(controls.filter(({element})=>element.checked || element.getAttribute('aria-checked')==='true'),'선택한 이미지 수');
+      return selected.count;
+    }
+    async function setImageCount(count) {
+      if (![1,4].includes(count)) throw new Error('생성당 이미지 수는 1장 또는 4장이어야 합니다.');
+      if (readImageCount()===count) return;
+      click(only(imageControls().filter(item=>item.count===count),'이미지 수 버튼').element);
+      await waitFor(()=>readImageCount()===count,'이미지 수 반영');
+    }
+    return {capture,apply,read,modelKey,revealModelPanel,setNegative,verifyNegative,captureNegative,readImageCount,setImageCount};
   }
 
 function mountPresetEditor(parent, io) {
@@ -1199,6 +1265,38 @@ function mountPresetEditor(parent, io) {
     if (message) io.notify(message);
   }
   const orderRefreshers = [];
+  let libraryDrag=null,libraryDropBusy=false;
+  function libraryOrderHandle(row,key,item,label) {
+    row.dataset.libraryReorder=key;
+    row.dataset.libraryItem=item.id;
+    const handle=el('button',null,{type:'button',draggable:'true',class:'pq-drag-handle','data-edit':'','aria-label':`${label} 이동: ${item.name}`,title:'드래그해서 목록 순서 변경'});
+    decorateIcon(handle,'drag_indicator');
+    const type='application/x-pixai-library-item';
+    const clear=()=>{libraryDrag=null;for (const target of root.querySelectorAll('[data-library-reorder]')) target.dataset.dropPosition='';};
+    handle.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();});
+    handle.addEventListener('dragstart',event=>{
+      if (event.isTrusted===false || libraryDropBusy || io.isBusy?.() || !event.dataTransfer) {event.preventDefault();return;}
+      event.stopPropagation();libraryDrag={key,id:item.id};event.dataTransfer.setData(type,JSON.stringify(libraryDrag));event.dataTransfer.effectAllowed='move';event.dataTransfer.setDragImage?.(row,12,12);
+    });
+    handle.addEventListener('dragend',clear);
+    const accepts=event=>event.isTrusted!==false && !libraryDropBusy && !io.isBusy?.() && libraryDrag?.key===key && libraryDrag.id!==item.id;
+    row.addEventListener('dragover',event=>{
+      if (!accepts(event)) return;
+      event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect='move';
+      row.dataset.dropPosition=event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2 ? 'after' : 'before';
+    });
+    row.addEventListener('dragleave',event=>{if (!row.contains(event.relatedTarget)) row.dataset.dropPosition='';});
+    row.addEventListener('drop',async event=>{
+      if (!accepts(event) || event.dataTransfer?.getData(type)!==JSON.stringify(libraryDrag)) return;
+      event.preventDefault();event.stopPropagation();const dragged=libraryDrag;
+      const after=event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2;
+      clear();libraryDropBusy=true;
+      try {await commit(placeLibraryItem(library,key,dragged.id,item.id,after),'목록 순서를 변경했습니다.');}
+      catch(error) {io.notify(error.message);}
+      finally {libraryDropBusy=false;}
+    });
+    handle.disabled=!!io.isBusy?.();return handle;
+  }
   function available(control, value) {
     control.dataset.unavailable = String(!value); control.disabled = !value || !!io.isBusy?.();
   }
@@ -1228,6 +1326,7 @@ function mountPresetEditor(parent, io) {
     refresh(); return wrap;
   }
   const chunkGroups = () => [{id:'',name:'미분류'},...library.chunkFolders];
+  root.append(el('style','#local-pixai-queue .pq-library-order-row{display:flex;align-items:center;gap:7px}#local-pixai-queue .pq-library-order-row>.pq-saved-card{flex:1;min-width:0}#local-pixai-queue [data-library-reorder]>.pq-drag-handle{flex:none;width:24px;min-height:28px;padding:0;border:0;background:transparent;cursor:grab}#local-pixai-queue .pq-folder-group>summary>.pq-drag-handle{float:none;vertical-align:middle;margin:0 6px 0 0}#local-pixai-queue .pq-folder-group>summary[data-library-reorder]>.pq-folder-title{max-width:calc(100% - 80px)}#local-pixai-queue [data-library-reorder][data-drop-position="before"]{box-shadow:inset 0 3px var(--pq-accent,#acd1ed)}#local-pixai-queue [data-library-reorder][data-drop-position="after"]{box-shadow:inset 0 -3px var(--pq-accent,#acd1ed)}'));
   const matchesChunk = (chunk,text) => `${chunk.name}\n${chunk.prompt}\n${chunk.negativePrompt}`.toLocaleLowerCase().includes(text.trim().toLocaleLowerCase());
   function filterChunks(search,filter) {
     return orderedChunks(library).filter(chunk=>matchesChunk(chunk,search)&&(!filter || (filter==='unfiled' ? !chunk.folderId : `folder:${chunk.folderId}`===filter)));
@@ -1373,7 +1472,8 @@ function mountPresetEditor(parent, io) {
       control.className='pq-saved-card';control.setAttribute('aria-label',`프리셋 편집: ${item.name}`);control.setAttribute('aria-expanded',String(selected && presetOpen));control.setAttribute('aria-pressed',String(selected && presetOpen));control.dataset.presetHeading=item.id;
       const heading=el('span',selected && presetOpen ? presetName.input.value || item.name : item.name,{'data-preset-title':item.id});
       control.textContent='';control.append(heading,el('small',`${item.model.name || item.model.id} · 버전 ${item.model.versionId} · ${item.loras.map(lora=>`${lora.name || lora.id} ${lora.weight}`).join(' / ') || 'LoRA 없음'}`));
-      const row=el('div',null,{class:'pq-preset-card'});row.append(control);if (selected && presetOpen) row.append(presetForm);presetList.append(row);
+      const row=el('div',null,{class:'pq-preset-card'}),header=el('div',null,{class:'pq-library-order-row'});
+      header.append(libraryOrderHandle(header,'presets',item,'프리셋'),control);row.append(header);if (selected && presetOpen) row.append(presetForm);presetList.append(row);
     }
     presetForm.hidden=!presetOpen;
     if (!presetForm.parentElement) presetList.append(presetForm);
@@ -1561,6 +1661,7 @@ function mountPresetEditor(parent, io) {
           if (!chunks.length && (search.input.value.trim() || (filter.input.value && filter.input.value!==`folder:${group.id}` && !(filter.input.value==='unfiled' && !group.id)))) continue;
           const details=el('details',null,{class:'pq-folder-group','data-chunk-folder':group.id});details.open=!closed.has(group.id);
           const summary=el('summary');summary.append(el('span',`${group.name} · ${chunks.length} / ${library.scenes.filter(item=>(item.folderId || '')===group.id).length}개`,{class:'pq-folder-title'}));
+          if (group.id) {const title=summary.children[0];title.remove();summary.append(libraryOrderHandle(summary,'chunkFolders',group,'폴더'),title);}
           if (group.id) {const menu=el('button','⋮',{type:'button','aria-label':`폴더 관리: ${group.name}`});menu.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();managedFolder.input.value=group.id;chooseManagedFolder();managedFolderPicker.render();folderTools.open=true;folderTools.scrollIntoView?.({block:'nearest'});});summary.append(menu);}
           summary.dataset.dropFolder=group.id;dropTarget(summary,()=>({folderId:group.id}));details.append(summary);
           details.addEventListener('toggle',()=>{if (details.open) closed.delete(group.id);else closed.add(group.id);updateSelectionSummary();});
@@ -1613,7 +1714,8 @@ function mountPresetEditor(parent, io) {
         if (!items.length) list.append(el('small','표시할 캐릭터가 없습니다. 새 캐릭터를 만들어 주세요.',{class:'pq-empty'}));
         for (const item of items) {
           const control=action(item.name,()=>{select.input.value=item.id;fill(item);setMode('edit');name.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();});control.dataset.viewOnly='';
-          control.className='pq-saved-card';control.setAttribute('aria-label',`캐릭터 편집: ${item.name}`);control.setAttribute('aria-pressed',String(select.input.value===item.id));control.append(el('small',item.prompt || item.negativePrompt));list.append(control);
+          control.className='pq-saved-card';control.setAttribute('aria-label',`캐릭터 편집: ${item.name}`);control.setAttribute('aria-pressed',String(select.input.value===item.id));control.append(el('small',item.prompt || item.negativePrompt));
+          const row=el('div',null,{class:'pq-library-order-row'});row.append(libraryOrderHandle(row,key,item,'캐릭터'),control);list.append(row);
         }
       };
       search.input.addEventListener('input',renderManager);refreshFolders=renderManager;resetView=()=>{search.input.value='';};browse.append(search.wrap,list);
@@ -1979,7 +2081,7 @@ function mountPresetEditor(parent, io) {
     } finally { if (typeof bitmap?.close === "function") bitmap.close(); }
   }
 
-  const core = {MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -2001,6 +2103,7 @@ function mountPresetEditor(parent, io) {
   let stopRequested = false;
   let internalAction = false;
   let initialModel = null;
+  let runImageCount = null;
   let settingsBusy = false;
   let presetEditor;
   let panel;
@@ -2080,12 +2183,7 @@ function mountPresetEditor(parent, io) {
     return found[0];
   }
   function expectedCount() {
-    const group = all('main [role="group"]').find(element => ['이미지 수','Number of images'].includes(groupName(element).trim()));
-    const radio = group?.querySelector('[role="radio"][aria-checked="true"], input[type="radio"]:checked');
-    const text = radio?.getAttribute('aria-label') || radio?.textContent;
-    if (/x4|×4/.test(text || '')) return 4;
-    if (/단일|single/i.test(text || '')) return 1;
-    throw new Error('이미지 수 선택을 확인할 수 없습니다. 한국어 새 에디터에서 실행해 주세요.');
+    return settings.readImageCount();
   }
   async function ensureDestination() {
     let reason='';
@@ -2109,6 +2207,7 @@ function mountPresetEditor(parent, io) {
       await settings.apply(configuration);
       await settings.setNegative(job.negativePrompt);
     }
+    await settings.setImageCount(runImageCount);
     if (stopRequested) throw new Error('프롬프트 입력 전 중지됐습니다.');
     const input = editor();
     internalAction = true;
@@ -2257,18 +2356,15 @@ function mountPresetEditor(parent, io) {
         persist(); // Legacy settings must survive stop/reload after a preset has run.
       }
       if (storage.mode === 'download') resetDownloadProgress(jobs);
+      const selectedCount=Number(panel.querySelector('[data-image-count]').value);
+      runImageCount=selectedCount || expectedCount();
       if (stopRequested) throw new Error('시작 준비가 중지됐습니다. 이미지를 생성하지 않았습니다.');
       running = true;
       starting = false;
       oneJobRun = oneJob;
       try {
         persist();
-        for (const job of jobs) {
-          if (job.state === 'done' || job.state === 'skipped') continue;
-          if (stopRequested) break;
-          await processJob(job, io);
-          if (oneJob) break;
-        }
+        await runQueue(jobs,io,{limit:Number(panel.querySelector('[data-max-in-flight]').value),oneJob,stopped:()=>stopRequested});
         message = stopRequested ? '중지됨. 완료된 파일은 보존했습니다.' : oneJob ? '첫 작업 실행과 저장이 끝났습니다. 나머지 대기열은 실행하지 않았습니다.' : '대기열 작업과 저장이 끝났습니다.';
       } finally { running = false; render(); }
     });
@@ -2391,7 +2487,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.8.4', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.8.5', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2434,18 +2530,26 @@ function mountPresetEditor(parent, io) {
     const simple=node('details');simple.append(node('summary','통짜 프롬프트 · 간단 대기열'),title,prompts,node('small','반복 횟수 (생성 버튼을 누르는 횟수)'),repeat);
     const budget = node('input',null,{type:'number',min:'1',value:'7800','data-edit':'','aria-label':'생성 1회 크레딧 상한'});
     const budgetLabel=node('small','생성 1회 크레딧 상한 (빈칸은 제한 없음)');panel.append(budgetLabel,budget);
+    const imageCountLabel=node('label','생성당 이미지 수');
+    const imageCount=node('select',null,{'data-edit':'','data-image-count':'','aria-label':'생성당 이미지 수'});
+    for (const [value,name] of [[4,'4장 배치'],[1,'1장'],[0,'사이트 선택 유지']]) imageCount.append(node('option',name,{value:String(value)}));
+    imageCount.value='4';imageCountLabel.append(imageCount);
+    const inFlightLabel=node('label','미리 등록할 작업 수 (1~10)');
+    const maxInFlight=node('input',null,{type:'number',min:'1',max:'10',value:'3','data-edit':'','data-max-in-flight':'','aria-label':'미리 등록할 작업 수'});
+    inFlightLabel.append(maxInFlight);
     function readOptions() {
-      return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value)});
+      return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value),imageCount:Number(imageCount.value),maxInFlight:Number(maxInFlight.value)});
     }
     function fillOptions(value) {
       budget.value=value.maxCredits == null ? '' : String(value.maxCredits);
       title.value=value.filePrefix;repeat.value=String(value.repeat);
+      imageCount.value=String(value.imageCount ?? 4);maxInFlight.value=String(value.maxInFlight ?? 3);
     }
     function loadOptions() {
       fillOptions(normalizeSettingsOptions(JSON.parse(localStorage.getItem(OPTIONS_KEY) || '{"maxCredits":7800,"filePrefix":"","repeat":1}')));
     }
     try {loadOptions();} catch {message='기본 옵션을 읽지 못했습니다. 설정 불러오기로 복구하거나 입력값을 확인해 주세요.';}
-    for (const input of [budget,title,repeat]) input.addEventListener('change',()=>{
+    for (const input of [budget,title,repeat,imageCount,maxInFlight]) input.addEventListener('change',()=>{
       try {localStorage.setItem(OPTIONS_KEY,JSON.stringify(readOptions()));}
       catch(error) {message=`기본 옵션 저장 실패: ${error.message}`;render();}
     });
@@ -2506,7 +2610,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.4',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.5',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -2582,7 +2686,7 @@ function mountPresetEditor(parent, io) {
     const folderStatus=panel.querySelector('[data-folder]'),jobsView=panel.querySelector('[data-jobs]');
     const intro=[...panel.children].find(child=>child.tagName.toLowerCase()==='small');
     const settingsContent=node('div',null,{class:'pq-settings-content'});
-    settingsContent.append(node('h3','저장 위치'),folderStatus,choose,chooseOther,node('h3','실행 옵션'),...(budgetLabel ? [budgetLabel] : []),budget,node('h3','설정 백업'),backups);
+    settingsContent.append(node('h3','저장 위치'),folderStatus,choose,chooseOther,node('h3','실행 옵션'),...(budgetLabel ? [budgetLabel] : []),budget,imageCountLabel,inFlightLabel,node('small','작업별 프롬프트를 순서대로 미리 등록합니다. 한 작업을 저장하면 다음 작업을 채웁니다. 첫 작업만 실행은 1건만 처리합니다.'),node('h3','설정 백업'),backups);
     backups.open=true;
     const queueContent=node('div',null,{class:'pq-queue-content'});queueContent.append(node('h3','등록된 대기열'),testRun,jobsView,simple,exportQueue);simple.open=true;
     attachRuntimePages=()=>{
@@ -2895,7 +2999,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.4', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.5', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
