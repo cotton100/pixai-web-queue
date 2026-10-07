@@ -6,6 +6,28 @@ const sandbox={module:{exports:{}}};
 vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),sandbox);
 const {processJob,recover,verifyTask,outputIds,safeName,checkCost,bindPanelDrag,acceptFolder,folderError,bindFolderActivation,pickDirectory,storageSupport,managedDownload,resetDownloadProgress}=sandbox.module.exports;
 const job=()=>({id:'fixture',prompt:'1girl, smile',title:'미소',state:'queued',saved:[]});
+const promptText=text=>({nodeType:3,textContent:text});
+const promptNode=(tag,...childNodes)=>({nodeType:1,tagName:tag,childNodes,classList:{contains:()=>false}});
+test('Tiptap prompt reading preserves logical blank lines instead of visual paragraph spacing',()=>{
+  const input={childNodes:[promptNode('P',promptText('quality, trigger')),promptNode('P'),promptNode('P',promptText('character, smile'))],innerText:'quality, trigger\n\n\n\ncharacter, smile'};
+  assert.equal(sandbox.module.exports.readPromptEditorText(input),'quality, trigger\n\ncharacter, smile');
+  assert.notEqual(sandbox.module.exports.readPromptEditorText(input),input.innerText);
+});
+test('Tiptap prompt reading preserves explicit breaks and marked inline text, ignoring only trailing placeholders',()=>{
+  const trailing=promptNode('BR');trailing.classList.contains=name=>name==='ProseMirror-trailingBreak';
+  const input={childNodes:[promptNode('P',promptText('1girl, '),promptNode('STRONG',promptText('(smile:1.2)')),promptNode('BR'),promptText('night')),promptNode('P',trailing)]};
+  assert.equal(sandbox.module.exports.readPromptEditorText(input),'1girl, (smile:1.2)\nnight\n');
+});
+test('Tiptap prompt reading does not accept changed text, weights, spaces or removed blank lines as an identical prompt',()=>{
+  const expected='quality\n\n(smile:1.2), night';
+  for(const changed of ['quality\n(smile:1.2), night','quality\n\n(smile:1.3), night','quality\n\n(smile:1.2),night','quality\n\n(smile:1.2), day']) {
+    const input={childNodes:changed.split('\n').map(line=>promptNode('P',promptText(line)))};
+    assert.notEqual(sandbox.module.exports.normalize(sandbox.module.exports.readPromptEditorText(input)),expected);
+  }
+});
+test('unexpected rich prompt blocks and embedded media are rejected instead of silently losing content',()=>{
+  for(const input of [{childNodes:[promptNode('DIV',promptText('tags'))]},{childNodes:[promptNode('P',promptNode('IMG'))]}])assert.throws(()=>sandbox.module.exports.readPromptEditorText(input),/문단 구조/);
+});
 const task=(j,count=4)=>({id:j.taskId,status:'completed',createdAt:new Date(j.submittedAt || Date.now()).toISOString(),parameters:{prompts:j.prompt},outputs:{batch:Array.from({length:count},(_,i)=>({mediaId:String(100+i)}))}});
 function fixture(j, overrides={}) {
   const calls=[];
@@ -1022,7 +1044,8 @@ function fixture(options={}) {
       checkbox.onClick=()=>{state.clicks.push(`checkbox:${lora.id}`);pending=lora;opened.append(new Element('span',{id:`weight-slider-${lora.id}`}));};
       opened.append(label);
     }
-    opened.append(button(options.english?'Confirm':'확인',{},()=>{if(pending)state.loras.push({...pending});renderRows();close();}));
+    opened.append(button(options.loraConfirmLabel || (options.english?'Confirm selection':'확인'),{},()=>{if(pending)state.loras.push({...pending});renderRows();close();}));
+    if(options.duplicateLoraConfirm)opened.append(button('Confirm',{},()=>{state.paidClicks++;}));
   }
   const tab=button(options.english?'Model':'모델',{role:'tab','aria-selected':options.modelTabHidden?'false':'true'},()=>{tab.setAttribute('aria-selected','true');allModel.hidden=false;allLora.hidden=false;modelCard.hidden=false;rows.hidden=false;});
   const allModel=button(options.english?'See All Models':'전체 모델 보기',{},openModel),allLora=button(options.english?'See All LoRAs':'전체 LoRA 보기',{},openLora);
@@ -1152,13 +1175,28 @@ test('English site controls apply exact model/LoRA settings and negatives withou
   const expected=configuration({id:'2',versionId:'22',name:'대상 모델'},[{id:'20',versionId:'201',name:'대상 LoRA',weight:0}]);
   assert.deepEqual(plain(await f.adapter.apply(expected)),expected);
   await f.adapter.setNegative('lowres');f.adapter.verifyNegative('lowres');
-  assert.deepEqual(f.state.clicks,['Model','See All Models','radio:2','Use this model','Remove','See All LoRAs','checkbox:20','Confirm','Advanced']);
+  assert.deepEqual(f.state.clicks,['Model','See All Models','radio:2','Use this model','Remove','See All LoRAs','checkbox:20','Confirm selection','Advanced']);
   assert.equal(f.negative().value,'lowres');assert.equal(f.state.paidClicks,0);
 });
 
 test('English popup failure closes only its settings dialog and never generates',async()=>{
   const f=fixture({english:true,noCards:true});await assert.rejects(f.adapter.apply(configuration({id:'2',versionId:'22',name:'missing'})),/검색창/);
   assert.deepEqual(f.state.clicks,['See All Models','Close']);assert.equal(f.doc.querySelector('[role="dialog"]'),null);assert.equal(f.state.paidClicks,0);
+});
+
+test('legacy English Confirm label still applies the exact LoRA without generating',async()=>{
+  const f=fixture({english:true,loraConfirmLabel:'Confirm'});
+  const expected=configuration(undefined,[{id:'20',versionId:'201',name:'대상 LoRA',weight:0.5}]);
+  assert.deepEqual(plain(await f.adapter.apply(expected)),expected);
+  assert.deepEqual(f.state.clicks,['See All LoRAs','checkbox:20','Confirm']);
+  assert.equal(f.state.paidClicks,0);
+});
+
+test('ambiguous English LoRA confirmation controls stop and close the dialog without generating',async()=>{
+  const f=fixture({english:true,duplicateLoraConfirm:true});
+  await assert.rejects(f.adapter.apply(configuration(undefined,[{id:'20',versionId:'201',name:'대상 LoRA',weight:0.5}])),/LoRA 확인 버튼/);
+  assert.equal(f.state.paidClicks,0);assert.equal(f.state.loras.length,0);
+  assert.equal(f.doc.querySelector('[role="dialog"]'),null);
 });
 test('exact-version selection failure stops after settings changes without submission',async()=>{
   const f=fixture({models:[{id:'2',versionId:'22',defaultVersion:'21',name:'대상 모델'}]});
