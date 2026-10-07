@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.8.0
+// @version      0.8.1
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -1880,7 +1880,71 @@ function mountPresetEditor(parent, io) {
   };
 }
 
-  const core = {snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  // GraphQL 조회 실패를 HTTP 상태·오류 코드별로 구분한다. 응답 본문 전체·헤더·인증값은 보관하지 않는다.
+  function describeQueryFailure(status, payload) {
+    const isAuthCode = value => /^(unauthorized|unauthenticated)$/i.test(value);
+    const list = Array.isArray(payload?.errors) ? payload.errors.filter(item => item && typeof item === "object") : [];
+    const codeOf = item => { const raw = item?.extensions?.code; return typeof raw === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(raw.trim()) ? raw.trim() : ""; };
+    const first = list.find(item => isAuthCode(codeOf(item))) || list[0] || null;
+    const code = codeOf(first);
+    const detail = (typeof first?.message === "string" ? first.message : "").slice(0, 400).replace(/\s+/g, " ").trim().slice(0, 120);
+    const tail = " 로그인 문제로 단정할 수 없습니다. 작업 ID와 저장 내역은 유지됩니다.";
+    if (status === 401 || isAuthCode(code)) return Object.assign(new Error("조회 인증 실패 (" + (status || 200) + (code ? ", " + code : "") + "). PixAI 로그인 상태를 확인해 주세요. 작업 ID와 저장 내역은 유지됩니다."), {status, code, stage: "auth"});
+    if (status === 403) return Object.assign(new Error("조회 접근 거부 (403" + (code ? ", " + code : "") + ")." + tail), {status, code, stage: "forbidden"});
+    if (status >= 500) return Object.assign(new Error("PixAI 서버 오류 (" + status + "). 잠시 후 같은 작업 ID로 다시 확인해 주세요."), {status, code, stage: "server"});
+    if (payload === null) return Object.assign(new Error("조회 응답이 JSON이 아닙니다 (" + status + "). 네트워크 차단·점검 페이지일 수 있습니다." + tail), {status, code: "", stage: "non-json"});
+    if (code === "GRAPHQL_VALIDATION_FAILED" || code === "BAD_USER_INPUT" || status === 400 || status === 422) {
+      return Object.assign(new Error("조회 형식 오류 (" + (status || 200) + (code ? ", " + code : "") + "): 스크립트의 조회 형식이 사이트와 맞지 않습니다." + (detail ? " [" + detail + "]" : "") + tail), {status, code, stage: "validation"});
+    }
+    return Object.assign(new Error("조회 실패 (" + status + (code ? ", " + code : "") + ")." + (detail ? " [" + detail + "]" : "") + tail), {status, code, stage: "other"});
+  }
+  // fetchImpl는 호출자가 넘긴다(브라우저: 사이트 쿠키 포함 fetch). 결과는 data만 돌려주고 실패는 describeQueryFailure로 구분한다.
+  async function graphqlQuery(fetchImpl, operation, query, variables, {signal} = {}) {
+    let response;
+    try {
+      response = await fetchImpl("https://api.pixai.art/graphql?operation=" + encodeURIComponent(operation), {
+        method: "POST", credentials: "include", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({operationName: operation, query, variables}), signal
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw Object.assign(new Error("조회 시간 초과. 같은 작업 ID로 다시 확인할 수 있습니다."), {status: 0, code: "", stage: "timeout"});
+      throw Object.assign(new Error("조회 요청을 보내지 못했습니다 (네트워크 오류). 작업 ID와 저장 내역은 유지됩니다."), {status: 0, code: "", stage: "network"});
+    }
+    let payload = null;
+    try { payload = await response.json(); } catch (error) {
+      if (error?.name === "AbortError") throw Object.assign(new Error("조회 시간 초과. 같은 작업 ID로 다시 확인할 수 있습니다."), {status: 0, code: "", stage: "timeout"});
+      payload = null;
+    }
+    if (!response.ok || !payload || payload.errors?.length || !payload.data) throw describeQueryFailure(response.status, payload);
+    return payload.data;
+  }
+
+  // 원본 조회: 사이트 스키마는 media(id: String!). fileUrl은 null일 수 있고 실제 원본은 urls의 PUBLIC(/images/orig/) 변형이다.
+  const MEDIA_QUERY = "query getMedia($id: String!) { media(id: $id) { id width height imageType fileUrl urls { variant url } } }";
+  function pickOriginalMedia(media, mediaId) {
+    if (!media || String(media.id) !== String(mediaId)) throw new Error("원본 이미지 정보를 확인하지 못했습니다 (ID 불일치). 저장하지 않습니다.");
+    const urls = Array.isArray(media.urls) ? media.urls.filter(item => item && typeof item.url === "string" && item.url) : [];
+    const found = urls.find(item => item.variant === "PUBLIC");
+    const url = found ? found.url : (typeof media.fileUrl === "string" ? media.fileUrl : "");
+    if (!url) throw new Error("원본 이미지 URL을 확인하지 못했습니다 (제공된 variant: " + (urls.map(item => item.variant).join(", ") || "없음") + "). 썸네일로 대체하지 않고 저장하지 않습니다.");
+    return {url, variant: found ? "PUBLIC" : "fileUrl", width: Number.isInteger(media.width) ? media.width : null, height: Number.isInteger(media.height) ? media.height : null};
+  }
+  function mediaUrlAllowed(href) {
+    const url = new URL(href);
+    if (url.protocol !== "https:" || !(url.hostname === "pixai.art" || url.hostname.endsWith(".pixai.art"))) throw new Error("예상하지 못한 원본 이미지 호스트입니다. 저장하지 않습니다.");
+    return url;
+  }
+  // 서버가 알려준 원본 크기와 실제 내려받은 이미지 크기가 다르면(미리보기 등) 저장하지 않는다.
+  async function assertOriginalDimensions(blob, expected, decode) {
+    if (!expected.width || !expected.height) return;
+    let bitmap;
+    try { bitmap = await decode(blob); } catch { throw new Error("다운로드한 이미지를 해석하지 못해 원본 여부를 확인할 수 없습니다. 저장하지 않습니다."); }
+    try {
+      if (bitmap.width !== expected.width || bitmap.height !== expected.height) throw new Error("다운로드한 이미지 크기(" + bitmap.width + "×" + bitmap.height + ")가 원본(" + expected.width + "×" + expected.height + ")과 다릅니다. 미리보기일 수 있어 저장하지 않습니다.");
+    } finally { if (typeof bitmap?.close === "function") bitmap.close(); }
+  }
+
+  const core = {MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -1949,16 +2013,8 @@ function mountPresetEditor(parent, io) {
   async function request(operation, query, variables) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 25000);
-    try {
-      const response = await fetch(`https://api.pixai.art/graphql?operation=${operation}`, {
-        method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({operationName:operation, query, variables}), signal:controller.signal
-      });
-      if (!response.ok) throw new Error(`조회 실패 (${response.status}). 로그인을 확인해 주세요.`);
-      const value = await response.json();
-      if (value.errors?.length || !value.data) throw new Error('PixAI 조회 형식이 달라졌거나 접근할 수 없습니다.');
-      return value.data;
-    } finally { clearTimeout(timeout); }
+    try { return await graphqlQuery((...args) => fetch(...args), operation, query, variables, {signal:controller.signal}); }
+    finally { clearTimeout(timeout); }
   }
   async function getTask(id) {
     const data = await request('getTaskById', 'query getTaskById($id: ID!) { task(id: $id) { id status createdAt parameters outputs mediaId } }', {id});
@@ -2072,12 +2128,9 @@ function mountPresetEditor(parent, io) {
     throw new Error('완료 확인 시간 초과. 같은 작업 ID로 재개할 수 있습니다.');
   }
   async function imageBlob(mediaId) {
-    const data = await request('getMedia', 'query getMedia($id: ID!) { media(id: $id) { id fileUrl } }', {id:mediaId});
-    if (String(data.media?.id) !== mediaId || !data.media.fileUrl) throw new Error('원본 이미지 URL을 확인하지 못했습니다.');
-    const url = new URL(data.media.fileUrl);
-    if (url.protocol !== 'https:' || !(url.hostname === 'pixai.art' || url.hostname.endsWith('.pixai.art'))) {
-      throw new Error('예상하지 못한 원본 이미지 호스트입니다.');
-    }
+    const data = await request('getMedia', MEDIA_QUERY, {id:mediaId});
+    const original = pickOriginalMedia(data.media, mediaId);
+    const url = mediaUrlAllowed(original.url);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90000);
     try {
@@ -2085,6 +2138,7 @@ function mountPresetEditor(parent, io) {
       if (!response.ok) throw new Error(`이미지 다운로드 실패 (${response.status})`);
       const blob = await response.blob();
       if (!['image/png','image/jpeg','image/webp'].includes(blob.type) || blob.size === 0) throw new Error('다운로드한 파일이 지원 이미지가 아닙니다.');
+      await assertOriginalDimensions(blob, original, image => createImageBitmap(image));
       return blob;
     } finally { clearTimeout(timeout); }
   }
@@ -2287,7 +2341,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.8.0', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.8.1', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2402,7 +2456,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.0',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.1',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -2791,7 +2845,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.0', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.1', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
