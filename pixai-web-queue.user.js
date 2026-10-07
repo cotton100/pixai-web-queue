@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.7.3
+// @version      0.7.4
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -1700,6 +1700,10 @@ function mountPresetEditor(parent, io) {
   let jobs = [];
   let folder = null;
   let folderToken = null;
+  let rememberedFolder = null;
+  let folderEpoch = 0;
+  let folderRestoration = Promise.resolve();
+  let restoringFolder = false;
   let running = false;
   let starting = false;
   let stopRequested = false;
@@ -1798,6 +1802,7 @@ function mountPresetEditor(parent, io) {
     else if (storage.mode === 'download') {
       if (!downloadsReady) reason='먼저 설정 탭의 자동 다운로드 준비 확인을 완료해 주세요.';
     } else if (!folder || await folder.queryPermission({mode:'readwrite'}) !== 'granted') {
+      if (folder) { rememberedFolder={handle:folder,token:folderToken};folder=null;folderToken=null; }
       reason='설정 탭의 저장 폴더 선택을 눌러 쓰기 권한을 허용해 주세요. 새로고침한 뒤에는 다시 선택해야 합니다.';
     }
     if (reason) throw Object.assign(new Error(reason),{requiresStorageSetup:true});
@@ -1939,6 +1944,7 @@ function mountPresetEditor(parent, io) {
     starting=true; stopRequested=false; message='시작 준비: 저장 위치 확인 중…';render();
     let showStorage=false;
     try {
+    await folderRestoration;
     await ensureDestination();
     if (stopRequested) throw new Error('시작 준비가 중지됐습니다. 이미지를 생성하지 않았습니다.');
     if (!onGenerator()) throw new Error('이미지 생성 화면에서 실행해 주세요.');
@@ -2014,7 +2020,7 @@ function mountPresetEditor(parent, io) {
     if (feedback) feedback.textContent=message;
     panel.querySelector('[data-folder]').textContent = storage.mode === 'download'
       ? `자동 다운로드 · ${downloadsReady ? '준비 확인 완료' : '준비 확인 필요'} · 브라우저 설정 폴더`
-      : (folder ? `저장 폴더: ${folder.name}` : '저장 폴더 미선택');
+      : (folder ? `저장 폴더: ${folder.name}` : rememberedFolder ? `기억한 폴더: ${rememberedFolder.handle.name} · 권한 허용 필요` : restoringFolder ? '이전 저장 폴더 확인 중…' : '저장 폴더 미선택');
     const list = panel.querySelector('[data-jobs]');
     list.replaceChildren();
     for (const job of jobs) {
@@ -2042,7 +2048,9 @@ function mountPresetEditor(parent, io) {
     choose.disabled = running || starting || settingsBusy || choosingFolder;
     choose.textContent = storage.mode === 'download'
       ? (choosingFolder ? '확인 파일 다운로드 중…' : '자동 다운로드 준비 확인')
-      : (choosingFolder ? '폴더 선택 중…' : '저장 폴더 선택');
+      : (choosingFolder ? (rememberedFolder && !folder ? '권한 확인 중…' : '폴더 선택 중…') : rememberedFolder && !folder ? '저장 폴더 권한 허용' : '저장 폴더 선택');
+    const chooseOther=panel.querySelector('[data-choose-other-folder]');
+    if (chooseOther) { chooseOther.hidden=storage.mode !== 'folder' || !rememberedFolder || !!folder;chooseOther.disabled=choose.disabled; }
     panel.querySelector('[data-start]').textContent = running ? '실행 중' : starting ? '시작 준비 중…' : '시작 / 같은 작업 재개';
     decorateIcon(panel.querySelector('[data-start]'),'play_arrow');
     // Keep idle Start clickable so its preflight can explain missing setup.
@@ -2053,7 +2061,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.7.3 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.7.4 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2086,7 +2094,9 @@ function mountPresetEditor(parent, io) {
     const choose = button('저장 폴더 선택', chooseFolder);
     choose.dataset.chooseFolder = '';
     choose.dataset.edit = '';
-    panel.append(choose);
+    const chooseOther=button('다른 저장 폴더 선택',()=>chooseFolder({pickNew:true}));
+    chooseOther.dataset.chooseOtherFolder='';chooseOther.dataset.edit='';chooseOther.hidden=true;
+    panel.append(choose,chooseOther);
     const title = node('input',null,{placeholder:'파일 이름 / 작업 이름', 'data-edit':'', 'aria-label':'대기열 작업 이름'});
     const prompts = node('textarea',null,{placeholder:'프롬프트 입력\n여러 작업은 한 줄 --- 로 구분', 'data-edit':'', 'aria-label':'대기열 프롬프트'});
     const repeat = node('input',null,{type:'number',min:'1',max:'100',value:'1','data-edit':'', 'aria-label':'각 프롬프트 반복 횟수'});
@@ -2241,7 +2251,7 @@ function mountPresetEditor(parent, io) {
     const folderStatus=panel.querySelector('[data-folder]'),jobsView=panel.querySelector('[data-jobs]');
     const intro=[...panel.children].find(child=>child.tagName.toLowerCase()==='small');
     const settingsContent=node('div',null,{class:'pq-settings-content'});
-    settingsContent.append(node('h3','저장 위치'),folderStatus,choose,node('h3','실행 옵션'),...(budgetLabel ? [budgetLabel] : []),budget,node('h3','설정 백업'),backups);
+    settingsContent.append(node('h3','저장 위치'),folderStatus,choose,chooseOther,node('h3','실행 옵션'),...(budgetLabel ? [budgetLabel] : []),budget,node('h3','설정 백업'),backups);
     backups.open=true;
     const queueContent=node('div',null,{class:'pq-queue-content'});queueContent.append(node('h3','등록된 대기열'),testRun,jobsView,simple,exportQueue);simple.open=true;
     attachRuntimePages=()=>{
@@ -2403,11 +2413,31 @@ function mountPresetEditor(parent, io) {
       save:value=>localStorage.setItem('local.pixai-web-queue.size.v1',JSON.stringify(value)),
       onResize:listener=>window.addEventListener('resize',listener)
     });
+    if (storage.mode === 'folder' && typeof indexedDB !== 'undefined') folderRestoration=restoreSelectedFolder();
   }
-  async function chooseFolder() {
+  async function restoreSelectedFolder() {
+    const epoch=folderEpoch;restoringFolder=true;render();
+    try {
+      let record=await folderRecord();
+      if (!record || epoch !== folderEpoch) return;
+      if (record.kind === 'directory') record={handle:record,token:null};
+      if (record.handle?.kind !== 'directory' || typeof record.handle.queryPermission !== 'function' || typeof record.handle.isSameEntry !== 'function' || (record.token != null && (typeof record.token !== 'string' || !record.token))) throw new Error('저장된 폴더 기록의 형식을 확인하지 못했습니다.');
+      const permission=await record.handle.queryPermission({mode:'readwrite'});
+      if (!['granted','prompt','denied'].includes(permission)) throw new Error('저장 폴더 권한을 확인하지 못했습니다.');
+      if (epoch !== folderEpoch) return; // A newer user selection wins.
+      rememberedFolder=record;
+      if (permission === 'granted') {
+        folder=record.handle;folderToken=record.token;
+        if (!starting && !settingsBusy && message === storage.message) message=`저장 폴더 자동 연결: ${folder.name}`;
+      } else if (!starting && !settingsBusy && message === storage.message) message=`이전 저장 폴더 ${record.handle.name}을 기억하고 있습니다. 설정에서 ‘저장 폴더 권한 허용’을 눌러 주세요.`;
+    } catch(error) { if (epoch === folderEpoch && !starting && !settingsBusy && message === storage.message) message=`저장 폴더 기록을 복원하지 못했습니다. 폴더를 선택해 주세요. (${error.message})`; }
+    finally { if (epoch === folderEpoch) restoringFolder=false;render(); }
+  }
+  async function chooseFolder({pickNew=false}={}) {
     if (choosingFolder || running || starting || settingsBusy) return;
     if (!storage.supported) { message = storage.message; render(); return; }
     choosingFolder = true;
+    folderEpoch++;restoringFolder=false;
     const choose = panel.querySelector('[data-choose-folder]');
     choose.disabled = true; choose.textContent = storage.mode === 'download' ? '확인 파일 다운로드 중…' : '폴더 선택 중…';
     const notify = text => { message = text; render(); };
@@ -2417,25 +2447,34 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.7.3', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.7.4', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
         });
         return;
       }
-      const chosen = await pickDirectory(window, notify);
+      const renew=!pickNew && !folder ? rememberedFolder : null;
+      let chosen;
+      if (renew) {
+        if (typeof renew.handle.requestPermission !== 'function') throw new Error('권한 재확인을 지원하지 않습니다. ‘다른 저장 폴더 선택’을 눌러 주세요.');
+        notify('기억한 저장 폴더의 권한 확인 중…');
+        // Called directly from the user's button gesture; startup only queries.
+        if (await renew.handle.requestPermission({mode:'readwrite'}) !== 'granted') throw new Error('저장 폴더 쓰기 권한을 허용하지 않았습니다. 권한 허용 또는 다른 저장 폴더 선택을 눌러 주세요.');
+        chosen=renew.handle;
+      } else chosen = await pickDirectory(window, notify);
       await locked(async () => {
         const partial = jobs.filter(job => job.saved?.length && !['done','skipped'].includes(job.state));
         let previous = folder ? {handle:folder,token:folderToken} : await folderRecord().catch(() => null);
         if (previous?.kind === 'directory') previous = {handle:previous,token:null}; // 0.1.1 record
         if (partial.some(job => job.folderToken && job.folderToken !== previous?.token)) previous = null;
-        const token = partial.length && previous?.token ? previous.token : crypto.randomUUID();
+        const token = renew?.token || (partial.length && previous?.token ? previous.token : crypto.randomUUID());
         const warning = await acceptFolder(chosen, {
           partial:partial.length > 0, previous:previous?.handle,
           remember:() => folderRecord({handle:chosen,token})
         });
         folder = chosen; folderToken = token;
+        rememberedFolder={handle:chosen,token};
         for (const job of partial) job.folderToken = token;
         message = warning || `저장 폴더 선택 완료: ${chosen.name}`;
         persist();

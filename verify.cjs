@@ -288,6 +288,19 @@ test('storage mode follows available browser APIs and requires managed browser d
 });
 
 // Mount the complete script, rather than testing only its exported helper functions.
+function folderDatabase(store) {
+  return {open(){
+    store.opens=(store.opens||0)+1;const open={};
+    const db={close(){},transaction(){
+      const tx={abort(){tx.onabort?.();},objectStore(){return {
+        get(){const request={};const complete=()=>{if(store.failRead){tx.error=new Error('Folder storage unavailable');tx.onerror?.();return;}request.result=store.value;request.onsuccess?.();tx.oncomplete?.();};
+          if(store.readGate)store.readGate.then(complete);else queueMicrotask(complete);return request;},
+        put(value){const request={};queueMicrotask(()=>{store.value=value;request.onsuccess?.();tx.oncomplete?.();});return request;}
+      };}};return tx;
+    }};
+    queueMicrotask(()=>{open.result=db;open.onsuccess?.();});return open;
+  }};
+}
 function panelFixture(nativePicker, gm={}) {
   let networkCalls=0,generateCalls=0,pickerCalls=0;const siteQueries=[],storageMutations=[];
   function matchesPart(element,part) {
@@ -360,7 +373,8 @@ function panelFixture(nativePicker, gm={}) {
     navigator:{locks:{request:async(name,options,callback)=>callback(gm.lockUnavailable?null:{})}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
     fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'},
-    Blob,TextEncoder,URL, GM_download:gm.download, GM_info:gm.info};
+    Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info};
+  if(gm.folderStore)context.indexedDB=folderDatabase(gm.folderStore);
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
   return {panel,document,siteQueries,records,storageMutations,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
@@ -369,6 +383,108 @@ function panelFixture(nativePicker, gm={}) {
 }
 
 const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1'};
+function rememberedDirectory(name,initial='granted') {
+  let permission=initial;
+  const handle={kind:'directory',name,queries:0,requests:0,writes:0,
+    queryPermission:async()=>{handle.queries++;return permission;},
+    requestPermission:async()=>{handle.requests++;permission=handle.nextPermission??'granted';return permission;},
+    isSameEntry:async other=>other===handle,
+    getFileHandle:async()=>{handle.writes++;throw new Error('No file writes in folder restoration test');}};
+  return handle;
+}
+test('reload restores an authorized saved folder and its saved identity without picker, permission prompt, file write or paid action',async()=>{
+  const handle=rememberedDirectory('Assets'),folderStore={value:{handle,token:'previous-folder'}};
+  const records=runtimeSettingsRecords();const before=[...records];
+  const f=panelFixture(()=>{throw new Error('Must not pick again')},{records,folderStore});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.panel.querySelector('[data-folder]').textContent,'저장 폴더: Assets');
+  assert.match(f.message(),/자동 연결/);assert.equal(folderStore.value.token,'previous-folder');
+  assert.deepEqual([...f.records],before);assert.equal(handle.requests,0);assert.equal(handle.writes,0);
+  assert.equal(f.pickerCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('reload remembers a folder requiring permission and a direct button gesture renews it without opening a picker or changing its identity',async()=>{
+  const handle=rememberedDirectory('Assets','prompt'),folderStore={value:{handle,token:'previous-folder'}};
+  const f=panelFixture(()=>{throw new Error('Must reuse remembered folder')},{folderStore});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(handle.requests,0);assert.match(f.panel.querySelector('[data-folder]').textContent,/Assets.*권한 허용 필요/);
+  const choose=f.panel.querySelector('[data-choose-folder]');assert.equal(choose.textContent,'저장 폴더 권한 허용');
+  assert.equal(f.panel.querySelector('[data-choose-other-folder]').hidden,false);
+  f.press(choose);assert.equal(handle.requests,1); // Request occurs inside the gesture, before async storage reads.
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.panel.querySelector('[data-folder]').textContent,'저장 폴더: Assets');
+  assert.equal(folderStore.value.token,'previous-folder');assert.equal(f.pickerCalls,0);
+  assert.equal(f.panel.querySelector('[data-choose-other-folder]').hidden,true);
+  assert.equal(handle.writes,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('denied saved-folder permission blocks Start and a declined renewal keeps the folder remembered and all jobs untouched',async()=>{
+  const handle=rememberedDirectory('Assets','denied');handle.nextPermission='denied';
+  const records=runtimeSettingsRecords(),folderStore={value:{handle,token:'previous-folder'}};
+  const f=panelFixture(()=>{throw new Error('Must not pick automatically')},{records,folderStore});
+  await new Promise(resolve=>setImmediate(resolve));const before=f.records.get(runtimeSettingsKeys.queue);
+  f.press(f.panel.querySelector('[data-start]'));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/쓰기 권한/);assert.equal(f.siteQueries.length,0);
+  f.press(f.panel.querySelector('[data-choose-folder]'));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/허용하지 않았습니다/);assert.match(f.panel.querySelector('[data-folder]').textContent,/기억한 폴더: Assets/);
+  assert.equal(f.records.get(runtimeSettingsKeys.queue),before);assert.equal(f.pickerCalls,0);
+  assert.equal(handle.writes,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('a pending startup folder query cannot overwrite a newer user-selected folder',async()=>{
+  const previous=rememberedDirectory('Previous'),chosen=rememberedDirectory('Chosen');let finish;
+  previous.queryPermission=()=>new Promise(resolve=>{finish=resolve;});
+  const folderStore={value:{handle:previous,token:'old-folder'}};
+  const f=panelFixture(()=>Promise.resolve(chosen),{folderStore});await new Promise(resolve=>setImmediate(resolve));
+  f.press(f.panel.querySelector('[data-choose-folder]'));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.panel.querySelector('[data-folder]').textContent,'저장 폴더: Chosen');
+  finish('granted');await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.panel.querySelector('[data-folder]').textContent,'저장 폴더: Chosen');assert.equal(folderStore.value.handle,chosen);
+  assert.equal(f.pickerCalls,1);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('partial saves bound to another folder still block after automatic restoration without querying a task or generating',async()=>{
+  const handle=rememberedDirectory('Assets'),folderStore={value:{handle,token:'different-folder'}};
+  const partial={...job(),state:'saving',taskId:'900',expected:4,saved:['one.png'],folderToken:'original-folder'};
+  const f=panelFixture(()=>{throw new Error('Must not pick automatically')},{folderStore,queue:[partial]});
+  await new Promise(resolve=>setImmediate(resolve));const before=f.records.get(runtimeSettingsKeys.queue);
+  f.press(f.panel.querySelector('[data-start]'));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/부분 저장 작업의 폴더/);assert.equal(f.records.get(runtimeSettingsKeys.queue),before);
+  assert.equal(handle.writes,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('a partial save with the restored folder identity resumes its known task lookup without a picker or new generation',async()=>{
+  const handle=rememberedDirectory('Assets'),folderStore={value:{handle,token:'original-folder'}};
+  const partial={...job(),state:'saving',taskId:'900',expected:4,saved:['one.png'],folderToken:'original-folder'};
+  const f=panelFixture(()=>{throw new Error('Must reuse the same folder')},{folderStore,queue:[partial]});
+  await new Promise(resolve=>setImmediate(resolve));f.press(f.panel.querySelector('[data-start]'));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.networkCalls,1); // The fixture blocks the existing-task query; no real network occurs.
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].taskId,'900');
+  assert.equal(f.pickerCalls,0);assert.equal(handle.writes,0);assert.equal(f.generateCalls,0);
+});
+test('folder restoration storage failure preserves prompt libraries, options and queued jobs and leaves manual selection available',async()=>{
+  const records=runtimeSettingsRecords(),before=[...records],folderStore={failRead:true};
+  const f=panelFixture(()=>Promise.reject(new Error('unused')),{records,folderStore});await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual([...f.records],before);assert.match(f.message(),/복원하지 못했습니다/);
+  assert.equal(f.panel.querySelector('[data-choose-folder]').disabled,false);assert.equal(f.pickerCalls,0);
+  assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('successful folder restoration does not hide an existing queue-read error or replace its stored original',async()=>{
+  const handle=rememberedDirectory('Assets'),folderStore={value:{handle,token:'saved-folder'}};
+  const f=panelFixture(()=>Promise.resolve(handle),{folderStore,rawQueue:'{broken queue'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/대기열 읽기 실패/);assert.equal(f.panel.querySelector('[data-folder]').textContent,'저장 폴더: Assets');
+  assert.equal(f.records.get(runtimeSettingsKeys.queue),'{broken queue');assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('the other-folder button remains available when the remembered directory requires permission',async()=>{
+  const old=rememberedDirectory('Old','prompt'),chosen=rememberedDirectory('New'),folderStore={value:{handle:old,token:'old-folder'}};
+  const f=panelFixture(()=>Promise.resolve(chosen),{folderStore});await new Promise(resolve=>setImmediate(resolve));
+  f.press(f.panel.querySelector('[data-choose-other-folder]'));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.pickerCalls,1);assert.equal(old.requests,0);assert.equal(f.panel.querySelector('[data-folder]').textContent,'저장 폴더: New');
+  assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('Firefox browser-download mode does not read or restore directory handles or bypass download preparation',async()=>{
+  const folderStore={value:{handle:rememberedDirectory('Assets'),token:'old-folder'}};
+  const f=panelFixture(null,{folderStore,download(){},info:{downloadMode:'browser'}});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(folderStore.opens,undefined);assert.match(f.panel.querySelector('[data-folder]').textContent,/준비 확인 필요/);
+  assert.equal(f.pickerCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
 function runtimeSettingsLibrary(prompt='saved common') {
   const library=sandbox.module.exports.makePresetLibrary();library.common={prompt,negativePrompt:'saved negative'};
   library.presets=[{id:'preset',name:'Asset',model:{id:'101',versionId:'201',name:'Model'},loras:[{id:'301',versionId:'401',name:'LoRA',weight:0.7,triggerWords:'saved trigger'}]}];
@@ -1283,7 +1399,7 @@ function startFixture(options = {}) {
     let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false;
     let initialModel=null,baselineSettings=null,baselineNegative=null,message='';
     let jobs=loadStored(),currentModel='/ko/model/11/111';
-    const storage={mode:'folder'},folderToken='fixture-folder';
+    const storage={mode:'folder'},folderToken='fixture-folder',folderRestoration=options.folderRestoration || Promise.resolve();
     const io={};
     const onGenerator=()=>true,modelId=()=>{facts.modelReads++;if(options.hiddenModel&&!facts.reveal)throw new Error('현재 모델 버전 확인 실패');return currentModel;};
     const render=()=>{facts.renders++;};
@@ -1324,6 +1440,15 @@ test('first mixed start persists an independent configuration/negative snapshot 
   assert.deepEqual(f.facts.process.find(job=>job.id==='legacy').configuration,baseline);
   assert.equal(f.state().running,false);assert.equal(f.state().starting,false);
   assert.equal(f.facts.siteCalls,0);assert.equal(f.facts.paidCalls,0);
+});
+
+test('Start waits for folder restoration and Stop during that wait prevents every site setting and paid action',async()=>{
+  let finish;const folderRestoration=new Promise(resolve=>{finish=resolve;});
+  const f=startFixture({folderRestoration});const run=f.run();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.state().starting,true);assert.equal(f.facts.destination,0);assert.equal(f.facts.process.length,0);
+  f.stop();finish();await assert.rejects(run,/중지/);
+  assert.equal(f.facts.capture,0);assert.equal(f.facts.process.length,0);assert.equal(f.state().starting,false);
 });
 
 test('resume after the first preset finishes retains the persisted original settings for legacy jobs',async () => {
