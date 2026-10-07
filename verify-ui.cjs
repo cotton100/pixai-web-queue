@@ -557,3 +557,20 @@ test('import reload resets folder views and selection drafts while filling impor
   assert.equal(f.field('청크 선택: 행동').checked,false);assert.equal(pickerGroup(f,'f2').open,true);
   assert.match(f.field('선택한 청크 요약').textContent,/선택한 청크 없음/);
 });
+
+test('site-settings buttons carry the running-lock marker and allowsWhileRunning opens only library/compose controls',async t=>{
+  const f=fixture(t);
+  for (const name of ['사이트의 현재 설정 읽기','화면에 설정 적용 · 생성 안 함']) {
+    const control=f.button(name);
+    assert.equal(control.getAttribute('data-site-io'),'',`${name} must be marked as site IO`);assert.ok(Object.hasOwn(control.dataset,'edit'));
+    assert.equal(f.ui.allowsWhileRunning(control),false);
+  }
+  for (const name of ['LoRA 추가','예약 전부를 대기열에 등록','이 조합 예약 추가']) assert.equal(f.ui.allowsWhileRunning(f.button(name)),true,name);
+  assert.equal(f.ui.allowsWhileRunning(f.field('청크 선택: 표정')),true);
+  const runtimeControl=new Element('button');runtimeControl.setAttribute('data-edit','');
+  const page=f.ui.addPage('queue','대기열',runtimeControl);
+  assert.equal(page.getAttribute('data-page'),'queue');assert.ok(f.ui.root.contains(runtimeControl));
+  assert.equal(f.ui.allowsWhileRunning(runtimeControl),false);
+  const outside=new Element('button');outside.setAttribute('data-edit','');
+  assert.equal(f.ui.allowsWhileRunning(outside),false);
+});

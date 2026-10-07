@@ -302,7 +302,7 @@ function folderDatabase(store) {
   }};
 }
 function panelFixture(nativePicker, gm={}) {
-  let networkCalls=0,generateCalls=0,pickerCalls=0;const siteQueries=[],storageMutations=[];
+  let networkCalls=0,generateCalls=0,pickerCalls=0,lockRequests=0;const siteQueries=[],storageMutations=[],documentListeners={},windowListeners={};
   function matchesPart(element,part) {
     if(part.startsWith('#'))return element.getAttribute('id')===part.slice(1);
     const tag=part.match(/^[a-z][\w-]*/i)?.[0];
@@ -365,20 +365,22 @@ function panelFixture(nativePicker, gm={}) {
       if(s.startsWith('main '))siteQueries.push(s);
       if(s==='main button[data-react-aria-pressable]')return [generate];
       return body.querySelectorAll(s);
-    },addEventListener(){}};
-  const window={innerWidth:1200,innerHeight:900,addEventListener(){}};window.top=window.self=window;
+    },addEventListener(type,fn){(documentListeners[type]??=[]).push(fn);}};
+  const window={innerWidth:1200,innerHeight:900,addEventListener(type,fn){(windowListeners[type]??=[]).push(fn);}};window.top=window.self=window;
   if(nativePicker)window.showDirectoryPicker=(...args)=>{pickerCalls++;return nativePicker(...args)};
   const context={window,document,location:{hostname:'pixai.art',pathname:'/ko/generator/image'},
     localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
-    navigator:{locks:{request:async(name,options,callback)=>callback(gm.lockUnavailable?null:{})}},
+    navigator:{locks:{request:async(name,options,callback)=>{lockRequests++;return callback(gm.lockUnavailable?null:{});}}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
     fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'},
     Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info};
   if(gm.folderStore)context.indexedDB=folderDatabase(gm.folderStore);
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
-  return {panel,document,siteQueries,records,storageMutations,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},
+  return {panel,document,siteQueries,records,storageMutations,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},get lockRequests(){return lockRequests},
     press(button){button.fire('pointerdown');button.fire('pointerup');},
+    fireDocument(type,target,extra={}){const event={type,target,isTrusted:true,prevented:false,preventDefault(){this.prevented=true;},stopImmediatePropagation(){},...extra};for(const fn of documentListeners[type]||[])fn(event);return event;},
+    fireWindow(type,extra={}){const event={type,...extra};for(const fn of windowListeners[type]||[])fn(event);return event;},
     message:()=>panel.querySelector('[data-message]').textContent};
 }
 
@@ -796,6 +798,104 @@ test('Start stays disabled during a running job and becomes clickable after prep
   f.press(start);assert.equal(f.generateCalls,0);
   finish('denied');await new Promise(resolve=>setImmediate(resolve));
   assert.equal(start.disabled,false);assert.match(f.message(),/쓰기 권한/);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+
+test('while this tab runs a job, library/compose editing and registration stay open and append to the live queue without a new lock, while start, queue rows, legacy add, backups, folder and site-settings controls stay locked',async()=>{
+  let checks=0,finishPrepare,finishStarting;const folder={name:'fixture',queryPermission:()=>{
+    checks++;if(checks===2)return new Promise(resolve=>{finishStarting=resolve});return checks===4 ? new Promise(resolve=>{finishPrepare=resolve}) : Promise.resolve('granted');
+  }};
+  const tick=()=>new Promise(resolve=>setImmediate(resolve));
+  const f=panelFixture(()=>Promise.resolve(folder),{records:runtimeSettingsRecords()});
+  const named=text=>{const found=[...f.panel.querySelectorAll('button')].find(item=>item.textContent===text);assert(found,`Missing button: ${text}`);return found;};
+  const register=named('예약 전부를 대기열에 등록'),addLora=named('LoRA 추가'),readSite=named('사이트의 현재 설정 읽기'),applySite=named('화면에 설정 적용 · 생성 안 함');
+  assert.equal(register.disabled,false);assert.equal(readSite.disabled,false);
+  f.press(f.panel.querySelector('[data-choose-folder]'));await tick();
+  f.press(f.panel.querySelector('[data-start]'));await tick();
+  // Start preparation (before this tab holds the queue lock) still locks every editing control.
+  assert.equal(checks,2);assert.equal(f.panel.querySelector('[data-start]').textContent,'시작 준비 중…');
+  assert.equal(register.disabled,true);assert.equal(addLora.disabled,true);assert.equal(readSite.disabled,true);
+  finishStarting('granted');for(let i=0;i<10&&checks<4;i++)await tick();
+  assert.equal(checks,4);assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');
+  assert.equal(register.disabled,false);assert.equal(addLora.disabled,false);assert.equal(f.panel.querySelector('[aria-label="청크 선택: Chunk"]').disabled,false);
+  assert.equal(readSite.disabled,true);assert.equal(applySite.disabled,true);
+  for(const text of ['대기열 추가','첫 작업만 실행','건너뛰기','설정 내보내기'])assert.equal(named(text).disabled,true,text);
+  assert.equal(f.panel.querySelector('[data-choose-folder]').disabled,true);assert.equal(f.panel.querySelector('[data-start]').disabled,true);
+  const locksBefore=f.lockRequests,queueBefore=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
+  assert.equal(queueBefore.length,1);
+  f.press(register);await tick();
+  assert.equal(f.lockRequests,locksBefore);
+  const stored=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
+  assert.equal(stored.length,2);assert.equal(stored[0].id,'fixture');assert.equal(stored[1].state,'queued');assert.equal(stored[1].composition.reservation.id,'reservation');
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.library)).reservations.length,0);
+  assert.match(f.message(),/조합 1개를 대기열에 등록했습니다.*실행 중인 작업이 끝나면 순서대로 이어서 실행합니다/);
+  assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');assert.equal(f.panel.querySelector('[data-start]').disabled,true);
+  assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+  finishPrepare('denied');await tick();
+  assert.equal(f.panel.querySelector('[data-start]').disabled,false);assert.match(f.message(),/쓰기 권한/);
+  const after=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;assert.equal(after.length,2);assert.equal(after[1].state,'queued');
+  assert.equal(readSite.disabled,false);assert.equal(named('대기열 추가').disabled,false);assert.equal(register.getAttribute('data-unavailable'),'true');
+  assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+
+function runningPanel(gm={}) {
+  // Reaches the 실행 중 state with the first job parked inside prepare() (fourth folder permission check pending).
+  let checks=0,finishPrepare;const folder={name:'fixture',queryPermission:()=>{checks++;return checks===4 ? new Promise(resolve=>{finishPrepare=resolve}) : Promise.resolve('granted');}};
+  const tick=()=>new Promise(resolve=>setImmediate(resolve));
+  const f=panelFixture(()=>Promise.resolve(folder),{records:runtimeSettingsRecords(),...gm});
+  return {f,tick,finish:value=>finishPrepare(value),async start(){
+    f.press(f.panel.querySelector('[data-choose-folder]'));await tick();
+    f.press(f.panel.querySelector('[data-start]'));await tick();
+    assert.equal(checks,4);assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');
+  }};
+}
+
+test('while running, keystrokes and input that land on the site are swallowed and focus returns to the panel field, while a drop or click on the site still stops the run',async()=>{
+  const {f,tick,finish,start}=runningPanel();await start();
+  const site=f.document.body.querySelector('main'),search=f.panel.querySelector('[aria-label="청크 검색"]');assert(site&&search);
+  f.fireDocument('focusin',search);f.document.activeElement=site;
+  const before=f.message(),toast=f.panel.querySelector('[data-toast]');
+  for (const type of ['keydown','beforeinput']) {
+    const event=f.fireDocument(type,site,{key:'a'});
+    assert.equal(event.prevented,true,type);assert.equal(f.message(),before);assert.equal(f.document.activeElement,search);
+    assert.match(toast.textContent,/실행 중에는 사이트에 입력할 수 없습니다/);assert.equal(toast.hidden,false);
+    assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');
+  }
+  const panelKey=f.fireDocument('keydown',search,{key:'b'});assert.equal(panelKey.prevented,false);
+  const drop=f.fireDocument('drop',site);
+  assert.equal(drop.prevented,true);assert.match(f.message(),/실행 중 사이트 조작으로 중지했습니다/);
+  const click=f.fireDocument('click',site);assert.equal(click.prevented,true);
+  finish('denied');await tick();
+  assert.equal(f.panel.querySelector('[data-start]').disabled,false);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+  const idle=f.fireDocument('keydown',site,{key:'c'});assert.equal(idle.prevented,false);
+});
+
+test('a library change from another tab during a run is picked up by the editor and survives a registration from this tab',async()=>{
+  const {f,tick,finish,start}=runningPanel();await start();
+  const library=JSON.parse(f.records.get(runtimeSettingsKeys.library));
+  library.scenes.push({id:'late',name:'Late chunk',prompt:'late tags',negativePrompt:''});
+  f.records.set(runtimeSettingsKeys.library,JSON.stringify(library));
+  assert.equal(f.panel.querySelector('[aria-label="청크 선택: Late chunk"]'),null);
+  f.fireWindow('storage',{key:runtimeSettingsKeys.library});
+  assert.ok(f.panel.querySelector('[aria-label="청크 선택: Late chunk"]'),'other tab chunk must appear while running');
+  assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');
+  const register=[...f.panel.querySelectorAll('button')].find(item=>item.textContent==='예약 전부를 대기열에 등록');
+  f.press(register);await tick();
+  const saved=JSON.parse(f.records.get(runtimeSettingsKeys.library));
+  assert.deepEqual(saved.scenes.map(item=>item.id),['chunk','late']);assert.equal(saved.reservations.length,0);
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs.length,2);
+  finish('denied');await tick();assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+
+test('registration from a tab that cannot take the queue lock is rejected and leaves the queue and reservations untouched',async()=>{
+  const f=panelFixture(null,{records:runtimeSettingsRecords(),lockUnavailable:true});
+  const queueBefore=f.records.get(runtimeSettingsKeys.queue),locksBefore=f.lockRequests;
+  const register=[...f.panel.querySelectorAll('button')].find(item=>item.textContent==='예약 전부를 대기열에 등록');
+  assert.equal(register.disabled,false);
+  f.press(register);await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.message(),/다른 PixAI 탭에서 대기열이 실행 중입니다/);
+  assert.equal(f.lockRequests,locksBefore+1);assert.equal(f.records.get(runtimeSettingsKeys.queue),queueBefore);
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.library)).reservations.length,1);
+  assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
 });
 
 test('browser-download resume preserves prior records and saves complete known outputs without paying again',async()=>{
@@ -1431,7 +1531,7 @@ function startFixture(options = {}) {
     loadStored:() => copy(stored),saveStored:value => {stored=copy(value);},
     baseline:copy(baseline)};
   vm.runInNewContext(`
-    let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false;
+    let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false,oneJobRun=false;
     let initialModel=null,baselineSettings=null,baselineNegative=null,message='';
     let jobs=loadStored(),currentModel='/ko/model/11/111';
     const storage={mode:'folder'},folderToken='fixture-folder',folderRestoration=options.folderRestoration || Promise.resolve();
@@ -1459,8 +1559,9 @@ function startFixture(options = {}) {
     globalThis.stop=()=>{stopRequested=true;};
     globalThis.state=()=>({running,starting,stopRequested,message,jobs:copy(jobs)});
     globalThis.reload=()=>{jobs=loadStored();};
+    globalThis.append=items=>{jobs.push(...copy(items));persist();};
   `,context);
-  return {facts,run:context.run,stop:context.stop,state:context.state,reload:context.reload,stored:() => copy(stored)};
+  return {facts,run:context.run,stop:context.stop,state:context.state,reload:context.reload,append:context.append,stored:() => copy(stored)};
 }
 
 test('first mixed start persists an independent configuration/negative snapshot on every queued legacy job before processing',async () => {
@@ -1557,6 +1658,35 @@ test('Stop while revealing a legacy model prevents processing and releases start
 test('mixed baseline persistence failure stops before processing and releases both start flags',async () => {
   const f=startFixture({persistFailure:true});await assert.rejects(f.run(),/mock storage failure/);
   assert.equal(f.facts.process.length,0);assert.equal(f.state().running,false);assert.equal(f.state().starting,false);
+});
+
+test('jobs appended to the live queue during a run are processed in order after the current ones without a second lock',async () => {
+  const presetJob=id=>({id,state:'queued',prompt:`${id} prompt`,configuration:copy(selectedPreset),negativePrompt:'n',saved:[]});
+  const late=[presetJob('late1'),presetJob('late2')];
+  let f;f=startFixture({jobs:[presetJob('first'),presetJob('second')],process:async job=>{if (job.id==='first') f.append(late);}});
+  await f.run();
+  assert.deepEqual(f.facts.process.map(job=>job.id),['first','second','late1','late2']);
+  assert.equal(f.facts.locks,1);
+  assert.deepEqual(f.stored().map(job=>[job.id,job.state]),[['first','done'],['second','done'],['late1','done'],['late2','done']]);
+  assert.equal(f.state().running,false);assert.equal(f.state().message,'대기열 작업과 저장이 끝났습니다.');
+});
+
+test('a first-job-only run leaves jobs appended during it queued for the next start',async () => {
+  const presetJob=id=>({id,state:'queued',prompt:`${id} prompt`,configuration:copy(selectedPreset),negativePrompt:'n',saved:[]});
+  let f;f=startFixture({jobs:[presetJob('first')],process:async job=>{if (job.id==='first') f.append([presetJob('late')]);}});
+  await f.run({oneJob:true});
+  assert.deepEqual(f.facts.process.map(job=>job.id),['first']);
+  assert.deepEqual(f.stored().map(job=>[job.id,job.state]),[['first','done'],['late','queued']]);
+  assert.match(f.state().message,/나머지 대기열은 실행하지 않았습니다/);assert.equal(f.state().running,false);
+});
+
+test('Stop requested during a run leaves jobs appended afterwards queued and untouched',async () => {
+  const presetJob=id=>({id,state:'queued',prompt:`${id} prompt`,configuration:copy(selectedPreset),negativePrompt:'n',saved:[]});
+  let f;f=startFixture({jobs:[presetJob('first'),presetJob('second')],process:async job=>{if (job.id==='first') {f.stop();f.append([presetJob('late')]);}}});
+  await f.run();
+  assert.deepEqual(f.facts.process.map(job=>job.id),['first']);
+  assert.deepEqual(f.stored().map(job=>[job.id,job.state]),[['first','done'],['second','queued'],['late','queued']]);
+  assert.match(f.state().message,/중지됨/);assert.equal(f.state().running,false);
 });
 
 })();

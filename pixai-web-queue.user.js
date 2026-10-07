@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.8.1
+// @version      0.8.2
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -1088,6 +1088,7 @@ function mountPresetEditor(parent, io) {
   const copy = value => JSON.parse(JSON.stringify(value));
   let library = normalizePresetLibrary(io.load() || makePresetLibrary());
   const root = document.createElement('div'); root.className = 'pq-presets';
+  const runtimePages = []; // 대기열·설정 페이지: 실행 중 잠금 대상
   const pickerRenderers=new Map();
   function el(tag, text, attrs = {}) {
     const element = document.createElement(tag);
@@ -1103,6 +1104,8 @@ function mountPresetEditor(parent, io) {
     if (io.isBusy?.()) element.disabled=true;
     return element;
   }
+  // Buttons that read or change the PixAI page stay locked while this tab's runner drives the page.
+  function siteAction(text, run) { const element = action(text, run); element.setAttribute('data-site-io', ''); return element; }
   function field(label, tag = 'input', attrs = {}) {
     const input = el(tag,null,{'data-edit':'','aria-label':label,...attrs});
     const wrap = el('label',label); wrap.append(input); return {input,wrap};
@@ -1309,7 +1312,7 @@ function mountPresetEditor(parent, io) {
   const modelIdentity=el('details');modelIdentity.append(el('summary','모델 ID 직접 편집'),modelId.wrap,modelVersionId.wrap,modelFamily.wrap);
   presetBody.append(presetSelect.wrap,presetName.wrap,
     el('small','PixAI 화면에서 모델·LoRA를 선택한 뒤 읽어오세요. 읽어오기와 설정 확인은 이미지를 생성하지 않습니다.'),
-    action('사이트의 현재 설정 읽기',async () => {
+    siteAction('사이트의 현재 설정 읽기',async () => {
       io.notify('현재 모델·LoRA와 공개 트리거를 읽는 중…');
       const triggers = loraRows.map(item=>({id:item.id.value.trim(),versionId:item.versionId.value.trim(),triggerWords:item.triggerWords.value}));
       const settings = await io.captureSettings();
@@ -1323,7 +1326,7 @@ function mountPresetEditor(parent, io) {
       const warning=settings.triggerWarnings?.length ? `\n트리거 자동 읽기 실패: ${settings.triggerWarnings.join(', ')}. 기존 입력은 유지했습니다. 필요하면 직접 입력해 주세요.` : '';
       io.notify(`${settings.model.name || settings.model.id} · LoRA ${settings.loras.length}개를 읽었습니다. 트리거 ${autoFilled}개 자동 입력. 이름을 붙이고 저장해 주세요.${warning}`);
     }),modelName.wrap,modelIdentity,loraList,action('LoRA 추가',() => addLora()));
-  if (io.applySettings) presetBody.append(action('화면에 설정 적용 · 생성 안 함',async () => {
+  if (io.applySettings) presetBody.append(siteAction('화면에 설정 적용 · 생성 안 함',async () => {
     await io.applySettings(readPreset()); io.notify('프리셋을 화면에 적용했습니다. 이미지는 생성하지 않았습니다.');
   }));
   presetBody.append(action('프리셋 저장',async () => {
@@ -1560,7 +1563,7 @@ function mountPresetEditor(parent, io) {
               if (event.isTrusted===false || dropBusy || io.isBusy?.() || !event.dataTransfer) {event.preventDefault();return;}
               try {
                 const ids=managedChunkIds.has(chunk.id) ? selectedChunks(library,[...managedChunkIds]).map(item=>item.id) : [chunk.id];
-                event.dataTransfer.setData(dragType,JSON.stringify(ids));event.dataTransfer.setData('text/plain',ids.join(', '));event.dataTransfer.effectAllowed='move';
+                event.dataTransfer.setData(dragType,JSON.stringify(ids));event.dataTransfer.effectAllowed='move';
                 event.dataTransfer.setDragImage?.(row,12,12);draggingChunkId=chunk.id;draggingChunkIds=ids;row.dataset.chunkDragging='true';
               } catch {event.preventDefault();endDrag();}
             });
@@ -1863,7 +1866,9 @@ function mountPresetEditor(parent, io) {
   return {
     root,
     showPage,
-    addPage:(id,title,...content)=>{const body=section(title,false,id);body.append(...content);return body;},
+    addPage:(id,title,...content)=>{const body=section(title,false,id);body.append(...content);runtimePages.push(body);return body;},
+    // Library/compose controls may be used while this tab's runner is busy; runtime pages and site-touching buttons may not.
+    allowsWhileRunning:element=>root.contains(element) && !runtimePages.some(page=>page.contains(element)) && element.dataset?.siteIo == null,
     refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();},
     reload:() => {
       const next=normalizePresetLibrary(io.load() || makePresetLibrary());
@@ -1961,6 +1966,7 @@ function mountPresetEditor(parent, io) {
   let folderRestoration = Promise.resolve();
   let restoringFolder = false;
   let running = false;
+  let oneJobRun = false; // true while a 「첫 작업만 실행」 run holds the queue
   let starting = false;
   let stopRequested = false;
   let internalAction = false;
@@ -2001,6 +2007,13 @@ function mountPresetEditor(parent, io) {
   function persist() {
     localStorage.setItem(KEY, JSON.stringify({version:1, jobs}));
     render();
+  }
+  // Queue additions from this tab: while its runner holds the queue lock, `jobs` is the live array the
+  // runner iterates, so append in place; otherwise take the lock and reload before changing anything.
+  async function queueEdit(action) {
+    if (starting || settingsBusy) throw new Error('시작 준비·설정 확인이 끝난 뒤 대기열에 등록해 주세요.');
+    if (running) return action();
+    return locked(action);
   }
   async function locked(action) {
     if (!navigator.locks) throw new Error('이 브라우저는 중복 실행 방지 기능을 지원하지 않습니다.');
@@ -2217,6 +2230,7 @@ function mountPresetEditor(parent, io) {
       if (stopRequested) throw new Error('시작 준비가 중지됐습니다. 이미지를 생성하지 않았습니다.');
       running = true;
       starting = false;
+      oneJobRun = oneJob;
       try {
         persist();
         for (const job of jobs) {
@@ -2322,7 +2336,13 @@ function mountPresetEditor(parent, io) {
       }
       list.append(row);
     }
-    for (const element of panel.querySelectorAll('[data-edit], [data-start]')) element.disabled = running || starting || settingsBusy || element.getAttribute('data-unavailable') === 'true';
+    // While this tab runs the queue, library/compose editing and registration stay open so the next batch
+    // can be prepared; queue rows, legacy add, backups, folder and site-settings controls stay locked.
+    const composing = running && !starting && !settingsBusy;
+    for (const element of panel.querySelectorAll('[data-edit], [data-start]')) {
+      const open = composing && !!presetEditor?.allowsWhileRunning(element);
+      element.disabled = (!open && (running || starting || settingsBusy)) || element.getAttribute('data-unavailable') === 'true';
+    }
     const choose = panel.querySelector('[data-choose-folder]');
     choose.disabled = running || starting || settingsBusy || choosingFolder;
     choose.textContent = storage.mode === 'download'
@@ -2341,7 +2361,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.8.1', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.8.2', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2419,7 +2439,7 @@ function mountPresetEditor(parent, io) {
     const editorSlot=node('div',null,{class:'pq-workspace'});panel.append(editorSlot);
     let attachRuntimePages=()=>{};
     function mountEditor() { try { presetEditor=mountPresetEditor(editorSlot, {
-      isBusy:() => running || starting || settingsBusy,
+      isBusy:() => starting || settingsBusy, // library/compose editing stays open while this tab runs the queue; render() locks runtime pages
       load:readLibrary,save:saveLibrary,button,
       isCompact:()=>(panel.getBoundingClientRect().width || document.documentElement?.clientWidth || window.innerWidth)<=760,
       loadLayout:key=>JSON.parse(localStorage.getItem(`local.pixai-web-queue.layout.v1.${key}`) || 'null'),
@@ -2427,13 +2447,13 @@ function mountPresetEditor(parent, io) {
       notify:notifyAction,
       captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
       applySettings:value=>settingsAction(()=>settings.apply(value)),
-      enqueue:value=>locked(()=>{
+      enqueue:value=>queueEdit(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
         if (jobs.length+added.length>1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
         if (value.reservations.some(res=>jobs.some(job=>job.composition?.reservation?.id===res.id))) throw new Error('이미 등록된 예약이 있습니다. 해당 예약을 제외하고 새로 예약해 주세요.');
         jobs.push(...added);persist();
         saveLibrary({...value,reservations:[]});presetEditor.refresh();
-        message=`조합 ${added.length}개를 대기열에 등록했습니다. 예약은 비웠고 작업별 설정은 보존했습니다.`;render();
+        message=`조합 ${added.length}개를 대기열에 등록했습니다. 예약은 비웠고 작업별 설정은 보존했습니다.${running ? (stopRequested ? ' 중지 요청 중이므로 다음 시작 때 실행합니다.' : oneJobRun ? ' 첫 작업만 실행 중이므로 이번에는 실행하지 않고 다음 시작 때 실행합니다.' : ' 실행 중인 작업이 끝나면 순서대로 이어서 실행합니다.') : ''}`;render();
       })
     }); attachRuntimePages(); } catch(error) { message=`프리셋 라이브러리 읽기 실패: ${error.message}`; } }
     mountEditor();
@@ -2456,7 +2476,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.1',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.2',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -2845,7 +2865,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.1', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.2', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
@@ -2880,16 +2900,25 @@ function mountPresetEditor(parent, io) {
     } catch (error) { message = folderError(error); }
     finally { choosingFolder = false; render(); }
   }
-  // Pausing precedes any manual edit. No synthetic event is treated as permission.
-  for (const type of ['click','keydown','beforeinput']) document.addEventListener(type,event=>{
-    if (!(running || starting) || internalAction || panel?.contains(event.target) || !event.isTrusted) return;
-    if (onGenerator()) {
-      stopRequested=true; event.preventDefault(); event.stopImmediatePropagation();
-      message='실행 중 사이트 조작으로 중지했습니다. 같은 작업은 재개할 수 있습니다.'; render();
+  // A manual click or drop on the site pauses the run. Keystrokes that land on the site while the panel
+  // stays editable (0.8.2) are swallowed instead, because the runner itself moves focus into the site's
+  // prompt box; focus returns to the panel field being edited. No synthetic event is treated as permission.
+  let lastPanelFocus=null;
+  document.addEventListener('focusin',event=>{if (panel?.contains(event.target)) lastPanelFocus=event.target;},true);
+  for (const type of ['click','keydown','beforeinput','drop']) document.addEventListener(type,event=>{
+    if (!(running || starting) || internalAction || panel?.contains(event.target) || !event.isTrusted || !onGenerator()) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (running && (type==='keydown' || type==='beforeinput')) {
+      if (lastPanelFocus && lastPanelFocus.isConnected !== false && !lastPanelFocus.disabled) lastPanelFocus.focus({preventScroll:true});
+      notifyAction('실행 중에는 사이트에 입력할 수 없습니다. 패널 안에서 계속 편집할 수 있습니다.');
+      return;
     }
+    stopRequested=true;
+    message='실행 중 사이트 조작으로 중지했습니다. 같은 작업은 재개할 수 있습니다.'; render();
   },true);
   window.addEventListener('storage', event=>{
-    if (event.key===LIBRARY_KEY && !running && !starting && !settingsBusy) { try {presetEditor?.refresh();} catch {message='프리셋 라이브러리 읽기 실패';render();} }
+    // Library edits from another tab are picked up even while this tab runs, so a later commit here cannot overwrite them.
+    if (event.key===LIBRARY_KEY && !starting && !settingsBusy) { try {presetEditor?.refresh();} catch {message='프리셋 라이브러리 읽기 실패';render();} }
     if (event.key===KEY && !running && !starting && !settingsBusy) { try {load();render();} catch {message='대기열 읽기 실패';render();} }
   });
   window.addEventListener('beforeunload',event=>{if(running || starting){event.preventDefault();event.returnValue='';}});
