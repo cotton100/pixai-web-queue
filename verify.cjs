@@ -520,6 +520,37 @@ function runtimePress(f,label) {
   const element=f.panel.querySelectorAll('button').find(item=>item.textContent===label);assert.ok(element,`Missing runtime button ${label}`);f.press(element);
 }
 const runtimeFlush=()=>new Promise(resolve=>setImmediate(resolve));
+test('runtime skip undo restores an old unsubmitted job in place without applying settings or submitting',async()=>{
+  const original={...job(),state:'skipped',configuration:{modelId:'101'},prompt:'preserved\n\nprompt'};
+  const f=panelFixture(null,{queue:[original,{...job(),id:'other',title:'Other'}]});
+  runtimePress(f,'건너뛰기 취소');await runtimeFlush();
+  const current=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
+  assert.equal(current.length,2);assert.equal(current[0].state,'queued');
+  assert.equal(current[0].id,original.id);assert.equal(current[0].prompt,original.prompt);
+  assert.deepEqual(current[0].configuration,original.configuration);assert.equal(current[1].state,'queued');
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
+});
+test('runtime skip undo keeps known paid task and saved progress while uncertain submissions stay blocked',async()=>{
+  for(const original of [
+    {...job(),state:'skipped',taskId:'900',submittedAt:Date.now(),saved:[{mediaId:'100',fileName:'original.png'}],folderToken:'same-folder'},
+    {...job(),state:'skipped',submittedAt:Date.now()},
+    {...job(),state:'skipped',skippedFrom:'unknown'}
+  ]) {
+    const f=panelFixture(null,{queue:[original]});runtimePress(f,'건너뛰기 취소');await runtimeFlush();
+    const current=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0];
+    assert.equal(current.state,original.taskId?'waiting':'unknown');
+    assert.equal(current.taskId,original.taskId);assert.deepEqual(current.saved,original.saved);assert.equal(current.folderToken,original.folderToken);
+    assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+  }
+});
+test('runtime skip and undo preserve the exact queued record and order',async()=>{
+  const original=job();const f=panelFixture(null,{queue:[original]});
+  runtimePress(f,'건너뛰기');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].skippedFrom,'queued');
+  runtimePress(f,'건너뛰기 취소');await runtimeFlush();
+  assert.deepEqual(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs,[original]);
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
 async function runtimeChooseFile(f,text) {
   const input=runtimeField(f,'설정 백업 JSON 파일');input.files=[{name:'fixture-settings.json',size:new TextEncoder().encode(text).length,text:async()=>text}];input.fire('change');await runtimeFlush();
 }
