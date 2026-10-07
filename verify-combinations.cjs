@@ -28,3 +28,23 @@ test('library management retains saved records and immutable reservation ingredi
   const frozen=structuredClone(lib.reservations);lib=core.createChunkFolder(lib,'Folder',['s'],()=> 'folder');lib=core.duplicateChunks(lib,['s'],()=> 'copy');lib=core.removeChunks(lib,['s']);
   assert.deepEqual(lib.reservations,frozen);assert.equal(lib.combinations[0].id,'record');assert.deepEqual(core.resolveCombination(lib,lib.combinations[0]).missing,['청크 s']);
 });
+
+test('trigger placement changes only the positive prompt and retains the legacy default',()=>{
+  const lib=seed();lib.presets[0].loras=[{id:'3',weight:0.5,triggerWords:'style, (detail:1.2)'},{id:'4',weight:1,triggerWords:'outfit'}];lib.scenes.push({id:'s2',name:'S2',prompt:'wave',negativePrompt:'still'});
+  const args=[lib.common,lib.characters[0],lib.scenes,lib.presets[0]],cases=[[0,'style, (detail:1.2), outfit, quality, character, smile, wave'],[1,'quality, style, (detail:1.2), outfit, character, smile, wave'],[2,'quality, character, style, (detail:1.2), outfit, smile, wave'],[3,'quality, character, smile, style, (detail:1.2), outfit, wave'],['end','quality, character, smile, wave, style, (detail:1.2), outfit']];
+  for(const [position,prompt] of cases){const result=core.composePresetPrompts(...args,position);assert.equal(result.prompt,prompt);assert.equal(result.negativePrompt,'lowres, still');}
+  assert.equal(core.composePresetPrompts(...args).prompt,cases[1][1]);
+  for(const bad of [-1,5,'3',null,1.5])assert.throws(()=>core.composePresetPrompts(...args,bad),/트리거 위치/);
+});
+
+test('position survives frozen reservations, history identities and backups; legacy recipes keep their old placement',()=>{
+  const lib=seed();lib.presets[0].loras=[{id:'3',weight:1,triggerWords:'trigger'}];const recipe={presetId:'p',characterId:'c',sceneIds:['s'],count:1,triggerPosition:'end'};
+  let remembered=core.rememberCombination(lib,recipe,{idFactory:()=> 'end',now:1,favorite:true});remembered=core.rememberCombination(remembered,{...recipe,triggerPosition:0},{idFactory:()=> 'start',now:2});assert.equal(remembered.combinations.length,2);
+  remembered.reservations=[{id:'r',...recipe,snapshot:core.snapshotCombination(lib,recipe)},{id:'legacy',presetId:'p',characterId:'c',sceneIds:['s'],count:1}];
+  remembered.common.prompt='new quality';remembered.presets[0].loras[0].triggerWords='new trigger';
+  const restored=core.parseSettingsBackup(JSON.stringify(core.makeSettingsBackup(remembered,{maxCredits:null,filePrefix:'',repeat:1},{appVersion:'0.8.4',exportedAt:'2026-10-08T00:00:00.000Z'}))).library;
+  const jobs=core.expandPresetReservations(restored,{idFactory:(()=>{let n=0;return()=>String(++n);})()});assert.equal(jobs[0].prompt,'quality, character, smile, trigger');assert.equal(jobs[1].prompt,'new quality, new trigger, character, smile');
+  assert.equal(core.resolveCombination(restored,restored.combinations.find(c=>c.id==='end')).triggerPosition,'end');
+  for(const bad of [-1,4,'last',null]){const broken=structuredClone(restored);broken.reservations[0].triggerPosition=bad;assert.throws(()=>core.parseSettingsBackup(JSON.stringify(broken)),/트리거 위치/);}
+  const deleted=structuredClone(restored);deleted.scenes=[];const resolved=core.resolveCombination(deleted,{...recipe,triggerPosition:3});assert.equal(resolved.triggerPosition,2);assert.deepEqual(resolved.missing,['청크 s']);
+});

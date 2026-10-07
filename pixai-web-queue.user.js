@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.8.3
+// @version      0.8.4
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -415,6 +415,7 @@
           presetId:presetIdentifier(item.presetId, '설정 프리셋'),
           characterId:presetIdentifier(item.characterId, '캐릭터'), sceneIds,
           count:presetInteger(item.count, '예약 반복 횟수', 1, 100)};
+        if (Object.hasOwn(item,'triggerPosition')) reservation.triggerPosition=normalizeTriggerPosition(item.triggerPosition,sceneIds.length);
         if (Object.hasOwn(item,'snapshot')) {
           reservation.snapshot = normalizeCombinationSnapshot(item.snapshot);
           const frozen=reservation.snapshot;
@@ -430,6 +431,7 @@
         if (typeof item.favorite!=='boolean') throw new Error('조합 즐겨찾기 형식을 확인해 주세요.');
         return {id,presetId:presetIdentifier(item.presetId,'기록 프리셋'),characterId:presetIdentifier(item.characterId,'기록 캐릭터'),
           sceneIds:sceneIds.map(id=>presetIdentifier(id,'기록 청크')),count:presetInteger(item.count,'기록 횟수',1,100),
+          ...(Object.hasOwn(item,'triggerPosition') ? {triggerPosition:normalizeTriggerPosition(item.triggerPosition,sceneIds.length)} : {}),
           favorite:item.favorite,name:presetText(item.name),at:presetInteger(item.at,'기록 시각',0,Number.MAX_SAFE_INTEGER)};
       });
       if (library.combinations.filter(item=>!item.favorite).length>50 || library.combinations.filter(item=>item.favorite).length>1000) throw new Error('최근 조합은 50개, 즐겨찾기는 1,000개까지 저장할 수 있습니다.');
@@ -448,7 +450,8 @@
     if (!preset) missing.push('프리셋');if (!character) missing.push('캐릭터');
     const sceneIds=[];
     for (const id of combination.sceneIds) {if (library.scenes.some(item=>item.id===id)) sceneIds.push(id);else missing.push(`청크 ${id}`);}
-    return {presetId:preset?.id || '',characterId:character?.id || '',sceneIds,count:combination.count,missing};
+    return {presetId:preset?.id || '',characterId:character?.id || '',sceneIds,count:combination.count,missing,
+      ...(Object.hasOwn(combination,'triggerPosition') ? {triggerPosition:combination.triggerPosition==='end' ? 'end' : Math.min(normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length),sceneIds.length+2)} : {})};
   }
   function snapshotCombination(value, combination) {
     const library=normalizePresetLibrary(value),resolved=resolveCombination(library,combination);
@@ -458,8 +461,9 @@
   }
   function rememberCombination(value, combination, options={}) {
     const library=normalizePresetLibrary(value),entries=library.combinations || [];
-    const previous=entries.find(item=>item.presetId===combination.presetId && item.characterId===combination.characterId && JSON.stringify(item.sceneIds)===JSON.stringify(combination.sceneIds));
+    const previous=entries.find(item=>item.presetId===combination.presetId && item.characterId===combination.characterId && JSON.stringify(item.sceneIds)===JSON.stringify(combination.sceneIds) && normalizeTriggerPosition(item.triggerPosition,item.sceneIds.length)===normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length));
     const entry={id:previous?.id || (options.idFactory || (()=>globalThis.crypto.randomUUID()))(),presetId:combination.presetId,characterId:combination.characterId,sceneIds:[...combination.sceneIds],count:combination.count,
+      ...(Object.hasOwn(combination,'triggerPosition') ? {triggerPosition:combination.triggerPosition} : {}),
       favorite:!!options.favorite || !!previous?.favorite,name:previous?.name || '',at:options.now ?? Date.now()};
     let recent=0;
     library.combinations=[entry,...entries.filter(item=>item.id!==entry.id)].filter(item=>item.favorite || ++recent<=50);
@@ -671,8 +675,8 @@
       settingsBackupKeys(item, '캐릭터·청크 프롬프트', fields, key === 'scenes' ? [...fields,'folderId'] : fields);
       settingsBackupStrings(item, ['name','prompt','negativePrompt'], '캐릭터·청크 프롬프트');
     }
-    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot']);
-    for (const item of source.combinations || []) settingsBackupKeys(item,'조합 기록',['id','presetId','characterId','sceneIds','count','favorite','name','at']);
+    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition']);
+    for (const item of source.combinations || []) settingsBackupKeys(item,'조합 기록',['id','presetId','characterId','sceneIds','count','favorite','name','at'],['id','presetId','characterId','sceneIds','count','favorite','name','at','triggerPosition']);
     return library;
   }
   function settingsBackupMeta(value) {
@@ -719,7 +723,13 @@
     }
     return {source:'library', appVersion:null, exportedAt:null, library:settingsBackupLibrary(value), options:null};
   }
-  function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}) {
+  function normalizeTriggerPosition(value,chunkCount) {
+    if (value===undefined) return 1; // Older recipes put triggers between common and character.
+    if (value==='end') return value;
+    if (!Number.isInteger(value) || value<0 || value>chunkCount+2) throw new Error('LoRA 트리거 위치를 확인해 주세요.');
+    return value;
+  }
+  function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}, triggerPosition=1) {
     const commonPart = presetObject(common, '공통');
     const characterPart = presetObject(character, '캐릭터');
     const chunks = (Array.isArray(chunksOrLegacyScene) ? chunksOrLegacyScene : [chunksOrLegacyScene])
@@ -732,7 +742,9 @@
       if (typeof item.triggerWords !== 'string') throw new Error('LoRA 트리거는 문자열이어야 합니다.');
       return presetText(item.triggerWords);
     });
-    const promptParts = [commonPart.prompt, ...triggers, characterPart.prompt, ...chunks.map(item => item.prompt)];
+    const promptParts = [commonPart.prompt, characterPart.prompt, ...chunks.map(item => item.prompt)];
+    const position=normalizeTriggerPosition(triggerPosition,chunks.length);
+    promptParts.splice(position==='end' ? promptParts.length : position,0,...triggers);
     const negativeParts = [commonPart.negativePrompt, characterPart.negativePrompt, ...chunks.map(item => item.negativePrompt)];
     return {
       prompt:promptParts.map(presetText).filter(Boolean).join(', '),
@@ -759,7 +771,7 @@
         if (!chunk) throw new Error(`예약 ${reservation.id}의 프롬프트 청크가 없습니다: ${sceneId}`);
         return chunk;
       });
-      const prompts = composePresetPrompts(common, character, chunks, preset);
+      const prompts = composePresetPrompts(common, character, chunks, preset, reservation.triggerPosition);
       if (!prompts.prompt) throw new Error(`예약 ${reservation.id}의 조합 프롬프트가 비어 있습니다.`);
       for (let repeat = 1; repeat <= reservation.count; repeat++) {
         const id = presetIdentifier(idFactory(), '작업');
@@ -1643,63 +1655,80 @@ function mountPresetEditor(parent, io) {
   const pickerClosed = new Set();
   let groupSummaries = new Map();
   let selectedChunkIds = new Set();
-  let missingMaterials=[],loadedCombination=false,recipeDrag=null;
+  let missingMaterials=[],loadedCombination=false,recipeDrag=null,triggerPosition=1;
   const reserveCount = field('이 조합의 생성 횟수','input',{type:'number',min:'1',max:'100',value:'1'});
   const combined = el('div',null,{class:'pq-preview','aria-label':'저장한 프롬프트 조합 미리보기'});
   const sequenceList=el('div',null,{class:'pq-sequence-list','aria-label':'합쳐지는 순서'});
   const missingNotice=el('div',null,{class:'pq-missing-notice',role:'status'});
   const acknowledgeMissing=action('누락 재료 제외하고 계속',()=>{missingMaterials=[];preview();});
   const selectedChunksInOrder=()=>[...selectedChunkIds].map(id=>library.scenes.find(chunk=>chunk.id===id)).filter(Boolean);
-  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],count:repeatValue(reserveCount.input)});
-  function moveRecipe(id, target, after=false) {
+  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,count:repeatValue(reserveCount.input)});
+  function sequenceKeys() {
+    const keys=['common','character',...[...selectedChunkIds].map(id=>'chunk:'+id)];
+    keys.splice(triggerPosition==='end' ? keys.length : Math.min(triggerPosition,keys.length),0,'trigger');return keys;
+  }
+  function movedSequence(id,target,after=false) {
+    const keys=sequenceKeys();if (id===target || !keys.includes(id) || !keys.includes(target) || !['trigger',...keys.filter(key=>key.startsWith('chunk:'))].includes(id)) return null;
+    keys.splice(keys.indexOf(id),1);keys.splice(keys.indexOf(target)+(after ? 1 : 0),0,id);
+    const fixed=keys.filter(key=>key!=='trigger');if (fixed[0]!=='common' || fixed[1]!=='character') return null;return keys;
+  }
+  function moveRecipe(id,target,after=false) {
     if (io.isBusy?.()) return;
-    const ids=[...selectedChunkIds];if (id===target || !ids.includes(id) || !ids.includes(target)) return;
-    ids.splice(ids.indexOf(id),1);ids.splice(ids.indexOf(target)+(after ? 1 : 0),0,id);
-    selectedChunkIds=new Set(ids);preview();
+    const keys=movedSequence(id,target,after);if (!keys) return;
+    selectedChunkIds=new Set(keys.filter(key=>key.startsWith('chunk:')).map(key=>key.slice(6)));
+    const position=keys.indexOf('trigger');triggerPosition=position===keys.length-1 ? 'end' : position;preview();
   }
   function renderSequence(preset,character,chunks) {
     sequenceList.replaceChildren();
-    for (const [name,text] of [['공통문',library.common.prompt],['LoRA 트리거',preset?.loras.map(item=>item.triggerWords || '').filter(Boolean).join(', ')],['캐릭터',character?.prompt]]) {
-      const row=el('div',null,{class:'pq-fixed-material'});row.append(el('strong',name),el('small',text || '없음'));sequenceList.append(row);
+    const materials=[{id:'common',name:'공통문',text:library.common.prompt},{id:'character',name:'캐릭터',text:character?.prompt},
+      {id:'trigger',name:'LoRA 트리거',text:preset?.loras.map(item=>item.triggerWords || '').filter(Boolean).join(', ')},
+      ...chunks.map((chunk,index)=>({id:'chunk:'+chunk.id,name:chunk.name,text:chunk.prompt || chunk.negativePrompt,chunk,index}))];
+    const keys=sequenceKeys();
+    for (const [order,key] of keys.entries()) {
+      const item=materials.find(material=>material.id===key),movable=item.id==='trigger' || !!item.chunk;
+      const row=el('div',null,{class:movable ? 'pq-recipe-row' : 'pq-fixed-material','data-recipe-material':item.id});
+      if (item.chunk) row.dataset.recipeChunk=item.chunk.id;
+      const handle=movable ? el('button',null,{type:'button','data-edit':'',draggable:'true','aria-label':item.chunk ? '조합 청크 이동: '+item.name : 'LoRA 트리거 이동',title:'끌어서 조합 순서 변경'}) : null;
+      if (handle) {decorateIcon(handle,'drag_indicator');handle.disabled=!!io.isBusy?.();
+        handle.style.touchAction='none';
+        let pointerDrag=null;
+        if (document.elementFromPoint) handle.setAttribute('draggable','false');
+        function pointerTarget(event) {
+          const target=document.elementFromPoint?.(event.clientX,event.clientY)?.closest?.('[data-recipe-material]');
+          if (!target || !sequenceList.contains(target) || target.dataset.recipeMaterial===item.id) return null;
+          return {id:target.dataset.recipeMaterial,element:target,after:event.clientY>=target.getBoundingClientRect().top+target.getBoundingClientRect().height/2};
+        }
+        function clearPointer() {pointerDrag=null;for (const row of sequenceList.querySelectorAll('[data-drop-position]')) row.dataset.dropPosition='';}
+        handle.addEventListener('pointerdown',event=>{
+          if (!document.elementFromPoint || event.isTrusted===false || io.isBusy?.() || event.button!==0 || event.isPrimary===false) return;
+          event.preventDefault();pointerDrag={id:event.pointerId,x:event.clientX,y:event.clientY,moved:false};handle.setPointerCapture?.(event.pointerId);
+        });
+        handle.addEventListener('pointermove',event=>{
+          if (!pointerDrag || event.pointerId!==pointerDrag.id || event.isTrusted===false || io.isBusy?.()) return;
+          if (Math.hypot(event.clientX-pointerDrag.x,event.clientY-pointerDrag.y)<5 && !pointerDrag.moved) return;
+          pointerDrag.moved=true;const target=pointerTarget(event);for (const row of sequenceList.querySelectorAll('[data-drop-position]')) row.dataset.dropPosition='';if (target) target.element.dataset.dropPosition=target.after ? 'after' : 'before';
+        });
+        handle.addEventListener('pointerup',event=>{
+          if (!pointerDrag || event.pointerId!==pointerDrag.id) return;
+          const target=pointerDrag.moved && event.isTrusted!==false && !io.isBusy?.() ? pointerTarget(event) : null;clearPointer();if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);if (target) moveRecipe(item.id,target.id,target.after);
+        });
+        handle.addEventListener('pointercancel',clearPointer);handle.addEventListener('lostpointercapture',clearPointer);
+        const type='application/x-pixai-combination-order';
+        handle.addEventListener('dragstart',event=>{if (event.isTrusted===false || io.isBusy?.() || !event.dataTransfer) {event.preventDefault();return;}recipeDrag=item.id;event.dataTransfer.setData(type,item.id);event.dataTransfer.effectAllowed='move';});
+        handle.addEventListener('dragend',()=>{recipeDrag=null;for (const row of sequenceList.querySelectorAll('[data-drop-position]')) row.dataset.dropPosition='';});
+      }
+      const type='application/x-pixai-combination-order';
+      row.addEventListener('dragover',event=>{if (event.isTrusted===false || io.isBusy?.() || !recipeDrag || recipeDrag===item.id) return;event.preventDefault();row.dataset.dropPosition=event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2 ? 'after' : 'before';});
+      row.addEventListener('dragleave',()=>{row.dataset.dropPosition='';});
+      row.addEventListener('drop',event=>{if (event.isTrusted===false || io.isBusy?.() || !recipeDrag || event.dataTransfer?.getData(type)!==recipeDrag) return;event.preventDefault();const id=recipeDrag;recipeDrag=null;moveRecipe(id,item.id,event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2);});
+      const title=el('div',null,{class:'pq-recipe-title'});title.append(el('strong',item.chunk ? (item.index+1)+'. '+item.name : item.name),el('small',item.text || '없음'));
+      if (!movable) {row.append(title);sequenceList.append(row);continue;}
+      const controls=el('div',null,{class:'pq-actions'});
+      for (const direction of [-1,1]) {const target=keys[order+direction],control=action(direction<0 ? '↑' : '↓',()=>{if (target) moveRecipe(item.id,target,direction>0);});control.setAttribute('aria-label',item.chunk ? '조합 '+item.name+' '+(direction<0 ? '위로' : '아래로') : 'LoRA 트리거 '+(direction<0 ? '위로' : '아래로'));available(control,!!target && !!movedSequence(item.id,target,direction>0));controls.append(control);}
+      if (item.chunk) {const remove=action('×',()=>{selectedChunkIds.delete(item.chunk.id);renderChunkChoices();preview();});remove.setAttribute('aria-label','조합에서 제외: '+item.name);controls.append(remove);}
+      row.append(handle,title,controls);sequenceList.append(row);
     }
     if (!chunks.length) sequenceList.append(el('small','왼쪽에서 청크를 체크하면 선택한 순서대로 쌓입니다.',{class:'pq-empty'}));
-    chunks.forEach((chunk,index)=>{
-      const row=el('div',null,{class:'pq-recipe-row','data-recipe-chunk':chunk.id});
-      const handle=el('button',null,{type:'button','data-edit':'',draggable:'true','aria-label':`조합 청크 이동: ${chunk.name}`,title:'끌어서 조합 순서 변경'});decorateIcon(handle,'drag_indicator');handle.disabled=!!io.isBusy?.();
-      handle.style.touchAction='none';
-      let pointerDrag=null;
-      if (document.elementFromPoint) handle.setAttribute('draggable','false');
-      function pointerTarget(event) {
-        const target=document.elementFromPoint?.(event.clientX,event.clientY)?.closest?.('[data-recipe-chunk]');
-        if (!target || !sequenceList.contains(target) || target.dataset.recipeChunk===chunk.id) return null;
-        return {id:target.dataset.recipeChunk,element:target,after:event.clientY>=target.getBoundingClientRect().top+target.getBoundingClientRect().height/2};
-      }
-      function clearPointer() {pointerDrag=null;for (const row of sequenceList.querySelectorAll('[data-drop-position]')) row.dataset.dropPosition='';}
-      handle.addEventListener('pointerdown',event=>{
-        if (!document.elementFromPoint || event.isTrusted===false || io.isBusy?.() || event.button!==0 || event.isPrimary===false) return;
-        event.preventDefault();pointerDrag={id:event.pointerId,x:event.clientX,y:event.clientY,moved:false};handle.setPointerCapture?.(event.pointerId);
-      });
-      handle.addEventListener('pointermove',event=>{
-        if (!pointerDrag || event.pointerId!==pointerDrag.id || event.isTrusted===false || io.isBusy?.()) return;
-        if (Math.hypot(event.clientX-pointerDrag.x,event.clientY-pointerDrag.y)<5 && !pointerDrag.moved) return;
-        pointerDrag.moved=true;const target=pointerTarget(event);for (const row of sequenceList.querySelectorAll('[data-drop-position]')) row.dataset.dropPosition='';if (target) target.element.dataset.dropPosition=target.after ? 'after' : 'before';
-      });
-      handle.addEventListener('pointerup',event=>{
-        if (!pointerDrag || event.pointerId!==pointerDrag.id) return;
-        const target=pointerDrag.moved && event.isTrusted!==false && !io.isBusy?.() ? pointerTarget(event) : null;clearPointer();if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);if (target) moveRecipe(chunk.id,target.id,target.after);
-      });
-      handle.addEventListener('pointercancel',clearPointer);handle.addEventListener('lostpointercapture',clearPointer);
-      const type='application/x-pixai-combination-order';
-      handle.addEventListener('dragstart',event=>{if (event.isTrusted===false || io.isBusy?.() || !event.dataTransfer) {event.preventDefault();return;}recipeDrag=chunk.id;event.dataTransfer.setData(type,chunk.id);event.dataTransfer.effectAllowed='move';});
-      handle.addEventListener('dragend',()=>{recipeDrag=null;for (const row of sequenceList.querySelectorAll('[data-drop-position]')) row.dataset.dropPosition='';});
-      row.addEventListener('dragover',event=>{if (event.isTrusted===false || io.isBusy?.() || !recipeDrag || recipeDrag===chunk.id) return;event.preventDefault();row.dataset.dropPosition=event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2 ? 'after' : 'before';});
-      row.addEventListener('dragleave',()=>{row.dataset.dropPosition='';});
-      row.addEventListener('drop',event=>{if (event.isTrusted===false || io.isBusy?.() || !recipeDrag || event.dataTransfer?.getData(type)!==recipeDrag) return;event.preventDefault();const id=recipeDrag;recipeDrag=null;moveRecipe(id,chunk.id,event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2);});
-      const title=el('div',null,{class:'pq-recipe-title'});title.append(el('strong',`${index+1}. ${chunk.name}`),el('small',chunk.prompt || chunk.negativePrompt));
-      const controls=el('div',null,{class:'pq-actions'});
-      for (const direction of [-1,1]) {const control=action(direction<0 ? '↑' : '↓',()=>{const target=chunks[index+direction];if (target) moveRecipe(chunk.id,target.id,direction>0);});control.setAttribute('aria-label',`조합 ${chunk.name} ${direction<0 ? '위로' : '아래로'}`);available(control,!!chunks[index+direction]);controls.append(control);}
-      const remove=action('×',()=>{selectedChunkIds.delete(chunk.id);renderChunkChoices();preview();});remove.setAttribute('aria-label',`조합에서 제외: ${chunk.name}`);controls.append(remove);row.append(handle,title,controls);sequenceList.append(row);
-    });
     for (const label of chunkList.querySelectorAll('[data-selection-id]')) {const index=[...selectedChunkIds].indexOf(label.dataset.selectionId);label.textContent=index<0 ? '' : String(index+1);}
   }
   const reservations = el('div',null,{class:'pq-reservation-list'});
@@ -1713,7 +1742,8 @@ function mountPresetEditor(parent, io) {
     const preset = library.presets.find(item => item.id === reservePreset.input.value);
     const character = library.characters.find(item => item.id === reserveCharacter.input.value);
     const chunks = selectedChunksInOrder();
-    const {prompt,negativePrompt} = composePresetPrompts(library.common,character || {},chunks,preset || {loras:[]});
+    if (triggerPosition!=='end') triggerPosition=Math.min(triggerPosition,chunks.length+2);
+    const {prompt,negativePrompt} = composePresetPrompts(library.common,character || {},chunks,preset || {loras:[]},triggerPosition);
     const visible=visibleChunks(),visibleIds=new Set(visible.map(chunk=>chunk.id)),hidden=chunks.filter(chunk=>!visibleIds.has(chunk.id)).length;
     chunkCount.textContent = chunks.length ? `${chunks.length}개 선택 · ${chunks.map(chunk=>chunk.name).join(' · ')}` : '선택한 청크 없음 · 청크 없이 예약할 수 있습니다.';
     chunkCount.append(el('small',hidden ? `현재 목록 밖에 선택 ${hidden}개가 있습니다. 선택한 청크는 모두 함께 예약됩니다.` : '선택 순서대로 합칩니다. 가운데 목록에서 끌어 순서를 바꿀 수 있습니다.'));
@@ -1796,7 +1826,7 @@ function mountPresetEditor(parent, io) {
     if (io.isBusy?.()) return;
     const resolved=resolveCombination(library,entry);
     loadedCombination=true;missingMaterials=resolved.missing;
-    reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);
+    reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);triggerPosition=resolved.triggerPosition ?? 1;
     reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();
     io.notify(resolved.missing.length ? `조합을 불러왔지만 없는 재료가 있습니다: ${resolved.missing.join(', ')}. 확인 전에는 예약하지 않습니다.` : '조합을 불러왔습니다. 현재 라이브러리 내용으로 미리보기를 확인해 주세요.');
   }
@@ -1872,7 +1902,7 @@ function mountPresetEditor(parent, io) {
     refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();},
     reload:() => {
       const next=normalizePresetLibrary(io.load() || makePresetLibrary());
-      library=next;selectedChunkIds=new Set();missingMaterials=[];loadedCombination=false;
+      library=next;selectedChunkIds=new Set();missingMaterials=[];loadedCombination=false;triggerPosition=1;
       presetSearch.input.value='';
       chunkSearch.input.value='';chunkFilter.input.value='';pickerClosed.clear();
       for (const editor of [characterEditor,chunkEditor]) editor.resetView();
@@ -2361,7 +2391,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.8.3', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.8.4', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2476,7 +2506,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.3',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.4',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -2764,7 +2794,7 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-recipe-row>button{padding:0;width:24px;margin:0;border:0;background:transparent;cursor:grab;flex:none}
 #local-pixai-queue .pq-recipe-title{flex:1;min-width:0;overflow-wrap:anywhere}#local-pixai-queue .pq-recipe-title small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #local-pixai-queue .pq-recipe-row .pq-actions{flex:none;gap:2px;margin:0}#local-pixai-queue .pq-recipe-row .pq-actions button{width:25px;padding:0;font-size:15px}
-#local-pixai-queue [data-recipe-chunk][data-drop-position="before"]{box-shadow:inset 0 3px var(--pq-accent)}#local-pixai-queue [data-recipe-chunk][data-drop-position="after"]{box-shadow:inset 0 -3px var(--pq-accent)}
+#local-pixai-queue [data-recipe-material][data-drop-position="before"]{box-shadow:inset 0 3px var(--pq-accent)}#local-pixai-queue [data-recipe-material][data-drop-position="after"]{box-shadow:inset 0 -3px var(--pq-accent)}
 #local-pixai-queue .pq-compose-review .pq-preview{max-height:160px;min-height:85px;overflow:auto;border-color:var(--pq-line);background:var(--pq-surface);font-size:13px;margin:0;padding:10px;resize:vertical}
 #local-pixai-queue .pq-missing-notice{flex:none;max-height:120px;overflow:auto;border:1px solid var(--pq-manage);background:#2d291f;padding:8px;border-radius:7px;font-size:13px}
 #local-pixai-queue .pq-reserve-actions{display:flex;gap:5px}#local-pixai-queue .pq-reserve-actions>button:first-child{flex:1}
@@ -2865,7 +2895,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.3', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.4', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

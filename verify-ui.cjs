@@ -574,3 +574,23 @@ test('site-settings buttons carry the running-lock marker and allowsWhileRunning
   const outside=new Element('button');outside.setAttribute('data-edit','');
   assert.equal(f.ui.allowsWhileRunning(outside),false);
 });
+
+test('trigger arrows match preview and submitted jobs, preserve old reservations and restore favorites after backup',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');const old=f.library().reservations[0];
+  await f.press('LoRA 트리거 아래로');assert.match(f.preview(),/quality, character tags, trigger one, trigger two, smiling, waving/);
+  await f.press('LoRA 트리거 아래로');assert.match(f.preview(),/quality, character tags, smiling, trigger one, trigger two, waving/);
+  await f.press('LoRA 트리거 아래로');assert.match(f.preview(),/quality, character tags, smiling, waving, trigger one, trigger two/);assert.equal(f.button('LoRA 트리거 아래로').disabled,true);assert.deepEqual(f.library().reservations[0],old);
+  await f.press('이 조합 예약 추가');assert.equal(f.library().reservations[1].triggerPosition,'end');await f.press('현재 조합 즐겨찾기');const entry=f.library().combinations.find(e=>e.triggerPosition==='end');
+  const restored=core.parseSettingsBackup(JSON.stringify(core.makeSettingsBackup(f.library(),{maxCredits:7800,filePrefix:'',repeat:1},{appVersion:'0.8.4',exportedAt:'2026-10-08T00:00:00.000Z'}))).library;
+  const fresh=fixture(t,restored);await fresh.press('조합 불러오기: '+entry.id);assert.match(fresh.preview(),/smiling, waving, trigger one, trigger two/);await fresh.press('예약 전부를 대기열에 등록');assert.equal(fresh.jobs[1].prompt,'quality, character tags, smiling, waving, trigger one, trigger two');assert.equal(fresh.jobs[0].prompt,'quality, trigger one, trigger two, character tags, smiling, waving');
+  f.ui.reload();assert.match(f.preview(),/quality, trigger one, trigger two, character tags/);
+});
+
+test('trigger native and pointer drag target fixed materials, reject foreign or busy drops, and retain library data',async t=>{
+  const f=fixture(t);await f.choose('표정');const before=f.library();const row=id=>f.ui.root.querySelectorAll('[data-recipe-material]').find(e=>e.dataset.recipeMaterial===id);
+  let data=transfer();await f.field('LoRA 트리거 이동').emit('dragstart',{dataTransfer:data});await row('common').emit('drop',{dataTransfer:transfer(),clientY:104});assert.match(f.preview(),/quality, trigger one/);
+  f.setBusy(true);await row('common').emit('drop',{dataTransfer:data,clientY:104});assert.match(f.preview(),/quality, trigger one/);f.setBusy(false);await f.field('LoRA 트리거 이동').emit('dragend');
+  data=transfer();await f.field('LoRA 트리거 이동').emit('dragstart',{dataTransfer:data});await row('common').emit('drop',{dataTransfer:data,clientY:104});assert.match(f.preview(),/trigger one, trigger two, quality, character tags, smiling/);assert.equal(f.button('LoRA 트리거 위로').disabled,true);
+  document.elementFromPoint=()=>({closest:()=>row('character')});const event={button:0,isPrimary:true,pointerId:1,clientX:10,clientY:180};let handle=f.field('LoRA 트리거 이동');await handle.emit('pointerdown',event);await handle.emit('pointermove',{...event,clientY:148});await handle.emit('pointercancel',event);await handle.emit('pointerup',{...event,clientY:148});assert.match(f.preview(),/trigger one, trigger two, quality/);
+  await handle.emit('pointerdown',event);await handle.emit('pointermove',{...event,clientY:148});await handle.emit('pointerup',{...event,clientY:148});assert.match(f.preview(),/quality, character tags, trigger one, trigger two, smiling/);assert.deepEqual(f.library(),before);assert.equal(f.jobs.length,0);
+});
