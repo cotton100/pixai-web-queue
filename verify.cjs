@@ -1233,7 +1233,7 @@ const deferred = () => {let resolve,reject;const promise = new Promise((yes,no) 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function startFixture(options = {}) {
   const source = fs.readFileSync(path.join(__dirname,'pixai-web-queue.user.js'),'utf8');
-  const begin = source.indexOf('  async function start() {');
+  const begin = source.indexOf('  async function start(');
   const end = source.indexOf('  function node(',begin);
   assert(begin >= 0 && end > begin,'Production start() boundaries must remain identifiable');
   const facts = {process:[],capture:0,captureNegative:0,destination:0,reveal:0,modelReads:0,persists:[],locks:0,renders:0,siteCalls:0,paidCalls:0};
@@ -1334,6 +1334,20 @@ test('a preset-only queue starts without reading a hidden current model; its sav
   const f=startFixture({hiddenModel:true,jobs:[mixedJobs()[0]]});await f.run();
   assert.equal(f.facts.modelReads,0);assert.equal(f.facts.reveal,0);assert.equal(f.facts.capture,0);
   assert.deepEqual(f.facts.process[0].configuration,selectedPreset);assert.equal(f.state().running,false);assert.equal(f.state().starting,false);
+});
+
+test('one-job run completes and saves only the first unfinished task, preserving every later task for normal resume',async()=>{
+  const tasks=[{id:'done',state:'done'},mixedJobs()[0],{...mixedJobs()[0],id:'later'}];
+  const f=startFixture({jobs:tasks});await f.run({oneJob:true});
+  assert.deepEqual(f.facts.process.map(item=>item.id),['preset']);assert.equal(f.stored()[1].state,'done');assert.equal(f.stored()[2].state,'queued');
+  assert.equal(f.state().running,false);assert.equal(f.state().starting,false);assert.match(f.state().message,/첫 작업.*나머지/);
+  await f.run();assert.deepEqual(f.facts.process.map(item=>item.id),['preset','later']);
+});
+
+test('one-job preparation failure does not advance or retry the next task',async()=>{
+  const f=startFixture({jobs:[mixedJobs()[0],{...mixedJobs()[0],id:'later'}],process:async()=>{throw new Error('first task failed');}});
+  await assert.rejects(f.run({oneJob:true}),/first task failed/);
+  assert.deepEqual(f.facts.process.map(item=>item.id),['preset']);assert.equal(f.stored()[1].state,'queued');assert.equal(f.state().running,false);assert.equal(f.state().starting,false);
 });
 
 test('Stop while revealing a legacy model prevents processing and releases start flags',async()=>{
