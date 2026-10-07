@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.7.0
+// @version      0.7.1
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -22,7 +22,7 @@
   const resumable = new Set(['queued', 'waiting', 'saving', 'save_failed']);
   function checkCost(text, limit) {
     if (limit == null) return null;
-    const match = String(text).match(/생성!\s*([\d,]+)/);
+    const match = String(text).match(/(?:생성!|Generate)\s*([\d,]+)(?=\s*(?:Ctrl\+|$))/i);
     const cost = match ? Number(match[1].replace(/,/g, '')) : NaN;
     if (!Number.isFinite(cost) || cost < 1) throw new Error('생성 비용을 확정할 수 없습니다.');
     if (cost > limit) throw new Error(`표시 비용 ${cost.toLocaleString()}크레딧이 설정 상한 ${limit.toLocaleString()}을 넘습니다.`);
@@ -839,8 +839,10 @@
       return true;
     };
     const list = (scope, selector) => [...scope.querySelectorAll(selector)];
-    const buttons = (scope, text) => list(scope,'button').filter(e => shown(e) && e.textContent.trim() === text);
-    const mainButtons = text => list(doc,'main button').filter(e => shown(e) && e.textContent.trim() === text);
+    const labels={ '전체 모델 보기':['전체 모델 보기','See All Models'], '전체 LoRA 보기':['전체 LoRA 보기','See All LoRAs'], '이 모델 사용':['이 모델 사용','Use this model','Use This Model'], '확인':['확인','Confirm'], '고급':['고급','Advanced'] };
+    const matchesText=(element,text)=>(labels[text] || [text]).includes(element.textContent.trim());
+    const buttons = (scope, text) => list(scope,'button').filter(e => shown(e) && matchesText(e,text));
+    const mainButtons = text => list(doc,'main button').filter(e => shown(e) && matchesText(e,text));
     function only(items, label) {
       if (items.length !== 1) throw new Error(`${label}을 하나로 확인할 수 없습니다. PixAI 한국어 새 에디터를 확인해 주세요.`);
       return items[0];
@@ -989,12 +991,12 @@
       await revealModelPanel();
       try { await applyModel(config.model); await applyLoras(config); return assertConfiguration(config,read()); }
       catch(error) {
-        const d=dialog(), close=d?.querySelector('button[aria-label="닫기"]');
+        const d=dialog(), close=d?.querySelector('button[aria-label="닫기"]') || d?.querySelector('button[aria-label="Close"]');
         if (close) { try { io.mutate(()=>close.click()); } catch {} }
         throw error;
       }
     }
-    function negativeField() { return list(doc,'main textarea[placeholder="여기에 네거티브 프롬프트를 입력하세요"]').filter(shown)[0]; }
+    function negativeField() { return list(doc,'main textarea').filter(e=>shown(e)&&['여기에 네거티브 프롬프트를 입력하세요','Enter negative prompt here'].includes(e.getAttribute('placeholder')))[0]; }
     async function captureNegative() {
       let input=negativeField();
       if (!input) {
@@ -1015,7 +1017,7 @@
       const input=negativeField();
       if ((input && normalize(input.value) !== normalize(value)) || (!input && normalize(value))) throw new Error('네거티브 프롬프트가 조합과 다릅니다. 생성하지 않습니다.');
     }
-    return {capture,apply,read,modelKey,setNegative,verifyNegative,captureNegative};
+    return {capture,apply,read,modelKey,revealModelPanel,setNegative,verifyNegative,captureNegative};
   }
 
 function mountPresetEditor(parent, io) {
@@ -1760,14 +1762,14 @@ function mountPresetEditor(parent, io) {
     return found[0];
   }
   function generateButton() {
-    const found = all('main button[data-react-aria-pressable]').filter(element => visible(element) && element.textContent.includes('Ctrl+') && element.textContent.includes('작업 제출'));
+    const found = all('main button[data-react-aria-pressable]').filter(element => visible(element) && element.textContent.includes('Ctrl+') && (element.textContent.includes('작업 제출') || element.textContent.includes('Task submitted')));
     if (found.length !== 1 || found[0].disabled || found[0].getAttribute('aria-disabled') === 'true') {
       throw new Error('생성 버튼을 확정할 수 없습니다.');
     }
     return found[0];
   }
   function expectedCount() {
-    const group = all('main [role="group"]').find(element => groupName(element).trim() === '이미지 수');
+    const group = all('main [role="group"]').find(element => ['이미지 수','Number of images'].includes(groupName(element).trim()));
     const radio = group?.querySelector('[role="radio"][aria-checked="true"], input[type="radio"]:checked');
     const text = radio?.getAttribute('aria-label') || radio?.textContent;
     if (/x4|×4/.test(text || '')) return 4;
@@ -1775,12 +1777,14 @@ function mountPresetEditor(parent, io) {
     throw new Error('이미지 수 선택을 확인할 수 없습니다. 한국어 새 에디터에서 실행해 주세요.');
   }
   async function ensureDestination() {
-    if (!storage.supported) throw new Error(storage.message);
-    if (storage.mode === 'download') {
-      if (!downloadsReady) throw new Error('먼저 자동 다운로드 준비 확인을 완료해 주세요.');
+    let reason='';
+    if (!storage.supported) reason=storage.message;
+    else if (storage.mode === 'download') {
+      if (!downloadsReady) reason='먼저 설정 탭의 자동 다운로드 준비 확인을 완료해 주세요.';
     } else if (!folder || await folder.queryPermission({mode:'readwrite'}) !== 'granted') {
-      throw new Error('저장 폴더를 다시 선택하고 쓰기 권한을 허용해 주세요.');
+      reason='설정 탭의 저장 폴더 선택을 눌러 쓰기 권한을 허용해 주세요. 새로고침한 뒤에는 다시 선택해야 합니다.';
     }
+    if (reason) throw Object.assign(new Error(reason),{requiresStorageSetup:true});
   }
   async function prepare(job) {
     if (stopRequested) throw new Error('다음 작업 제출이 중지됐습니다.');
@@ -1916,7 +1920,8 @@ function mountPresetEditor(parent, io) {
     if (running || starting) return;
     if (settingsBusy) throw new Error('모델·LoRA 설정 확인이 끝난 뒤 시작해 주세요.');
     if (choosingFolder) throw new Error(storage.mode === 'download' ? '확인 파일 다운로드가 끝난 뒤 시작해 주세요.' : '폴더 선택창을 먼저 닫거나 선택을 완료해 주세요.');
-    starting=true; stopRequested=false; render();
+    starting=true; stopRequested=false; message='시작 준비: 저장 위치 확인 중…';render();
+    let showStorage=false;
     try {
     await ensureDestination();
     if (stopRequested) throw new Error('시작 준비가 중지됐습니다. 이미지를 생성하지 않았습니다.');
@@ -1927,8 +1932,12 @@ function mountPresetEditor(parent, io) {
       if (storage.mode === 'folder' && jobs.some(job => job.saved?.length && !['done','skipped'].includes(job.state) && job.folderToken !== folderToken)) {
         throw new Error('부분 저장 작업의 폴더를 다시 선택해 확인해 주세요.');
       }
-      initialModel = modelId();
-      if (!initialModel) throw new Error('선택된 모델을 확인하지 못했습니다.');
+      if (jobs.some(job=>!job.configuration && job.state==='queued')) {
+        message='시작 준비: 사이트의 현재 모델 확인 중…';render();
+        await settings.revealModelPanel();
+        initialModel = modelId();
+        if (!initialModel) throw new Error('선택된 모델을 확인하지 못했습니다.');
+      }
       if (jobs.some(job=>job.configuration && job.state==='queued') && jobs.some(job=>!job.configuration && job.state==='queued')) {
         const baseline=await settings.capture(), negative=await settings.captureNegative();
         for (const job of jobs.filter(item=>!item.configuration && item.state==='queued')) Object.assign(job, {
@@ -1950,7 +1959,13 @@ function mountPresetEditor(parent, io) {
         message = stopRequested ? '중지됨. 완료된 파일은 보존했습니다.' : '대기열 작업과 저장이 끝났습니다.';
       } finally { running = false; render(); }
     });
-    } finally {starting=false;render();}
+    } catch(error) {
+      if (error.requiresStorageSetup) {
+        showStorage=true;
+        presetEditor?.showPage('settings',true);
+      }
+      throw error;
+    } finally {starting=false;render();if (showStorage) panel?.querySelector('[data-choose-folder]')?.focus({preventScroll:true});}
   }
   function node(tag, text, attrs = {}) {
     const element = document.createElement(tag);
@@ -2021,7 +2036,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.7.0 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.7.1 후보', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2384,7 +2399,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.7.0', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.7.1', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

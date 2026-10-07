@@ -94,6 +94,28 @@ test('approved cost is accepted; larger, unreadable or zero prices stop before c
   assert.throws(()=>checkCost('생성!0Ctrl+',7800));
 });
 
+test('English Generate price is parsed only with a complete amount and still enforces the credit ceiling',()=>{
+  assert.equal(checkCost('SubmittingGenerate3,200Ctrl+⏎Task submitted',7800),3200);
+  assert.throws(()=>checkCost('Generate8,000Ctrl+⏎Task submitted',7800),/상한/);
+  for(const text of ['GenerateCtrl+','Generate0Ctrl+','Generate3.2Ctrl+','Generate3,200 credits 4,000Ctrl+'])assert.throws(()=>checkCost(text,7800),/비용/);
+});
+
+test('production generation controls recognize both site languages and reject ambiguous or disabled submit buttons',()=>{
+  const source=fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8');
+  const begin=source.indexOf('  function generateButton() {'),end=source.indexOf('  async function ensureDestination()',begin);
+  for(const english of [false,true]) {
+    let buttons=[{textContent:english?'SubmittingGenerate3,200Ctrl+⏎Task submitted':'생성!3,200Ctrl+⏎작업 제출',getAttribute:()=>null}];
+    let choice=english?'Single':'단일';
+    const radio={getAttribute:()=>null,get textContent(){return choice;}},group={querySelector:()=>radio};
+    const context={visible:()=>true,groupName:()=>english?'Number of images':'이미지 수',all:selector=>selector.includes('button')?buttons:[group]};
+    vm.runInNewContext(`${source.slice(begin,end)};this.button=generateButton;this.count=expectedCount;`,context);
+    assert.equal(context.button(),buttons[0]);assert.equal(context.count(),1);choice='Batch (x4)';assert.equal(context.count(),4);
+    buttons[0].disabled=true;assert.throws(()=>context.button(),/생성 버튼/);buttons[0].disabled=false;
+    buttons=[...buttons,{...buttons[0]}];assert.throws(()=>context.button(),/생성 버튼/);
+    choice='unknown';assert.throws(()=>context.count(),/이미지 수/);
+  }
+});
+
 function dragFixture(saved=null) {
   const listeners={}, captured=new Set(), writes=[];
   let viewport={width:1000,height:800}, width=340, height=450, resized;
@@ -577,6 +599,8 @@ test('Start explains missing Chrome directory before touching generation control
   const f=panelFixture(()=>Promise.reject(new Error('Not invoked')));
   f.press(f.panel.querySelector('[data-start]'));await new Promise(resolve=>setImmediate(resolve));
   assert.match(f.message(),/저장 폴더/);assert.equal(f.siteQueries.length,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+  assert.equal(f.panel.querySelector('[data-page="settings"]').hidden,false);
+  assert.equal(f.document.activeElement,f.panel.querySelector('[data-choose-folder]'));
 });
 
 test('Start explains revoked folder permission and never queries or clicks site controls',async()=>{
@@ -970,7 +994,7 @@ function fixture(options={}) {
   let opened=null;
   function close(){opened?.remove();opened=null;}
   function openModel() {
-    opened=new Element('div',{role:'dialog'});doc.append(opened);opened.append(button('',{'aria-label':'닫기'},close));
+    opened=new Element('div',{role:'dialog'});doc.append(opened);opened.append(button('',{'aria-label':options.english?'Close':'닫기'},close));
     if(options.noCards)return;
     opened.append(new Input({type:'search'}));
     for(const model of catalogs.models) {
@@ -981,7 +1005,7 @@ function fixture(options={}) {
         const selected=new Select(model.defaultVersion||model.versionId);
         for(const version of model.versions||[]) {const option=new Element('option');option.value=version;selected.append(option);}
         if(model.versions?.length)opened.append(selected);
-        opened.append(button(model.name),button('이 모델 사용',{},()=>{
+        opened.append(button(model.name),button(options.english?'Use this model':'이 모델 사용',{},()=>{
           state.model={id:model.id,versionId:model.versions?.length?selected.value:model.defaultVersion||model.versionId,name:model.name};
           refreshModel();close();
         }));
@@ -990,7 +1014,7 @@ function fixture(options={}) {
     }
   }
   function openLora() {
-    opened=new Element('div',{role:'dialog'});doc.append(opened);opened.append(button('',{'aria-label':'닫기'},close),new Input({type:'search'}));
+    opened=new Element('div',{role:'dialog'});doc.append(opened);opened.append(button('',{'aria-label':options.english?'Close':'닫기'},close),new Input({type:'search'}));
     let pending=null;
     for(const lora of catalogs.loras) {
       const label=new Element('label',{title:lora.name}),checkbox=new Input({type:'checkbox'});
@@ -998,20 +1022,20 @@ function fixture(options={}) {
       checkbox.onClick=()=>{state.clicks.push(`checkbox:${lora.id}`);pending=lora;opened.append(new Element('span',{id:`weight-slider-${lora.id}`}));};
       opened.append(label);
     }
-    opened.append(button('확인',{},()=>{if(pending)state.loras.push({...pending});renderRows();close();}));
+    opened.append(button(options.english?'Confirm':'확인',{},()=>{if(pending)state.loras.push({...pending});renderRows();close();}));
   }
   const tab=button(options.english?'Model':'모델',{role:'tab','aria-selected':options.modelTabHidden?'false':'true'},()=>{tab.setAttribute('aria-selected','true');allModel.hidden=false;allLora.hidden=false;modelCard.hidden=false;rows.hidden=false;});
-  const allModel=button('전체 모델 보기',{},openModel),allLora=button('전체 LoRA 보기',{},openLora);
+  const allModel=button(options.english?'See All Models':'전체 모델 보기',{},openModel),allLora=button(options.english?'See All LoRAs':'전체 LoRA 보기',{},openLora);
   allModel.hidden=!!options.modelTabHidden||!!options.noModelButton;allLora.hidden=!!options.modelTabHidden;
   modelCard.hidden=rows.hidden=!!options.modelTabHidden;
   modelSection.append(allModel);stylesSection.append(allLora);
   main.append(tab,modelSection,stylesSection,settingsSection,button('생성! 7,800',{},()=>{state.paidClicks++;}));
   refreshModel();renderRows();
   let negative=null;
-  const attachNegative=()=>{if(!negative){negative=new Textarea({placeholder:'여기에 네거티브 프롬프트를 입력하세요'},options.negativeValue||'');settingsSection.append(negative);}};
+  const attachNegative=()=>{if(!negative){negative=new Textarea({placeholder:options.english?'Enter negative prompt here':'여기에 네거티브 프롬프트를 입력하세요'},options.negativeValue||'');settingsSection.append(negative);}};
   if(options.negativeVisible)attachNegative();
   if(options.negativeAdvanced) {
-    const advanced=button('고급',{'aria-expanded':'false'},()=>{advanced.setAttribute('aria-expanded','true');attachNegative();});settingsSection.append(advanced);
+    const advanced=button(options.english?'Advanced':'고급',{'aria-expanded':'false'},()=>{advanced.setAttribute('aria-expanded','true');attachNegative();});settingsSection.append(advanced);
   }
   if(options.openDialog){opened=new Element('div',{role:'dialog'});doc.append(opened);}
   const io={win,check(){state.checks++;if(options.cancelled)throw new Error('중단됨');},mutate(action){state.mutations++;return action();},sleep:async()=>{}};
@@ -1122,6 +1146,20 @@ test('apply changes model version, removes extra LoRA, adds target, and sets zer
   assert.equal(f.doc.querySelector('[role="dialog"]'),null);
   assert.deepEqual(f.rows.querySelector('input').events,['input','change']);
 });
+
+test('English site controls apply exact model/LoRA settings and negatives without submitting',async()=>{
+  const f=fixture({english:true,modelTabHidden:true,negativeAdvanced:true,state:{loras:[{id:'10',versionId:'101',name:'Old LoRA',weight:0.7}]}});
+  const expected=configuration({id:'2',versionId:'22',name:'대상 모델'},[{id:'20',versionId:'201',name:'대상 LoRA',weight:0}]);
+  assert.deepEqual(plain(await f.adapter.apply(expected)),expected);
+  await f.adapter.setNegative('lowres');f.adapter.verifyNegative('lowres');
+  assert.deepEqual(f.state.clicks,['Model','See All Models','radio:2','Use this model','Remove','See All LoRAs','checkbox:20','Confirm','Advanced']);
+  assert.equal(f.negative().value,'lowres');assert.equal(f.state.paidClicks,0);
+});
+
+test('English popup failure closes only its settings dialog and never generates',async()=>{
+  const f=fixture({english:true,noCards:true});await assert.rejects(f.adapter.apply(configuration({id:'2',versionId:'22',name:'missing'})),/검색창/);
+  assert.deepEqual(f.state.clicks,['See All Models','Close']);assert.equal(f.doc.querySelector('[role="dialog"]'),null);assert.equal(f.state.paidClicks,0);
+});
 test('exact-version selection failure stops after settings changes without submission',async()=>{
   const f=fixture({models:[{id:'2',versionId:'22',defaultVersion:'21',name:'대상 모델'}]});
   await assert.rejects(f.adapter.apply(configuration({id:'2',versionId:'22',name:'대상 모델'})),/저장한 버전/);
@@ -1198,7 +1236,7 @@ function startFixture(options = {}) {
   const begin = source.indexOf('  async function start() {');
   const end = source.indexOf('  function node(',begin);
   assert(begin >= 0 && end > begin,'Production start() boundaries must remain identifiable');
-  const facts = {process:[],capture:0,captureNegative:0,destination:0,persists:[],locks:0,renders:0,siteCalls:0,paidCalls:0};
+  const facts = {process:[],capture:0,captureNegative:0,destination:0,reveal:0,modelReads:0,persists:[],locks:0,renders:0,siteCalls:0,paidCalls:0};
   let stored = copy(options.jobs || mixedJobs());
   const context = {facts,options,copy,
     loadStored:() => copy(stored),saveStored:value => {stored=copy(value);},
@@ -1209,13 +1247,14 @@ function startFixture(options = {}) {
     let jobs=loadStored(),currentModel='/ko/model/11/111';
     const storage={mode:'folder'},folderToken='fixture-folder';
     const io={};
-    const onGenerator=()=>true,modelId=()=>currentModel;
+    const onGenerator=()=>true,modelId=()=>{facts.modelReads++;if(options.hiddenModel&&!facts.reveal)throw new Error('현재 모델 버전 확인 실패');return currentModel;};
     const render=()=>{facts.renders++;};
     const persist=()=>{if(options.persistFailure)throw new Error('mock storage failure');facts.persists.push(copy(jobs));saveStored(jobs);};
     const resetDownloadProgress=()=>{throw new Error('Unexpected download mode');};
     const ensureDestination=async()=>{facts.destination++;if(options.destination)await options.destination(facts.destination);};
     const locked=async action=>{facts.locks++;jobs=loadStored();return action();};
     const settings={
+      revealModelPanel:async()=>{facts.reveal++;if(options.reveal)await options.reveal();},
       capture:async()=>{facts.capture++;return options.capture ? options.capture() : copy(baseline);},
       captureNegative:async()=>{facts.captureNegative++;return options.captureNegative ? options.captureNegative() : 'original negative';}
     };
@@ -1285,10 +1324,22 @@ test('a second Start while destination permission is pending cannot enter the ru
   assert.deepEqual(f.facts.process.map(job=>job.id),['preset','legacy']);assert.equal(f.facts.locks,1);
 });
 
-test('a legacy-only queue keeps its original simple path without reading preset settings',async () => {
-  const f=startFixture({jobs:[{id:'legacy',state:'queued',prompt:'legacy prompt',saved:[]}]});await f.run();
+test('a legacy-only queue reveals its model card before reading the current version, without capturing preset settings',async () => {
+  const f=startFixture({hiddenModel:true,jobs:[{id:'legacy',state:'queued',prompt:'legacy prompt',saved:[]}]});await f.run();
   assert.equal(f.facts.capture,0);assert.equal(f.facts.captureNegative,0);assert.equal(f.facts.process.length,1);
-  assert.equal(f.facts.process[0].configuration,undefined);assert.equal(f.state().starting,false);
+  assert.equal(f.facts.process[0].configuration,undefined);assert.equal(f.state().starting,false);assert.equal(f.facts.reveal,1);assert.equal(f.facts.modelReads,1);
+});
+
+test('a preset-only queue starts without reading a hidden current model; its saved configuration reaches the runner',async()=>{
+  const f=startFixture({hiddenModel:true,jobs:[mixedJobs()[0]]});await f.run();
+  assert.equal(f.facts.modelReads,0);assert.equal(f.facts.reveal,0);assert.equal(f.facts.capture,0);
+  assert.deepEqual(f.facts.process[0].configuration,selectedPreset);assert.equal(f.state().running,false);assert.equal(f.state().starting,false);
+});
+
+test('Stop while revealing a legacy model prevents processing and releases start flags',async()=>{
+  const waiting=deferred(),f=startFixture({reveal:()=>waiting.promise});
+  const pending=f.run();await tick();f.stop();waiting.resolve();await pending.catch(error=>assert.match(error.message,/중지|취소/));
+  assert.equal(f.facts.process.length,0);assert.equal(f.state().running,false);assert.equal(f.state().starting,false);
 });
 
 test('mixed baseline persistence failure stops before processing and releases both start flags',async () => {
