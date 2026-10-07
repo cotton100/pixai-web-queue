@@ -5,6 +5,76 @@ const assert=require('node:assert/strict');
 const path=require('node:path');
 const core=require(path.join(__dirname,'pixai-web-queue.user.js'));
 const copy=value=>JSON.parse(JSON.stringify(value));
+test('pointer recipe drag cancels safely and changes only composition order on a trusted release',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.choose('행동');const row=()=>f.ui.root.querySelectorAll('[data-recipe-chunk]').find(item=>item.dataset.recipeChunk==='s1');
+  document.elementFromPoint=()=>({closest:()=>row()});const event={button:0,isPrimary:true,pointerId:1,clientX:10,clientY:180};
+  let handle=f.field('조합 청크 이동: 행동');await handle.emit('pointerdown',event);await handle.emit('pointermove',{...event,clientY:104});await handle.emit('pointercancel',event);await handle.emit('pointerup',{...event,clientY:104});assert.match(f.preview(),/smiling, waving/);
+  await handle.emit('pointerdown',event);await handle.emit('pointermove',{...event,clientY:104});await handle.emit('pointerup',{...event,pointerId:2,clientY:104});assert.match(f.preview(),/smiling, waving/);await handle.emit('pointerup',{...event,clientY:104});assert.match(f.preview(),/waving, smiling/);
+  handle=f.field('조합 청크 이동: 표정');await handle.emit('pointerdown',{...event,isTrusted:false});await handle.emit('pointermove',{...event,clientY:104});await handle.emit('pointerup',{...event,clientY:104});assert.match(f.preview(),/waving, smiling/);
+  assert.equal(f.saves.length,0);assert.deepEqual(f.library().scenes.map(item=>item.id),['s1','s2']);
+});
+test('combination records survive a fresh mount, rename and settings backup, and load without queue submission',async t=>{
+  const f=fixture(t);await f.choose('행동');await f.choose('표정');f.field('이 조합의 생성 횟수').value='3';await f.press('이 조합 예약 추가');
+  const id=f.library().combinations[0].id;await f.press(`조합 즐겨찾기: ${id}`);f.field(`즐겨찾기 이름: ${id}`).value='Asset set';await f.press(`즐겨찾기 이름 저장: ${id}`);
+  const data=core.makeSettingsBackup(f.library(),{maxCredits:7800,filePrefix:'test',repeat:1},{appVersion:'0.8.0',exportedAt:'2026-10-07T00:00:00.000Z'});
+  const restored=core.parseSettingsBackup(JSON.stringify(data));assert.deepEqual(restored.library,f.library());
+  const fresh=fixture(t,restored.library);await fresh.press(`조합 불러오기: ${id}`);assert.equal(fresh.field('이 조합의 생성 횟수').value,'3');assert.match(fresh.preview(),/waving, smiling/);
+  assert.equal(fresh.library().combinations[0].name,'Asset set');assert.equal(fresh.library().combinations[0].favorite,true);assert.equal(fresh.saves.length,0);assert.equal(fresh.jobs.length,0);
+});
+
+test('missing history materials clear unrelated preset/character selections and block reservation until explicitly repaired',async t=>{
+  const initial=seed();initial.combinations=[{id:'old',presetId:'gone-preset',characterId:'gone-character',sceneIds:['s2','gone-chunk'],count:2,favorite:true,name:'old',at:1}];
+  const f=fixture(t,initial);await f.press('조합 불러오기: old');assert.equal(f.field('예약 프리셋').value,'');assert.equal(f.field('예약 캐릭터').value,'');assert.match(f.preview(),/waving/);assert.equal(f.button('이 조합 예약 추가').disabled,true);
+  await f.press('이 조합 예약 추가');assert.equal(f.library().reservations.length,0);assert.equal(f.jobs.length,0);
+  await f.select('예약 프리셋','p1');await f.select('예약 캐릭터','c1');assert.equal(f.button('이 조합 예약 추가').disabled,true);
+  await f.press('누락 재료 제외하고 계속');assert.equal(f.button('이 조합 예약 추가').disabled,false);await f.press('이 조합 예약 추가');assert.deepEqual(f.library().reservations[0].sceneIds,['s2']);
+});
+
+test('saving another record after loading missing identities never silently selects the first available material',async t=>{
+  const initial=seed();initial.combinations=[{id:'old',presetId:'gone',characterId:'gone',sceneIds:[],count:1,favorite:false,name:'',at:1}];const f=fixture(t,initial);
+  await f.press('조합 불러오기: old');await f.press('조합 즐겨찾기: old');assert.equal(f.field('예약 프리셋').value,'');assert.equal(f.field('예약 캐릭터').value,'');assert.equal(f.button('이 조합 예약 추가').disabled,true);
+  await f.press('누락 재료 제외하고 계속');assert.equal(f.button('이 조합 예약 추가').disabled,true);
+});
+
+test('reservation and recent record commit atomically when storage is full',async t=>{
+  const f=fixture(t);await f.choose('표정');const before=f.library();f.setSaveFailure('Quota exceeded');await f.press('이 조합 예약 추가');
+  assert.deepEqual(f.library(),before);assert.equal(f.saves.length,0);assert.match(f.messages.at(-1),/Quota/);assert.equal(f.field('청크 선택: 표정').checked,true);
+  f.setSaveFailure(null);await f.press('이 조합 예약 추가');assert.equal(f.library().reservations.length,1);assert.equal(f.library().combinations.length,1);
+});
+
+test('frozen reservations retain prompts and model evidence after library edits and deletion',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.press('이 조합 예약 추가');const snapshot=copy(f.library().reservations[0].snapshot);
+  const edited=f.library();edited.common.prompt='new common';edited.presets[0].model.versionId='999';edited.presets[0].loras[0].weight=-0.8;edited.characters=[];edited.scenes=[];edited.presets=[];f.setLibrary(edited);f.ui.refresh();
+  await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,1);assert.match(f.jobs[0].prompt,/quality.*smiling/);assert.equal(f.jobs[0].configuration.model.versionId,'201');assert.equal(f.jobs[0].configuration.loras[0].weight,0.7);
+  assert.deepEqual(f.jobs[0].composition.common,snapshot.common);assert.deepEqual(f.jobs[0].composition.preset,snapshot.preset);assert.deepEqual(f.jobs[0].composition.character,snapshot.character);assert.deepEqual(f.jobs[0].composition.chunks,snapshot.chunks);
+});
+
+test('manual combination order updates numbering and previews without altering library order or old reservations',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');const old=f.library().reservations[0];
+  await f.press('조합 행동 위로');assert.match(f.preview(),/waving, smiling/);assert.equal(f.ui.root.querySelectorAll('[data-selection-id]').find(item=>item.dataset.selectionId==='s2').textContent,'1');
+  assert.deepEqual(f.library().scenes.map(item=>item.id),['s1','s2']);assert.deepEqual(f.library().reservations[0],old);
+  await f.press('이 조합 예약 추가');assert.deepEqual(f.library().reservations[1].sceneIds,['s2','s1']);await f.press('조합에서 제외: 행동');assert.equal(f.field('청크 선택: 행동').checked,false);assert.match(f.preview(),/smiling/);assert(!f.preview().includes('waving'));
+});
+
+test('combination drag accepts only its own trusted payload, retains snapshots and stops while generation is busy',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');const saved=f.library();
+  const row=()=>f.ui.root.querySelectorAll('[data-recipe-chunk]').find(item=>item.dataset.recipeChunk==='s1');let data=transfer();
+  await f.field('조합 청크 이동: 행동').emit('dragstart',{dataTransfer:data});await row().emit('drop',{dataTransfer:transfer(),clientY:104});assert.match(f.preview(),/smiling, waving/);
+  await f.field('조합 청크 이동: 행동').emit('dragend');data=transfer();await f.field('조합 청크 이동: 행동').emit('dragstart',{dataTransfer:data});f.setBusy(true);await row().emit('drop',{dataTransfer:data,clientY:104});assert.match(f.preview(),/smiling, waving/);
+  f.setBusy(false);await f.field('조합 청크 이동: 행동').emit('dragend');data=transfer();await f.field('조합 청크 이동: 행동').emit('dragstart',{dataTransfer:data});await row().emit('drop',{dataTransfer:data,clientY:104});assert.match(f.preview(),/waving, smiling/);assert.deepEqual(f.library(),saved);
+});
+
+test('inline chunk and preset editors close and reopen without duplicating fields or erasing unsaved drafts',async t=>{
+  const f=fixture(t);await f.press('청크 편집: 표정');f.field('청크 프롬프트').value='draft';await f.press('청크 편집 닫기');await f.press('청크 편집: 표정');
+  const editor=f.field('청크 프롬프트').parentElement.parentElement;assert.equal(editor.parentElement.dataset.chunkId,'s1');assert.equal(f.field('청크 프롬프트').value,'draft');assert.equal(f.fields('청크 프롬프트').length,1);
+  await f.press('프리셋 편집: Asset');f.field('프리셋 이름').value='Draft title';await f.field('프리셋 이름').emit('input');assert.match(f.field('프리셋 편집: Asset').textContent,/Draft title/);
+  await f.press('프리셋 편집 닫기');await f.press('프리셋 편집: Asset');assert.equal(f.field('프리셋 이름').value,'Draft title');assert.equal(f.fields('LoRA 트리거 키워드').length,1);assert.equal(f.saves.length,0);
+});
+
+test('library keyboard navigation follows displayed subtab order and retains the chosen subtab when leaving library',async t=>{
+  const f=fixture(t),tabs=f.field('라이브러리 종류').children;f.ui.showPage('chunks');await tabs[0].emit('keydown',{key:'ArrowLeft'});assert.equal(document.activeElement,tabs[3]);assert.equal(tabs[3].getAttribute('aria-selected'),'true');
+  f.ui.showPage('compose');f.ui.showPage('library');assert.equal(tabs[3].getAttribute('aria-selected'),'true');assert.equal(f.all().find(item=>item.dataset.page==='common').hidden,false);
+});
 class Element {
   constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.attrs={};this.dataset={};this.listeners={};this.parentElement=null;this.style={};this.disabled=false;this.readOnly=false;this.checked=false;this._value='';this._text='';}
   set textContent(value){this._text=String(value??'');this.replaceChildren();}
@@ -121,7 +191,7 @@ test('native chunk drag reorders rows and updates future composition without era
   const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');
   await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved smiling';
   await dragChunk(f,'행동',managedRow(f,'s1'));
-  assert.deepEqual(f.library().scenes.map(item=>item.id),['s2','s1']);assert.match(f.preview(),/waving, smiling/);
+  assert.deepEqual(f.library().scenes.map(item=>item.id),['s2','s1']);assert.match(f.preview(),/smiling, waving/);
   assert.deepEqual(f.library().reservations[0].sceneIds,['s1','s2']);assert.equal(f.field('청크 프롬프트').value,'unsaved smiling');
   assert.equal(f.field('청크 선택: 행동').checked,true);assert.equal(document.activeElement,f.field('청크 이동: 행동'));
 });
@@ -171,8 +241,8 @@ test('bulk copies select new identities and retain generation selection; deletio
   assert.equal(f.field('청크 관리 선택: 표정').checked,false);assert.equal(f.field('청크 관리 선택: 표정 (복사본)').checked,true);assert.equal(f.field('청크 관리 선택: 행동 (복사본)').checked,true);
   await f.press('선택 삭제');assert.equal(f.library().scenes.length,2);assert.deepEqual(f.library().reservations[0].sceneIds,['s1']);
   await f.select('저장한 청크','s1');await manage(f,'표정');await f.press('선택 삭제');assert.equal(f.field('청크 이름').value,'');assert.equal(f.fields('청크 선택: 표정').length,0);
-  assert(f.all().some(element=>element.className==='pq-reservation'&&element.textContent.includes('(삭제된 청크)')));
-  await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,0);
+  assert(f.all().some(element=>element.className==='pq-reservation'&&element.textContent.includes('추가 시점의 설정 보관')));
+  await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,1);assert.match(f.jobs[0].prompt,/smiling/);
 });
 
 test('bulk storage failure and import refresh never discard originals or retain old management checks',async t=>{
@@ -184,7 +254,7 @@ test('bulk storage failure and import refresh never discard originals or retain 
 
 test('workbench tabs keep one visible screen and retain every unsaved draft and checked chunk',async t=>{
   const f=fixture(t),tabs=f.all().filter(item=>item.getAttribute('role')==='tab');
-  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','청크','캐릭터','모델·LoRA','공통문']);
+  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','라이브러리','청크','캐릭터','모델·LoRA','공통문']);
   assert.equal(tabs[0].getAttribute('aria-selected'),'true');
   await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved chunk';
   await f.select('저장한 캐릭터','c1');f.field('캐릭터 프롬프트').value='unsaved character';
@@ -192,7 +262,7 @@ test('workbench tabs keep one visible screen and retain every unsaved draft and 
   f.field('공통 프롬프트').value='unsaved common';await f.choose('행동');
   for (const tab of tabs) {
     await tab.emit('click');
-    assert.equal(f.all().filter(item=>item.getAttribute('role')==='tabpanel'&&!item.hidden).length,1);
+    assert.equal(f.all().filter(item=>item.getAttribute('role')==='tabpanel'&&item.dataset.page!=='library'&&!item.hidden).length,1);
     assert.equal(tab.getAttribute('aria-selected'),'true');assert.equal(tab.getAttribute('tabindex'),'0');
     const page=f.all().find(item=>item.id===tab.getAttribute('aria-controls'));
     assert(page);assert.equal(page.getAttribute('aria-labelledby'),tab.id);assert.equal(page.hidden,false);
@@ -204,7 +274,8 @@ test('workbench tabs keep one visible screen and retain every unsaved draft and 
 
 test('tab arrows wrap, Home and End move focus, and view navigation remains available during generation',async t=>{
   const f=fixture(t);f.ui.addPage('queue','대기열');f.ui.addPage('settings','설정');f.setBusy(true);
-  const tabs=f.all().filter(item=>item.getAttribute('role')==='tab');
+  const tabs=f.field('PixAI 작업 화면').children;
+  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','라이브러리','대기열','설정']);
   await tabs[0].emit('keydown',{key:'ArrowLeft'});assert.equal(document.activeElement,tabs.at(-1));
   assert.equal(tabs.at(-1).getAttribute('aria-selected'),'true');assert.equal(tabs.at(-1).disabled,false);
   await tabs.at(-1).emit('keydown',{key:'ArrowRight'});assert.equal(document.activeElement,tabs[0]);
@@ -235,7 +306,7 @@ test('saved character cards load the selected content and search preserves the d
 });
 
 test('saved preset cards expose model summaries, load triggers, and highlight a newly saved preset',async t=>{
-  const f=fixture(t);assert.match(f.field('프리셋 편집: Asset').textContent,/Model · LoRA 1개/);
+  const f=fixture(t);assert.match(f.field('프리셋 편집: Asset').textContent,/Model · 버전 201 · LoRA 0.7/);
   await f.field('프리셋 편집: Asset').press();assert.equal(f.field('LoRA 트리거 키워드').value,'trigger one, trigger two');
   await f.press('새 프리셋');f.field('프리셋 이름').value='New';f.field('모델 ID').value='101';f.field('모델 버전 ID').value='201';
   await f.press('프리셋 저장');assert.equal(f.field('프리셋 편집: New').getAttribute('aria-pressed'),'true');
@@ -282,15 +353,15 @@ test('capture fills blank triggers automatically, preserves manual text, and rep
   assert.equal(f.field('LoRA 가중치').value,'0.8');assert.match(f.messages.at(-1),/트리거 자동 읽기 실패: LoRA/);
 });
 
-test('checkbox reservations compose common, LoRA triggers, character and chunks in saved-list order regardless of click order',async t=>{
+test('checkbox reservations compose common, LoRA triggers, character and chunks in selection order',async t=>{
   const f=fixture(t);await f.choose('행동');await f.choose('표정');
-  assert.match(f.preview(),/quality, trigger one, trigger two, character tags, smiling, waving/);
-  assert.match(f.preview(),/common bad, character bad, sad, standing still/);
+  assert.match(f.preview(),/quality, trigger one, trigger two, character tags, waving, smiling/);
+  assert.match(f.preview(),/common bad, character bad, standing still, sad/);
   f.field('이 조합의 생성 횟수').value='2';await f.press('이 조합 예약 추가');
-  assert.deepEqual(f.library().reservations[0].sceneIds,['s1','s2']);assert.equal(f.library().reservations[0].sceneId,undefined);
+  assert.deepEqual(f.library().reservations[0].sceneIds,['s2','s1']);assert.equal(f.library().reservations[0].sceneId,undefined);
   await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,2);
-  assert.equal(f.jobs[0].prompt,'quality, trigger one, trigger two, character tags, smiling, waving');
-  assert.equal(f.jobs[0].negativePrompt,'common bad, character bad, sad, standing still');
+  assert.equal(f.jobs[0].prompt,'quality, trigger one, trigger two, character tags, waving, smiling');
+  assert.equal(f.jobs[0].negativePrompt,'common bad, character bad, standing still, sad');
 });
 
 test('zero chunks is a valid reservation and checkbox changes immediately update both positive and negative previews',async t=>{
@@ -312,8 +383,9 @@ test('common save and library refresh preserve selected chunks; deleting a selec
   assert.equal(f.fields('청크 선택: 행동').length,0);assert.equal(f.field('청크 선택: 표정').checked,false);
   assert(!f.preview().includes('waving'));assert.deepEqual(f.library().reservations[0].sceneIds,['s2']);
   const reservationRow=f.all().find(element=>element.className.split(/\s+/).includes('pq-reservation'));
-  assert(reservationRow,'The saved reservation must remain visible');assert.match(reservationRow.textContent,/삭제된 청크|삭제된.*청크|청크.*없/);
-  await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,0);assert.match(f.messages.at(-1),/청크|씬/);
+  assert(reservationRow,'The saved reservation must remain visible');assert.match(reservationRow.textContent,/추가 시점의 설정 보관/);
+  assert.equal(f.button('이 조합 예약 추가').disabled,true);
+  await f.press('예약 전부를 대기열에 등록');assert.equal(f.jobs.length,1);assert.match(f.jobs[0].prompt,/quality.*waving/);
 });
 
 test('legacy sceneId reservations normalize to a one-element sceneIds array and remain usable through the real editor',async t=>{
@@ -421,7 +493,7 @@ test('picker filtering and folding retain hidden selections; select-all adds onl
   await f.press('보이는 청크 모두 선택');assert.equal(f.field('청크 선택: 장소').checked,true);assert.equal(f.field('청크 선택: 웃음').checked,false);
   assert.equal(f.field('청크 선택: 표정').checked,true);assert.match(f.field('선택한 청크 요약').textContent,/목록 밖에 선택 1개/);
   await f.select('예약 청크 폴더 필터','folder:f2');await f.press('이 조합 예약 추가');
-  assert.deepEqual(f.library().reservations[0].sceneIds,['u1','s1','s2']);
+  assert.deepEqual(f.library().reservations[0].sceneIds,['s1','s2','u1']);
   assert.equal(f.field('예약 청크 폴더 필터').value,'folder:f2');
   await f.press('청크 선택 전부 해제');assert.match(f.field('선택한 청크 요약').textContent,/선택한 청크 없음/);assert(!f.preview().includes('smiling'));
   await f.select('예약 청크 폴더 필터','');assert.equal(f.field('청크 선택: 표정').checked,false);assert.equal(pickerGroup(f,'f1').open,false);
@@ -429,15 +501,15 @@ test('picker filtering and folding retain hidden selections; select-all adds onl
 
 test('folder and chunk sorting change new combination order while preserving existing reservation snapshots and editor drafts',async t=>{
   const f=fixture(t,folderSeed());await f.choose('행동');await f.choose('표정');await f.choose('장소');await f.press('이 조합 예약 추가');
-  const first=f.library().reservations[0];assert.deepEqual(first.sceneIds,['u1','s1','s2']);
+  const first=f.library().reservations[0];assert.deepEqual(first.sceneIds,['s2','s1','u1']);
   await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='keep draft';
   await f.select('관리할 청크 폴더','f2');await f.field('선택 폴더 위로').press();
-  assert.deepEqual(f.library().chunkFolders.map(item=>item.id),['f2','f1']);assert.match(f.preview(),/in a room, waving, smiling/);
+  assert.deepEqual(f.library().chunkFolders.map(item=>item.id),['f2','f1']);assert.match(f.preview(),/waving, smiling, in a room/);
   assert.deepEqual(f.library().reservations[0],first);assert.equal(f.field('청크 프롬프트').value,'keep draft');
   await f.field('청크 표정 아래로').press();assert.deepEqual(core.orderedChunks(f.library()).map(item=>item.id),['u1','s2','s3','s1']);
   assert.equal(f.field('청크 표정 아래로').disabled,true);assert.equal(globalThis.document.activeElement,f.field('청크 표정 위로'));
   assert.equal(f.field('청크 선택: 표정').checked,true);assert.equal(f.field('청크 프롬프트').value,'keep draft');
-  await f.press('이 조합 예약 추가');const second=f.library().reservations[1];assert.deepEqual(second.sceneIds,['u1','s2','s1']);
+  await f.press('이 조합 예약 추가');const second=f.library().reservations[1];assert.deepEqual(second.sceneIds,['s2','s1','u1']);
   const rows=f.all().filter(item=>item.className.split(/\s+/).includes('pq-reservation'));
   await rows[1].querySelectorAll('[data-order-key]').find(item=>item.dataset.direction==='-1').press();
   assert.deepEqual(f.library().reservations.map(item=>item.id),[second.id,first.id]);assert.deepEqual(f.library().reservations[1],first);

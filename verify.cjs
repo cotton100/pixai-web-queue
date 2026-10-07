@@ -215,7 +215,7 @@ test('release metadata preserves install identity and pins both update URLs to t
   assert.match(header,/^\/\/ @grant\s+GM_download$/m);assert.match(header,/^\/\/ @grant\s+GM_info$/m);
   assert.equal(field('sandbox'),'DOM');
   const version=JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'package.json'),'utf8')).version;
-  assert.equal(field('version'),version);assert.ok(source.includes(`PixAI 대기열 · ${version} 후보`));
+  assert.equal(field('version'),version);assert.ok(source.includes(`PixAI 대기열 · ${version}`));
 });
 
 function activationFixture() {
@@ -530,6 +530,11 @@ test('runtime skip undo restores an old unsubmitted job in place without applyin
   assert.deepEqual(current[0].configuration,original.configuration);assert.equal(current[1].state,'queued');
   assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
 });
+test('queue progress never treats a predicted image count as confirmed server completion',()=>{
+  const f=panelFixture(null,{queue:[{id:'waiting',title:'pending',prompt:'test',state:'waiting',taskId:'88',expected:1,saved:[],error:'조회 실패 (400)'}]});
+  const timeline=f.panel.querySelectorAll('div').find(element=>element.getAttribute('aria-label')==='진행 단계: pending');assert(timeline);
+  const labels=timeline.children.map(child=>child.textContent).join(' ');assert.match(labels,/✓ 제출/);assert.match(labels,/○ 생성 확인/);assert.match(labels,/○ 저장/);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
 test('runtime skip undo keeps known paid task and saved progress while uncertain submissions stay blocked',async()=>{
   for(const original of [
     {...job(),state:'skipped',taskId:'900',submittedAt:Date.now(),saved:[{mediaId:'100',fileName:'original.png'}],folderToken:'same-folder'},
@@ -682,12 +687,11 @@ test('generic runtime renders keep unavailable edit controls disabled and restor
 
 test('queue button handles direct pointer release even when no click is delivered; empty prompt shows validation',async()=>{
   const f=panelFixture();const add=f.panel.querySelectorAll('button').find(b=>b.textContent==='대기열 추가');
-  f.press(add);assert.match(f.message(),/입력 확인/);
+  const before=f.message();f.press(add);assert.equal(f.message(),before);assert.match(f.panel.querySelector('[data-toast]').textContent,/입력 확인/);
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(f.message(),/프롬프트/);assert.equal(f.networkCalls,0);
-  const feedback=f.panel.querySelector('[data-action-message]');
-  assert.equal(feedback.textContent,f.message());
-  assert.equal(add.parentElement.children[add.parentElement.children.indexOf(add)+1],feedback);
+  assert.equal(f.panel.querySelector('[data-action-message]'),null);
+  assert.match(f.panel.querySelector('[data-toast]').textContent,/입력 확인/);
 });
 
 test('damaged queue data is preserved while the complete panel still mounts and accepts preset read input',async()=>{
@@ -696,7 +700,7 @@ test('damaged queue data is preserved while the complete panel still mounts and 
   assert.equal(f.records.get('local.pixai-web-queue.v1'),'{broken queue');
   const read=f.panel.querySelectorAll('button').find(b=>b.textContent==='사이트의 현재 설정 읽기');
   assert.equal(read.disabled,false);f.press(read);
-  assert.match(f.message(),/읽는 중/);
+  assert.match(f.message(),/대기열 읽기 실패/);assert.match(f.panel.querySelector('[data-toast]').textContent,/읽는 중/);
   f.press(f.panel.querySelectorAll('button').find(b=>b.textContent==='중지'));
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(f.message(),/중지/);
@@ -1662,32 +1666,30 @@ function uiButton(action) {
   const begin=mainSource.indexOf('  function button(text, action)');
   const end=mainSource.indexOf('  function render()',begin);
   assert.ok(begin>=0&&end>begin,'runtime button factory not found');
-  const doc=new Element('document'),panel=new Element('aside'),status=new Element('div',{'data-message':''});doc.append(panel);panel.append(status);
+  const doc=new Element('document'),panel=new Element('aside'),status=new Element('div',{'data-message':''}),toast=new Element('div',{'data-toast':''});toast.hidden=true;doc.append(panel);panel.append(status,toast);
   status.getBoundingClientRect=()=>({top:-260,bottom:-210,left:0,right:300});
-  const ctx={bindFolderActivation:core.bindFolderActivation,panel,node:(tag,text,attrs)=>new Element(tag,attrs,text)};
+  const ctx={bindFolderActivation:core.bindFolderActivation,panel,node:(tag,text,attrs)=>new Element(tag,attrs,text),setTimeout:()=>0,clearTimeout(){}};
   vm.runInNewContext(`let message='';function render(){panel.querySelector('[data-message]').textContent=message;const feedback=panel.querySelector('[data-action-message]');if(feedback)feedback.textContent=message;}\n${mainSource.slice(begin,end)}\nthis.make=button;`,ctx);
   const button=ctx.make('사이트의 현재 설정 읽기',action);
   panel.append(button);
   function click(){for(const handler of button.listeners?.click||[])handler({type:'click',target:button,detail:0,timeStamp:100,isTrusted:true,preventDefault(){},stopImmediatePropagation(){}});}
-  return {button,status,click,panel,feedback:()=>panel.querySelector('[data-action-message]')};
+  return {button,status,click,panel,toast};
 }
 test('diagnosis: an activated read button records confirmation even if the shared status is scrolled outside view',async()=>{
   let called=0;const ui=uiButton(()=>{called++;});ui.click();await Promise.resolve();
-  assert.equal(called,1);assert.equal(ui.status.textContent,'입력 확인: 사이트의 현재 설정 읽기');
+  assert.equal(called,1);assert.equal(ui.status.textContent,'');assert.equal(ui.toast.textContent,'입력 확인: 사이트의 현재 설정 읽기');
   assert.ok(ui.status.getBoundingClientRect().bottom<0);
-  assert.equal(ui.feedback().textContent,ui.status.textContent);
-  assert.equal(ui.panel.children[ui.panel.children.indexOf(ui.button)+1],ui.feedback());
+  assert.equal(ui.toast.hidden,false);assert.equal(ui.panel.querySelector('[data-action-message]'),null);
 });
 test('diagnosis: disabled preset read button skips both action and input confirmation',async()=>{
   let called=0;const ui=uiButton(()=>{called++;});ui.button.disabled=true;ui.click();await Promise.resolve();
   assert.equal(called,0);assert.equal(ui.status.textContent,'');
-  assert.equal(ui.feedback(),null);
+  assert.equal(ui.toast.hidden,true);assert.equal(ui.toast.textContent,'');
 });
 test('diagnosis: synchronous capture error is recorded in the same shared status',async()=>{
   const ui=uiButton(()=>{throw new Error('현재 모델 버전 확인 실패');});ui.click();await Promise.resolve();
   assert.equal(ui.status.textContent,'현재 모델 버전 확인 실패');
-  assert.equal(ui.feedback().textContent,ui.status.textContent);
-  assert.equal(ui.panel.children[ui.panel.children.indexOf(ui.button)+1],ui.feedback());
+  assert.equal(ui.toast.textContent,'입력 확인: 사이트의 현재 설정 읽기');assert.equal(ui.panel.querySelector('[data-action-message]'),null);
 });
 
 })();
