@@ -723,6 +723,19 @@ function downloadTimers() {
   return {cleared,set(fn,ms){assert.equal(ms,120000);callback=fn;return 1},clear:id=>cleared.push(id),tick:()=>callback()};
 }
 
+test('default timers work with browser receiver checks for both directory selection and managed downloads',async()=>{
+  const calls=[];
+  const browserTimers={module:{exports:{}},
+    setTimeout:function(fn,ms){if(this?.set===browserTimers.setTimeout)throw new TypeError('Illegal invocation');calls.push(['set',ms]);return ms;},
+    clearTimeout:function(id){if(this?.clear===browserTimers.clearTimeout)throw new TypeError('Illegal invocation');calls.push(['clear',id]);}
+  };
+  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),browserTimers);
+  const core=browserTimers.module.exports,folder={name:'assets'};
+  assert.equal(await core.pickDirectory({showDirectoryPicker:()=>Promise.resolve(folder)},()=>{}),folder);
+  assert.equal(await core.managedDownload(options=>options.onload(),new Blob(['asset']),'asset.png'),'asset.png');
+  assert.deepEqual(calls,[['set',8000],['clear',8000],['set',120000],['clear',120000]]);
+});
+
 test('managed save waits for completion, passes validated blob, preserves collisions and uses automatic download',async()=>{
   const timers=downloadTimers(),blob=new Blob(['asset'],{type:'image/png'});let details,finished=false;
   const pending=managedDownload(options=>{details=options;return {}},blob,'asset.png',timers).then(name=>{finished=true;return name});
