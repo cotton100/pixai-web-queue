@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.1
+// @version      0.9.2
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -2137,10 +2137,10 @@ function mountPresetEditor(parent, io) {
     if (!body || typeof body!=='object' || Array.isArray(body)) return '';
     // Return structured validation metadata only. Never echo message/input/value,
     // which may contain the complete request, prompt, or credential.
-    const roots=[body,body.error,body.message].filter(value=>value && typeof value==='object' && !Array.isArray(value));
+    const roots=[body,body.error,body.message,body.data].filter(value=>value && typeof value==='object' && !Array.isArray(value));
     const records=roots.flatMap(value=>[value,...['detail','details','issues','errors'].flatMap(name=>Array.isArray(value[name]) ? value[name].slice(0,10) : [])]);
     const fields=new Set(['body','query','modelVersionId','modelId','prompt','negativePrompt','aspectRatio','size','batchSize','seed','mode','style','type','key','custom','loras','weight','triggerWords','sampling','method','steps','cfgScale','scheduler','promptHelper','callbackUrl']);
-    const codes=new Set(['VALIDATION','VALIDATION_ERROR','INVALID_ARGUMENT','INVALID_REQUEST','UNPROCESSABLE_ENTITY','BAD_REQUEST','missing','invalid_type','invalid_union','invalid_value','invalid_enum_value','too_small','too_big','extra_forbidden','string_type','string_too_short','string_too_long','int_type','int_parsing','int_from_float','float_type','float_parsing','list_type','dict_type','literal_error','enum','greater_than','greater_than_equal','less_than','less_than_equal','json_invalid','value_error','validation']);
+    const codes=new Set(['VALIDATION','VALIDATION_ERROR','INVALID_ARGUMENT','INVALID_REQUEST','UNPROCESSABLE_ENTITY','UNPROCESSABLE_CONTENT','BAD_REQUEST','missing','invalid_type','invalid_union','invalid_value','invalid_enum_value','too_small','too_big','extra_forbidden','string_type','string_too_short','string_too_long','int_type','int_parsing','int_from_float','float_type','float_parsing','list_type','dict_type','literal_error','enum','greater_than','greater_than_equal','less_than','less_than_equal','json_invalid','value_error','validation']);
     const found=new Set();
     for (const item of records.slice(0,30)) {
       if (!item || typeof item!=='object' || Array.isArray(item)) continue;
@@ -2152,10 +2152,28 @@ function mountPresetEditor(parent, io) {
     }
     return [...found].slice(0,6).join('; ');
   }
-  function apiHttpError(status,method,responseText) {
+  function apiServerReason(responseText,context={}) {
+    let body;try {body=JSON.parse(responseText);} catch {return '';}
+    const raw=body?.message;
+    if (typeof raw!=='string' || raw.length>2000) return '';
+    // Only the top-level message is considered, never request/input/data dumps.
+    // Redact known credentials and all string leaves of the request before display.
+    const hidden=[context.secret].filter(Boolean);
+    const collect=value=>{if (typeof value==='string' && value) hidden.push(value);else if (value && typeof value==='object') Object.values(value).forEach(collect);};
+    collect(context.payload);
+    let result=raw;
+    for (const value of hidden.sort((a,b)=>b.length-a.length)) {
+      for (const variant of new Set([value,JSON.stringify(value).slice(1,-1),encodeURIComponent(value)])) result=result.split(variant).join('[가림]');
+    }
+    if (/authorization|api.?key|access.?token|\bbearer\b|\bprompt\b|negativePrompt/i.test(result)) return '서버 사유에 인증·프롬프트 정보가 포함될 수 있어 내용을 생략했습니다.';
+    result=result.replace(/https?:\/\/\S+/gi,'[주소 가림]').replace(/[A-Za-z0-9_\-]{24,}/g,'[값 가림]').replace(/[\x00-\x1f]/g,' ');
+    return result.slice(0,300);
+  }
+  function apiHttpError(status,method,responseText,context) {
     const advice={400:'입력값·모델/LoRA 버전과 모드 호환성을 확인해 주세요.',401:'API 키 인증 실패입니다. 키를 다시 연결해 주세요.',403:'이 키의 접근 권한을 확인해 주세요.',404:'작업·모델·미디어를 찾지 못했습니다. 키 유효성은 이 응답으로 판정하지 않습니다.',422:'API 입력값을 확인해 주세요.',429:'API 대기열·요청 제한입니다. 추가 제출을 멈췄습니다.'};
     const details=[400,422].includes(status) ? apiValidationDetails(responseText) : '';
-    return Object.assign(new Error(`공식 API 오류 (${status}). ${advice[status] || '같은 작업 ID를 보존합니다. 제출 결과가 불명확하면 재제출하지 않습니다.'}${details ? '\n서버 검증: '+details : ''}`),
+    const reason=[400,422].includes(status) && context ? apiServerReason(responseText,context) : '';
+    return Object.assign(new Error(`공식 API 오류 (${status}). ${advice[status] || '같은 작업 ID를 보존합니다. 제출 결과가 불명확하면 재제출하지 않습니다.'}${details ? '\n서버 검증: '+details : ''}${reason ? '\n서버 사유: '+reason : ''}`),
       {status,notSubmitted:method==='POST' && [400,401,403,404,422].includes(status)});
   }
   function createOfficialApiClient(request,getKey,timers) {
@@ -2166,7 +2184,7 @@ function mountPresetEditor(parent, io) {
       const response=await gmResponse(request,{method,url:'https://api.pixai.art'+path,responseType:'text',
         headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},...(payload ? {data:JSON.stringify(payload)} : {})},30000,timers);
       if (response.finalUrl && response.finalUrl!=='https://api.pixai.art'+path) throw new Error('공식 API의 예상하지 못한 이동 응답입니다.');
-      if ((method==='POST' && response.status!==201) || (method==='GET' && response.status!==200)) throw apiHttpError(response.status,method,response.responseText);
+      if ((method==='POST' && response.status!==201) || (method==='GET' && response.status!==200)) throw apiHttpError(response.status,method,response.responseText,{secret:key,payload});
       try {const value=JSON.parse(response.responseText);if (!value || typeof value!=='object' || Array.isArray(value)) throw new Error();return value;}
       catch {throw new Error('공식 API 응답 형식을 확인하지 못했습니다. 자동 재제출하지 않습니다.');}
     }
@@ -2189,7 +2207,7 @@ function mountPresetEditor(parent, io) {
   }
 
   const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
-  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,createSessionApiKey,gmResponse,apiValidationDetails,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,createSessionApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -2532,7 +2550,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.1', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.2', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2687,7 +2705,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.1',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.2',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3076,7 +3094,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.1', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.2', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

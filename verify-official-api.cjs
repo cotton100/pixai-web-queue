@@ -83,6 +83,29 @@ test('validation diagnostics handle JSON-pointer and nested issues, ignore arbit
   for(const raw of ['secret','null','[]','{"message":"secret","input":"secret"}']) assert.equal(core.apiValidationDetails(raw),'');
   assert(!core.apiHttpError(500,'POST','{"type":"validation","property":"seed"}').message.includes('서버 검증'));
 });
+
+test('live public API validation envelope exposes data.issues without copying raw issue messages or values',()=>{
+  const raw=JSON.stringify({defined:false,code:'BAD_REQUEST',status:400,message:'Input validation failed',data:{issues:[{expected:'string',code:'invalid_type',path:['prompt'],message:'private prompt fixture-secret',input:'fixture-secret'}]}});
+  assert.equal(core.apiValidationDetails(raw),'BAD_REQUEST; prompt · invalid_type');
+});
+
+test('business error reason survives while actual key, request strings, escaped content and URLs are masked',async()=>{
+  const j=job(),payload=core.buildApiPayload(j,{},4,42);
+  const raw=JSON.stringify({code:'UNPROCESSABLE_CONTENT',message:'Model not available: fixture-secret '+payload.prompt+' '+payload.negativePrompt+' https://example.com/key?token=fixture-secret',data:{input:'PRIVATE'}});
+  const f=transport(()=>({status:422,responseText:raw}));
+  await assert.rejects(f.api.create(payload),error=>{
+    assert.match(error.message,/서버 사유: Model not available/);assert.match(error.message,/UNPROCESSABLE_CONTENT/);
+    for(const hidden of ['fixture-secret',payload.prompt,payload.negativePrompt,'example.com','PRIVATE']) assert(!error.message.includes(hidden));return error.notSubmitted;
+  });
+  assert(!core.apiServerReason(JSON.stringify({message:'line\\nsecret'}),{payload:{prompt:'line\nsecret'}}).includes('secret'));
+});
+
+test('credential or prompt-related free text and unbounded messages are suppressed',()=>{
+  for(const message of ['Authorization: hidden-secret','api_key=value','Invalid prompt: fragments','negativePrompt data','x'.repeat(2001)]) {
+    const reason=core.apiServerReason(JSON.stringify({message}));assert(!reason.includes('hidden-secret'));assert(!reason.includes('fragments'));assert(!reason.includes('value'));assert(reason.length<310);
+  }
+  assert.equal(core.apiServerReason('not JSON'),'');assert.equal(core.apiServerReason('{"message":{"input":"secret"}}'),'');
+});
 test('official parameterless task receipt is verified by ID/time; wrong IDs, old timestamps and mismatched explicit prompts fail',()=>{
   const j={...job(),queryBackend:'official-v1',taskId:'900',submittedAt:Date.now()},t={id:'900',createdAt:new Date().toISOString(),outputs:{mediaIds:['1','2','3','4']}};
   core.verifyTask(j,t);assert.deepEqual(core.outputIds(t,4),['1','2','3','4']);assert.throws(()=>core.verifyTask(j,{...t,id:'901'}));
