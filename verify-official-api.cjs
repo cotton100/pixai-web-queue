@@ -151,6 +151,17 @@ test('image download never sends API authentication and rejects unrelated hosts'
   assert.equal(await f.api.image('https://images.pixai.art/images/orig/test.webp'),blob);assert.equal(f.calls[0].headers,undefined);
   await assert.rejects(f.api.image('https://attacker.example/image'));assert.equal(f.calls.length,1);
 });
+test('officially observed image CDN is exact-host only and never receives authentication',async()=>{
+  const blob=new Blob(['img'],{type:'image/webp'}),f=transport(()=>({response:blob}));
+  assert.equal(await f.api.image('https://d2doj8oszwtcqy.cloudfront.net/images/orig/test.webp'),blob);
+  assert.equal(f.calls[0].headers,undefined);assert.equal(f.calls[0].anonymous,true);assert.equal(f.calls[0].redirect,'error');
+  for (const url of ['https://other.cloudfront.net/test.webp','https://d2doj8oszwtcqy.cloudfront.net.attacker.example/test.webp','http://d2doj8oszwtcqy.cloudfront.net/test.webp','https://attacker.example@d2doj8oszwtcqy.cloudfront.net/test.webp','https://d2doj8oszwtcqy.cloudfront.net:444/test.webp']) await assert.rejects(f.api.image(url));
+  assert.equal(f.calls.length,1);
+});
+test('CDN redirect to another origin stops saving even if both origins are otherwise permitted',async()=>{
+  const f=transport(()=>({response:new Blob(['img']),finalUrl:'https://images.pixai.art/test.webp'}));
+  await assert.rejects(f.api.image('https://d2doj8oszwtcqy.cloudfront.net/test.webp'),/서버 이동/);
+});
 test('deadline ignores late responses and never reports an unknown submission as successful',async()=>{
   let deadline,details,aborts=0;
   const p=core.gmResponse(d=>{details=d;return {abort(){aborts++;}};},{method:'POST'},10,{set(fn){deadline=fn;return 1;},clear(){}});
