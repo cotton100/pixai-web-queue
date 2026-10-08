@@ -763,6 +763,22 @@ test('collapse keeps unsaved inputs, scroll position and status; SVG launcher re
   assert.equal(f.records.has('local.pixai-web-queue.v1'),false);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
 });
 
+test('folding keeps the panel top-right corner: the launcher lands under the collapse button and unfolding grows back to the left',()=>{
+  const f=panelFixture(),collapse=f.panel.querySelector('[data-collapse]'),launcher=f.panel.querySelector('[data-launcher]');
+  // Layout mock: the expanded panel is 340x450 at its style position (default 600,200); folded it is 52x52.
+  f.panel.getBoundingClientRect=()=>{const left=parseFloat(f.panel.style.left)||600,top=parseFloat(f.panel.style.top)||200;
+    return f.panel.dataset.minimized==='true' ? {left,top,width:52,height:52} : {left,top,width:340,height:450};};
+  f.press(collapse);
+  assert.equal(f.panel.dataset.minimized,'true');assert.equal(f.panel.style.left,'888px');assert.equal(f.panel.style.top,'200px');
+  assert.deepEqual(JSON.parse(f.records.get('local.pixai-web-queue.position.v1')),{x:888,y:200});
+  launcher.fire('click',{detail:0});
+  assert.equal(f.panel.dataset.minimized,'false');assert.equal(f.panel.style.left,'600px');assert.equal(f.panel.style.top,'200px');
+  assert.deepEqual(JSON.parse(f.records.get('local.pixai-web-queue.position.v1')),{x:600,y:200});
+  // Near the right edge the unfolded panel is clamped back inside the viewport instead of overflowing.
+  f.panel.style.left='1100px';f.press(collapse);assert.equal(f.panel.style.left,'1140px');
+  launcher.fire('click',{detail:0});assert.equal(f.panel.style.left,'852px');
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
 test('collapsed launcher drag saves position without opening or changing inputs; a later pointer tap opens exactly once',()=>{
   const f=panelFixture(),collapse=f.panel.querySelector('[data-collapse]'),launcher=f.panel.querySelector('[data-launcher]');
   const prompt=runtimeField(f,'대기열 프롬프트');prompt.value='unsaved prompt';const message=f.message();
