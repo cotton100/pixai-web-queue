@@ -12,7 +12,7 @@ test('visible compose image controls preserve different reservation choices with
   f.setImageOptions({aspectRatio:'3:5',size:'1k'});assert.match(f.field('현재 조합 이미지 설정').textContent,/5:3.*1.5k/);
   await f.select('조합 이미지 비율','3:5');await f.select('조합 이미지 크기','1k');await f.press('이 조합 예약 추가');
   assert.deepEqual(f.library().reservations[0],first);assert.deepEqual(first.imageOptions,{aspectRatio:'5:3',size:'1.5k'});assert.deepEqual(f.library().reservations[1].imageOptions,{aspectRatio:'3:5',size:'1k'});
-  const images=f.field('현재 조합 이미지 설정').parentElement;assert.equal(images.parentElement.dataset.page,'compose');assert.equal(images.hidden,undefined);assert.equal(f.fields('조합 이미지 설정').length,0);
+  const images=f.field('현재 조합 이미지 설정').parentElement,choices=images.parentElement;assert.match(choices.className,/pq-compose-choices/);assert.equal(choices.children[1].className,'pq-inline pq-reserve-selectors');assert.equal(choices.children[2],images);assert.equal(images.hidden,undefined);assert.equal(f.fields('조합 이미지 설정').length,0);
   assert.match(f.ui.root.querySelectorAll('.pq-reservation')[0].textContent,/5:3.*1.5k/);assert.match(f.ui.root.querySelectorAll('.pq-reservation')[1].textContent,/3:5.*1k/);
   await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs[0].apiOptions,first.imageOptions);assert.deepEqual(f.jobs[1].apiOptions,{aspectRatio:'3:5',size:'1k'});
 });

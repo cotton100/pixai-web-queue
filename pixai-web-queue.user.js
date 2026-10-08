@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.11
+// @version      0.9.12
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -1805,9 +1805,9 @@ function mountPresetEditor(parent, io) {
   for (const size of ['1k','1.5k']) reserveSize.input.append(el('option',size,{value:size}));
   const reserveRatioPicker=buttonPicker(reserveRatio,{caption:'이미지 비율',icon:'image',empty:false,onChange:chooseRecipeImages});
   const reserveSizePicker=buttonPicker(reserveSize,{caption:'이미지 크기',icon:'image',empty:false,onChange:chooseRecipeImages});
-  const imageSettingsNote=el('small',null,{'aria-label':'현재 조합 이미지 설정',role:'status'});
+  const imageSettingsNote=el('small',null,{'aria-label':'현재 조합 이미지 설정',role:'status',title:'비율은 가로:세로입니다. 새 예약마다 선택한 비율과 크기를 보관합니다.'});
   const imageSettings=el('div',null,{class:'pq-reservation-image'}),imagePickers=el('div',null,{class:'pq-inline'});
-  root.append(el('style','#local-pixai-queue .pq-reservation-image{flex:none;padding:8px 12px;border-bottom:1px solid var(--pq-line,#41474f)}#local-pixai-queue .pq-reservation-image>.pq-inline{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px}#local-pixai-queue .pq-reservation-image .pq-choice-list{height:78px}'));
+  root.append(el('style','#local-pixai-queue .pq-reservation-image{flex:none;min-width:0;margin:4px 0 8px;padding:0}#local-pixai-queue .pq-reservation-image>.pq-inline{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px}#local-pixai-queue .pq-reservation-image .pq-choice-list{height:78px}'));
   imagePickers.append(reserveRatioPicker.wrap,reserveSizePicker.wrap);imageSettings.append(imagePickers,imageSettingsNote);
   const defaultRecipeImages=()=>{const options=normalizeApiOptions(io.getImageOptions?.() || {});return {aspectRatio:options.aspectRatio,size:options.size};};
   let recipeImages=defaultRecipeImages();
@@ -1915,7 +1915,7 @@ function mountPresetEditor(parent, io) {
   clearSelected.setAttribute('aria-label','청크 선택 전부 해제');clearSelected.textContent='선택 해제';decorateIcon(clearSelected,'close');
   const choiceActions=el('div',null,{class:'pq-actions'});choiceActions.append(selectVisible,clearSelected);
   function renderRecipeImages() {
-    imageSettingsNote.textContent=`${recipeImages.aspectRatio} (가로:세로) · ${recipeImages.size} · 새 예약마다 이 값을 보관합니다.`;
+    imageSettingsNote.textContent=`${recipeImages.aspectRatio} · ${recipeImages.size} · 예약별로 저장`;
   }
   function preview() {
     renderRecipeImages();
@@ -2044,7 +2044,7 @@ function mountPresetEditor(parent, io) {
   const choiceFilters=el('div',null,{class:'pq-choice-filters'});choiceFilters.append(chunkSearch.wrap,chunkFilter.wrap);
   const choices=el('div',null,{class:'pq-compose-choices'}),review=el('div',null,{class:'pq-compose-review'}),schedule=el('div',null,{class:'pq-compose-schedule'}),composeLayout=el('div',null,{class:'pq-compose-layout'});
   const selectors=el('div',null,{class:'pq-inline pq-reserve-selectors'});selectors.append(reservePresetPicker.wrap,reserveCharacterPicker.wrap);
-  choices.append(el('strong','조합 만들기'),selectors,el('strong','함께 쓸 청크'),choiceFilters,choiceActions,chunkCount,chunkList);
+  choices.append(el('strong','조합 만들기'),selectors,imageSettings,el('strong','함께 쓸 청크'),choiceFilters,choiceActions,chunkCount,chunkList);
   const addReservation=action('이 조합 예약 추가',async () => {
       if (missingMaterials.length) throw new Error('누락 재료를 확인한 뒤 예약해 주세요.');
       const combination=recipe(),{presetId,characterId,sceneIds}=combination;
@@ -2064,7 +2064,7 @@ function mountPresetEditor(parent, io) {
   const composeMode=el('div',null,{class:'pq-compose-mode'});
   for (const [id,name] of [['choices','재료'],['review','순서·미리보기'],['schedule','예약·기록']]) {const button=el('button',name,{type:'button','data-compose-mode':id});button.addEventListener('click',()=>{reserveBody.dataset.composeMode=id;for (const control of composeMode.children) control.setAttribute('aria-pressed',String(control===button));});composeMode.append(button);}
   reserveBody.dataset.composeMode='choices';composeMode.children[0].setAttribute('aria-pressed','true');
-  resizable(composeLayout,[choices,review,schedule],'조합 예약',[.35,.35,.30],[250,260,220]);reserveBody.append(imageSettings,composeMode,composeLayout);
+  resizable(composeLayout,[choices,review,schedule],'조합 예약',[.35,.35,.30],[250,260,220]);reserveBody.append(composeMode,composeLayout);
   const registrationBar=el('div',null,{class:'pq-registration-bar'}),reservationTotals=el('span',null,{role:'status'});registrationBar.append(reservationTotals,register);root.append(registrationBar);
   const originalRenderReservations=renderReservations;
   renderReservations=function() {originalRenderReservations();reservationTotals.textContent=`예약 ${library.reservations.length}조합 · ${library.reservations.reduce((sum,item)=>sum+item.count,0)}회`;available(register,library.reservations.length>0);};
@@ -2771,7 +2771,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.11', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.12', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2963,7 +2963,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.11',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.12',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3365,7 +3365,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.11', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.12', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
