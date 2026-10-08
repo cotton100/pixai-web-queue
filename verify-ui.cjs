@@ -5,6 +5,34 @@ const assert=require('node:assert/strict');
 const path=require('node:path');
 const core=require(path.join(__dirname,'pixai-web-queue.user.js'));
 const copy=value=>JSON.parse(JSON.stringify(value));
+
+test('compose image controls preserve different reservation choices and show default updates without changing saved recipes',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.select('조합 이미지 설정','custom');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');
+  await f.press('이 조합 예약 추가');const first=copy(f.library().reservations[0]);
+  f.setImageOptions({aspectRatio:'3:5',size:'1k'});assert.match(f.field('현재 조합 이미지 설정').textContent,/5:3.*1.5k/);
+  await f.select('조합 이미지 설정','default');assert.match(f.field('현재 조합 이미지 설정').textContent,/기본 3:5.*1k/);await f.press('이 조합 예약 추가');
+  assert.deepEqual(f.library().reservations[0],first);assert.deepEqual(first.imageOptions,{aspectRatio:'5:3',size:'1.5k'});assert.equal(Object.hasOwn(f.library().reservations[1],'imageOptions'),false);
+  assert.match(f.ui.root.querySelectorAll('.pq-reservation')[0].textContent,/5:3.*1.5k/);assert.match(f.ui.root.querySelectorAll('.pq-reservation')[1].textContent,/이미지 기본 설정 사용/);
+  await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs[0].apiOptions,first.imageOptions);assert.equal(f.jobs[1].apiOptions,undefined);
+});
+
+test('custom recipe images reload from favorites and backups while old records reset custom draft dimensions',async t=>{
+  const f=fixture(t);await f.choose('행동');await f.select('조합 이미지 설정','custom');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');await f.press('현재 조합 즐겨찾기');
+  const id=f.library().combinations[0].id;const backup=core.makeSettingsBackup(f.library(),{maxCredits:7800,filePrefix:'test',repeat:1},{appVersion:'0.9.10',exportedAt:'2026-10-09T00:00:00.000Z'});
+  const fresh=fixture(t,core.parseSettingsBackup(JSON.stringify(backup)).library);await fresh.press(`조합 불러오기: ${id}`);
+  assert.equal(fresh.field('조합 이미지 설정').value,'custom');assert.equal(fresh.field('조합 이미지 비율').value,'5:3');assert.equal(fresh.field('조합 이미지 크기').value,'1.5k');assert.equal(fresh.jobs.length,0);
+  await fresh.select('조합 이미지 설정','default');await fresh.press('이 조합 예약 추가');const legacyId=fresh.library().combinations[0].id;
+  await fresh.press(`조합 불러오기: ${id}`);await fresh.press(`조합 불러오기: ${legacyId}`);assert.equal(fresh.field('조합 이미지 설정').value,'default');
+  fresh.setImageOptions({aspectRatio:'3:5',size:'1k'});assert.match(fresh.field('현재 조합 이미지 설정').textContent,/기본 3:5/);assert.equal(fresh.library().combinations.length,2);
+});
+
+test('reservation image choice is atomic on storage failure and button lists remain editable without changing global defaults',async t=>{
+  const f=fixture(t);await f.select('조합 이미지 설정','custom');
+  const ratio=f.field('조합 이미지 비율: 5:3 · 가로');await ratio.emit('click');const size=f.field('조합 이미지 크기: 1.5k');await size.emit('click');
+  const before=f.library();f.setSaveFailure('disk full');await f.press('이 조합 예약 추가');assert.deepEqual(f.library(),before);assert.equal(f.field('조합 이미지 비율').value,'5:3');assert.match(f.messages.at(-1),/disk full/);
+  f.setSaveFailure(null);await f.press('이 조합 예약 추가');assert.deepEqual(f.library().reservations[0].imageOptions,{aspectRatio:'5:3',size:'1.5k'});
+  await f.select('조합 이미지 설정','default');assert.match(f.field('현재 조합 이미지 설정').textContent,/기본 9:16.*1k/);
+});
 test('pointer recipe drag cancels safely and changes only composition order on a trusted release',async t=>{
   const f=fixture(t);await f.choose('표정');await f.choose('행동');const row=()=>f.ui.root.querySelectorAll('[data-recipe-chunk]').find(item=>item.dataset.recipeChunk==='s1');
   document.elementFromPoint=()=>({closest:()=>row()});const event={button:0,isPrimary:true,pointerId:1,clientX:10,clientY:180};
@@ -116,14 +144,14 @@ function seed() {
 }
 function fixture(t,initial=seed()) {
   let library=core.normalizePresetLibrary(copy(initial)),captured=copy({model:library.presets[0].model,loras:library.presets[0].loras});
-  let loadResult,saveFailure,busy=false;
+  let loadResult,saveFailure,busy=false,imageOptions=core.normalizeApiOptions();
   const messages=[],jobs=[],saves=[];let sequence=0;
   const parent=new Element('aside');const previousDocument=globalThis.document;
   globalThis.document={createElement:tag=>new Element(tag),createElementNS:(_namespace,tag)=>new Element(tag)};
   t.after(()=>{if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument;});
   const ui=core.mountPresetEditor(parent,{
     load:()=>copy(loadResult===undefined?library:loadResult),save:value=>{if(saveFailure)throw new Error(saveFailure);library=core.normalizePresetLibrary(copy(value));saves.push(copy(library));},
-    isBusy:()=>busy,
+    isBusy:()=>busy,getImageOptions:()=>imageOptions,
     captureSettings:async()=>copy(captured),applySettings:async()=>{},notify:message=>messages.push(message),
     enqueue:async value=>{jobs.push(...core.expandPresetReservations(value,{idFactory:()=>`job-${++sequence}`,maxCredits:7800}));},
     button:(text,action)=>{const element=new Element('button');element.textContent=text;element.press=async()=>{if(element.disabled)return;try{await action();}catch(error){messages.push(error.message);}};return element;}
@@ -138,7 +166,7 @@ function fixture(t,initial=seed()) {
   return {ui,parent,all,field,fields,button,press,select,choose,messages,jobs,saves,
     preview:()=>field('저장한 프롬프트 조합 미리보기').textContent,
     library:()=>copy(library),setLibrary:value=>{library=core.normalizePresetLibrary(copy(value));},
-    setLoadResult:value=>{loadResult=value===undefined?undefined:copy(value);},
+    setLoadResult:value=>{loadResult=value===undefined?undefined:copy(value);},setImageOptions:value=>{imageOptions=core.normalizeApiOptions(value);ui.refreshImageOptions();},
     setCapture:value=>{captured=copy(value);},setSaveFailure:value=>{saveFailure=value;},
     setBusy:value=>{busy=value;for(const element of all().filter(item=>Object.hasOwn(item.dataset,'edit')))element.disabled=busy||element.dataset.unavailable==='true';}};
 }

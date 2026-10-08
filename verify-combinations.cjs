@@ -3,6 +3,52 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const core=require('./pixai-web-queue.user.js');
 const seed=()=>({version:1,common:{prompt:'quality',negativePrompt:'lowres'},presets:[{id:'p',name:'P',model:{id:'1',versionId:'2',name:'M'},loras:[]}],characters:[{id:'c',name:'C',prompt:'character',negativePrompt:''}],scenes:[{id:'s',name:'S',prompt:'smile',negativePrompt:''}],reservations:[]});
 const combo=(i=0)=>({presetId:'p',characterId:'c',sceneIds:[`s${i}`],count:1});
+
+test('reservation image settings require supported dimensions and reject missing, unknown and secret fields',()=>{
+  const valid={aspectRatio:'5:3',size:'1.5k'};
+  assert.deepEqual(core.normalizeReservationImageOptions(valid),valid);
+  for(const value of [null,[],{}, {aspectRatio:'5:3'}, {aspectRatio:'7:2',size:'1k'}, {aspectRatio:'5:3',size:'4k'}, {aspectRatio:null,size:'1k'}, {...valid,apiKey:'fixture-key'}, {...valid,mode:'pro'}]) assert.throws(()=>core.normalizeReservationImageOptions(value));
+});
+
+test('image settings distinguish recent recipes and favorites while preserving deduplication identity',()=>{
+  const recipe={presetId:'p',characterId:'c',sceneIds:['s'],count:1};let id=0;
+  let library=core.rememberCombination(seed(),{...recipe,imageOptions:{aspectRatio:'5:3',size:'1.5k'}},{favorite:true,idFactory:()=>`r${++id}`,now:1});
+  library.combinations[0].name='Landscape';const favoriteId=library.combinations[0].id;
+  library=core.rememberCombination(library,{...recipe,imageOptions:{aspectRatio:'3:5',size:'1k'}},{idFactory:()=>`r${++id}`,now:2});
+  library=core.rememberCombination(library,recipe,{idFactory:()=>`r${++id}`,now:3});assert.equal(library.combinations.length,3);
+  library=core.rememberCombination(library,{...recipe,count:3,imageOptions:{size:'1.5k',aspectRatio:'5:3'}},{now:4});
+  assert.equal(library.combinations.length,3);assert.equal(library.combinations[0].id,favoriteId);assert.equal(library.combinations[0].name,'Landscape');assert.equal(library.combinations[0].favorite,true);assert.equal(library.combinations[0].count,3);
+});
+
+test('per-reservation images survive settings and queue backups and repeat expansion without affecting legacy recipes',()=>{
+  const library=seed(),recipe={presetId:'p',characterId:'c',sceneIds:['s'],count:2};
+  library.reservations=[{id:'r1',...recipe,imageOptions:{aspectRatio:'5:3',size:'1.5k'},snapshot:core.snapshotCombination(library,recipe)},{id:'r2',...recipe,count:1}];
+  let recorded=core.rememberCombination(library,library.reservations[0],{favorite:true,idFactory:()=> 'favorite',now:1});
+  const options={maxCredits:7800,filePrefix:'test',repeat:1,api:core.normalizeApiOptions({aspectRatio:'3:5'})};
+  const restored=core.parseSettingsBackup(JSON.stringify(core.makeSettingsBackup(recorded,options,{appVersion:'0.9.10',exportedAt:'2026-10-09T00:00:00.000Z'})));
+  assert.deepEqual(restored.library,core.normalizePresetLibrary(recorded));let jobId=0;
+  const jobs=core.expandPresetReservations(restored.library,{idFactory:()=>`j${++jobId}`});assert.equal(jobs.length,3);
+  for(const job of jobs.slice(0,2)){assert.deepEqual(job.apiOptions,{aspectRatio:'5:3',size:'1.5k'});assert.deepEqual(job.composition.reservation.imageOptions,job.apiOptions);}
+  assert.equal(Object.hasOwn(jobs[2],'apiOptions'),false);assert.deepEqual(core.parseSettingsBackup(JSON.stringify({version:1,jobs,library:recorded})).library,restored.library);
+  const resolved=core.resolveCombination(restored.library,restored.library.combinations[0]);resolved.imageOptions.aspectRatio='1:1';assert.equal(restored.library.combinations[0].imageOptions.aspectRatio,'5:3');
+  const bad=structuredClone(recorded);bad.reservations[0].imageOptions.apiKey='forbidden';assert.throws(()=>core.parseSettingsBackup(JSON.stringify(bad)));
+});
+
+test('production queue registration merges each reservation image choice with global API options without submitting',async()=>{
+  const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),source=fs.readFileSync(path.join(__dirname,'pixai-web-queue.user.js'),'utf8');
+  const begin=source.indexOf('      enqueue:value=>queueEdit(()=>{'),end=source.indexOf('\n      })',begin);
+  assert(begin>=0&&end>begin);const events=[];
+  const context={...core,apiOptions:core.normalizeApiOptions({aspectRatio:'1:1',size:'1k',mode:'pro',style:'chibi',seed:7}),imageCount:{value:'4'},expectedCount:()=>1,budget:{value:''},title:{value:'test'},jobs:[],running:false,stopRequested:false,oneJobRun:false,
+    queueEdit:async fn=>fn(),persist:()=>events.push('persist'),saveLibrary:value=>{context.savedLibrary=value;},presetEditor:{refresh(){}},render(){},message:''};
+  vm.runInNewContext(`const callback={${source.slice(begin,end+9).trim()}};this.enqueue=callback.enqueue;`,context);
+  const library=seed(),recipe={presetId:'p',characterId:'c',sceneIds:['s'],count:1};
+  library.reservations=[{id:'wide',...recipe,imageOptions:{aspectRatio:'5:3',size:'1.5k'}},{id:'tall',...recipe,imageOptions:{aspectRatio:'3:5',size:'1k'}},{id:'legacy',...recipe}];
+  await context.enqueue(library);assert.equal(context.jobs.length,3);assert.equal(events.length,1);assert.equal(context.savedLibrary.reservations.length,0);
+  const payloads=context.jobs.map(job=>core.buildApiPayload(job,job.apiOptions,job.apiBatchSize,999));
+  assert.deepEqual(payloads.map(payload=>[payload.aspectRatio,payload.size]),[['5:3','1.5k'],['3:5','1k'],['1:1','1k']]);
+  assert(payloads.every(payload=>payload.mode==='pro'&&payload.style.key==='chibi'&&payload.seed===7&&payload.batchSize===4));
+  context.apiOptions=core.normalizeApiOptions({aspectRatio:'9:16',size:'1k'});assert.equal(context.jobs[0].apiOptions.aspectRatio,'5:3');
+});
 test('recent limit preserves every favorite and deduplication keeps its identity, name and new count',()=>{
   let library=seed(),seq=0;const options={idFactory:()=>`entry-${++seq}`,now:0};
   library=core.rememberCombination(library,combo(0),{...options,favorite:true});const id=library.combinations[0].id;library.combinations[0].name='Favorite';

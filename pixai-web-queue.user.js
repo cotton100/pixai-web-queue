@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.9
+// @version      0.9.10
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -417,6 +417,11 @@
     if (model.family != null) normalizedModel.family = presetText(model.family);
     return {model:normalizedModel, loras};
   }
+  function normalizeReservationImageOptions(value) {
+    const source=settingsBackupKeys(value,'예약 이미지 설정',['aspectRatio','size']);
+    if (!API_RATIOS.includes(source.aspectRatio) || !['1k','1.5k'].includes(source.size)) throw new Error('예약 이미지 비율·크기를 확인해 주세요.');
+    return {aspectRatio:source.aspectRatio,size:source.size};
+  }
   function normalizePresetLibrary(value, options = {}) {
     const source = presetObject(value, '프리셋 라이브러리');
     if (source.version !== 1) throw new Error('지원하지 않는 프리셋 라이브러리 버전입니다.');
@@ -463,6 +468,7 @@
           characterId:presetIdentifier(item.characterId, '캐릭터'), sceneIds,
           count:presetInteger(item.count, '예약 반복 횟수', 1, 100)};
         if (Object.hasOwn(item,'triggerPosition')) reservation.triggerPosition=normalizeTriggerPosition(item.triggerPosition,sceneIds.length);
+        if (Object.hasOwn(item,'imageOptions')) reservation.imageOptions=normalizeReservationImageOptions(item.imageOptions);
         if (Object.hasOwn(item,'snapshot')) {
           reservation.snapshot = normalizeCombinationSnapshot(item.snapshot);
           const frozen=reservation.snapshot;
@@ -479,6 +485,7 @@
         return {id,presetId:presetIdentifier(item.presetId,'기록 프리셋'),characterId:presetIdentifier(item.characterId,'기록 캐릭터'),
           sceneIds:sceneIds.map(id=>presetIdentifier(id,'기록 청크')),count:presetInteger(item.count,'기록 횟수',1,100),
           ...(Object.hasOwn(item,'triggerPosition') ? {triggerPosition:normalizeTriggerPosition(item.triggerPosition,sceneIds.length)} : {}),
+          ...(Object.hasOwn(item,'imageOptions') ? {imageOptions:normalizeReservationImageOptions(item.imageOptions)} : {}),
           favorite:item.favorite,name:presetText(item.name),at:presetInteger(item.at,'기록 시각',0,Number.MAX_SAFE_INTEGER)};
       });
       if (library.combinations.filter(item=>!item.favorite).length>50 || library.combinations.filter(item=>item.favorite).length>1000) throw new Error('최근 조합은 50개, 즐겨찾기는 1,000개까지 저장할 수 있습니다.');
@@ -498,6 +505,7 @@
     const sceneIds=[];
     for (const id of combination.sceneIds) {if (library.scenes.some(item=>item.id===id)) sceneIds.push(id);else missing.push(`청크 ${id}`);}
     return {presetId:preset?.id || '',characterId:character?.id || '',sceneIds,count:combination.count,missing,
+      ...(Object.hasOwn(combination,'imageOptions') ? {imageOptions:normalizeReservationImageOptions(combination.imageOptions)} : {}),
       ...(Object.hasOwn(combination,'triggerPosition') ? {triggerPosition:combination.triggerPosition==='end' ? 'end' : Math.min(normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length),sceneIds.length+2)} : {})};
   }
   function snapshotCombination(value, combination) {
@@ -508,9 +516,11 @@
   }
   function rememberCombination(value, combination, options={}) {
     const library=normalizePresetLibrary(value),entries=library.combinations || [];
-    const previous=entries.find(item=>item.presetId===combination.presetId && item.characterId===combination.characterId && JSON.stringify(item.sceneIds)===JSON.stringify(combination.sceneIds) && normalizeTriggerPosition(item.triggerPosition,item.sceneIds.length)===normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length));
+    const imageOptions=Object.hasOwn(combination,'imageOptions') ? normalizeReservationImageOptions(combination.imageOptions) : undefined;
+    const previous=entries.find(item=>item.presetId===combination.presetId && item.characterId===combination.characterId && JSON.stringify(item.sceneIds)===JSON.stringify(combination.sceneIds) && normalizeTriggerPosition(item.triggerPosition,item.sceneIds.length)===normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length) && JSON.stringify(item.imageOptions || null)===JSON.stringify(imageOptions || null));
     const entry={id:previous?.id || (options.idFactory || (()=>globalThis.crypto.randomUUID()))(),presetId:combination.presetId,characterId:combination.characterId,sceneIds:[...combination.sceneIds],count:combination.count,
       ...(Object.hasOwn(combination,'triggerPosition') ? {triggerPosition:combination.triggerPosition} : {}),
+      ...(imageOptions ? {imageOptions} : {}),
       favorite:!!options.favorite || !!previous?.favorite,name:previous?.name || '',at:options.now ?? Date.now()};
     let recent=0;
     library.combinations=[entry,...entries.filter(item=>item.id!==entry.id)].filter(item=>item.favorite || ++recent<=50);
@@ -739,8 +749,8 @@
       settingsBackupKeys(item, '캐릭터·청크 프롬프트', fields, key === 'scenes' ? [...fields,'folderId'] : fields);
       settingsBackupStrings(item, ['name','prompt','negativePrompt'], '캐릭터·청크 프롬프트');
     }
-    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition']);
-    for (const item of source.combinations || []) settingsBackupKeys(item,'조합 기록',['id','presetId','characterId','sceneIds','count','favorite','name','at'],['id','presetId','characterId','sceneIds','count','favorite','name','at','triggerPosition']);
+    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition','imageOptions']);
+    for (const item of source.combinations || []) settingsBackupKeys(item,'조합 기록',['id','presetId','characterId','sceneIds','count','favorite','name','at'],['id','presetId','characterId','sceneIds','count','favorite','name','at','triggerPosition','imageOptions']);
     return library;
   }
   function settingsBackupMeta(value) {
@@ -844,6 +854,7 @@
         jobs.push({id,
           title:[prefix, character.name || '캐릭터', chunks.map(item => item.name || '청크').join('+'), preset.name || '프리셋', repeat].filter(Boolean).join('_'),
           ...prompts, maxCredits, state:'queued', saved:[],
+          ...(reservation.imageOptions ? {apiOptions:copy(reservation.imageOptions)} : {}),
           configuration:copy({model:preset.model, loras:preset.loras}),
           composition:{version:2, reservation:copy({...reservation, repeat}), common:copy(common),
             preset:copy(preset), character:copy(character), chunks:copy(chunks)}
@@ -1779,12 +1790,36 @@ function mountPresetEditor(parent, io) {
   let selectedChunkIds = new Set();
   let missingMaterials=[],loadedCombination=false,recipeDrag=null,triggerPosition=1;
   const reserveCount = field('이 조합의 생성 횟수','input',{type:'number',min:'1',max:'100',value:'1'});
+  const reserveImageMode=field('조합 이미지 설정','select');
+  for (const [value,name] of [['default','기본 설정 사용'],['custom','이 조합에 비율·크기 지정']]) reserveImageMode.input.append(el('option',name,{value}));
+  const reserveRatio=field('조합 이미지 비율','select'),reserveSize=field('조합 이미지 크기','select');
+  for (const ratio of API_RATIOS) {
+    const [width,height]=ratio.split(':').map(Number);
+    reserveRatio.input.append(el('option',`${ratio} · ${width>height ? '가로' : width<height ? '세로' : '정사각'}`,{value:ratio}));
+  }
+  for (const size of ['1k','1.5k']) reserveSize.input.append(el('option',size,{value:size}));
+  const reserveRatioPicker=buttonPicker(reserveRatio,{caption:'이미지 비율',icon:'image',empty:false,onChange:preview});
+  const reserveSizePicker=buttonPicker(reserveSize,{caption:'이미지 크기',icon:'image',empty:false,onChange:preview});
+  const imageSettingsNote=el('small',null,{'aria-label':'현재 조합 이미지 설정',role:'status'});
+  const imageSettings=el('div',null,{class:'pq-reservation-image'}),imagePickers=el('div',null,{class:'pq-inline'});
+  root.append(el('style','#local-pixai-queue .pq-reservation-image{padding:8px 0;border-bottom:1px solid #41474f;margin-bottom:8px}#local-pixai-queue .pq-reservation-image>.pq-inline{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:8px}#local-pixai-queue .pq-reservation-image .pq-choice-list{height:78px}'));
+  imagePickers.append(reserveRatioPicker.wrap,reserveSizePicker.wrap);imageSettings.append(reserveImageMode.wrap,imagePickers,imageSettingsNote);
+  const defaultRecipeImages=()=>{const options=normalizeApiOptions(io.getImageOptions?.() || {});return {aspectRatio:options.aspectRatio,size:options.size};};
+  function setRecipeImages(value) {
+    const images=value ? normalizeReservationImageOptions(value) : defaultRecipeImages();
+    reserveImageMode.input.value=value ? 'custom' : 'default';reserveRatio.input.value=images.aspectRatio;reserveSize.input.value=images.size;
+    reserveRatioPicker.render();reserveSizePicker.render();
+  }
+  setRecipeImages();
+  reserveImageMode.input.addEventListener('change',()=>{setRecipeImages(reserveImageMode.input.value==='custom' ? defaultRecipeImages() : undefined);preview();});
+  for (const control of [reserveRatio.input,reserveSize.input]) control.addEventListener('change',preview);
   const combined = el('div',null,{class:'pq-preview','aria-label':'저장한 프롬프트 조합 미리보기'});
   const sequenceList=el('div',null,{class:'pq-sequence-list','aria-label':'합쳐지는 순서'});
   const missingNotice=el('div',null,{class:'pq-missing-notice',role:'status'});
   const acknowledgeMissing=action('누락 재료 제외하고 계속',()=>{missingMaterials=[];preview();});
   const selectedChunksInOrder=()=>[...selectedChunkIds].map(id=>library.scenes.find(chunk=>chunk.id===id)).filter(Boolean);
-  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,count:repeatValue(reserveCount.input)});
+  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,count:repeatValue(reserveCount.input),
+    ...(reserveImageMode.input.value==='custom' ? {imageOptions:normalizeReservationImageOptions({aspectRatio:reserveRatio.input.value,size:reserveSize.input.value})} : {})});
   function sequenceKeys() {
     const keys=['common','character',...[...selectedChunkIds].map(id=>'chunk:'+id)];
     keys.splice(triggerPosition==='end' ? keys.length : Math.min(triggerPosition,keys.length),0,'trigger');return keys;
@@ -1860,7 +1895,14 @@ function mountPresetEditor(parent, io) {
   selectVisible.setAttribute('aria-label','보이는 청크 모두 선택');selectVisible.textContent='모두 선택';decorateIcon(selectVisible,'playlist_add');
   clearSelected.setAttribute('aria-label','청크 선택 전부 해제');clearSelected.textContent='선택 해제';decorateIcon(clearSelected,'close');
   const choiceActions=el('div',null,{class:'pq-actions'});choiceActions.append(selectVisible,clearSelected);
+  function renderRecipeImages() {
+    const customImages=reserveImageMode.input.value==='custom';
+    imagePickers.hidden=!customImages;
+    const images=customImages ? normalizeReservationImageOptions({aspectRatio:reserveRatio.input.value,size:reserveSize.input.value}) : defaultRecipeImages();
+    imageSettingsNote.textContent=customImages ? `${images.aspectRatio} · ${images.size}를 이 예약에 보관합니다. 다른 예약·기본 설정은 유지됩니다.` : `기본 ${images.aspectRatio} · ${images.size} 사용 · 대기열 등록 시점의 기본값이 적용됩니다.`;
+  }
   function preview() {
+    renderRecipeImages();
     const preset = library.presets.find(item => item.id === reservePreset.input.value);
     const character = library.characters.find(item => item.id === reserveCharacter.input.value);
     const chunks = selectedChunksInOrder();
@@ -1930,7 +1972,7 @@ function mountPresetEditor(parent, io) {
       const character = reservation.snapshot?.character || library.characters.find(item => item.id === reservation.characterId);
       const chunkNames = reservation.snapshot ? reservation.snapshot.chunks.map(chunk=>chunk.name) : reservation.sceneIds.map(id=>library.scenes.find(item=>item.id===id)?.name || '(삭제된 청크)');
       row.append(el('strong',`${character?.name || '(삭제된 캐릭터)'} · ${chunkNames.join(' + ') || '청크 없음'}`),
-        el('small',`${preset?.name || '(삭제된 프리셋)'} · ${reservation.count}회${reservation.snapshot ? ' · 추가 시점의 설정 보관' : ''}`),action('이 예약 제외',async () => {
+        el('small',`${preset?.name || '(삭제된 프리셋)'} · ${reservation.count}회 · ${reservation.imageOptions ? `${reservation.imageOptions.aspectRatio} · ${reservation.imageOptions.size}` : '이미지 기본 설정 사용'}${reservation.snapshot ? ' · 추가 시점의 설정 보관' : ''}`),action('이 예약 제외',async () => {
           const next = copy(library); next.reservations = next.reservations.filter(item => item.id !== reservation.id);
           await commit(next,'선택한 예약을 제외했습니다. 이미 등록한 대기열은 유지됩니다.');
         }),orderControls('reservations',()=>reservation.id,`예약 ${character?.name || '삭제된 캐릭터'} ${chunkNames.join(' + ') || '청크 없음'}`,false,true));
@@ -1949,6 +1991,7 @@ function mountPresetEditor(parent, io) {
     const resolved=resolveCombination(library,entry);
     loadedCombination=true;missingMaterials=resolved.missing;
     reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);triggerPosition=resolved.triggerPosition ?? 1;
+    setRecipeImages(resolved.imageOptions);
     reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();
     io.notify(resolved.missing.length ? `조합을 불러왔지만 없는 재료가 있습니다: ${resolved.missing.join(', ')}. 확인 전에는 예약하지 않습니다.` : '조합을 불러왔습니다. 현재 라이브러리 내용으로 미리보기를 확인해 주세요.');
   }
@@ -1965,7 +2008,7 @@ function mountPresetEditor(parent, io) {
       for (const entry of entries) {
         const row=el('div',null,{class:'pq-history-card','data-combination-id':entry.id});
         const preset=library.presets.find(item=>item.id===entry.presetId),character=library.characters.find(item=>item.id===entry.characterId),chunks=entry.sceneIds.map(id=>library.scenes.find(item=>item.id===id)?.name || '(삭제된 청크)');
-        row.append(el('strong',entry.name || `${character?.name || '(삭제된 캐릭터)'} · ${chunks.join(' + ') || '청크 없음'}`),el('small',`${preset?.name || '(삭제된 프리셋)'} · ${entry.count}회`));
+        row.append(el('strong',entry.name || `${character?.name || '(삭제된 캐릭터)'} · ${chunks.join(' + ') || '청크 없음'}`),el('small',`${preset?.name || '(삭제된 프리셋)'} · ${entry.count}회 · ${entry.imageOptions ? `${entry.imageOptions.aspectRatio} · ${entry.imageOptions.size}` : '이미지 기본 설정 사용'}`));
         const controls=el('div',null,{class:'pq-actions'});
         const load=action('불러오기',()=>loadCombination(entry));load.setAttribute('aria-label',`조합 불러오기: ${entry.id}`);
         const star=action(entry.favorite ? '★' : '☆',()=>toggleFavorite(entry));star.setAttribute('aria-label',`조합 즐겨찾기: ${entry.id}`);star.setAttribute('aria-pressed',String(entry.favorite));
@@ -1999,7 +2042,7 @@ function mountPresetEditor(parent, io) {
       await io.enqueue(copy(library));
     });register.dataset.headerFeedback='';
   review.append(el('strong','합쳐지는 순서'),sequenceList,el('strong','전송 미리보기'),combined,missingNotice);
-  schedule.append(reserveCount.wrap,reservationActions,scheduleTabs,reservations,recentList,favoritesList);
+  schedule.append(imageSettings,reserveCount.wrap,reservationActions,scheduleTabs,reservations,recentList,favoritesList);
   const composeMode=el('div',null,{class:'pq-compose-mode'});
   for (const [id,name] of [['choices','재료'],['review','순서·미리보기'],['schedule','예약·기록']]) {const button=el('button',name,{type:'button','data-compose-mode':id});button.addEventListener('click',()=>{reserveBody.dataset.composeMode=id;for (const control of composeMode.children) control.setAttribute('aria-pressed',String(control===button));});composeMode.append(button);}
   reserveBody.dataset.composeMode='choices';composeMode.children[0].setAttribute('aria-pressed','true');
@@ -2021,10 +2064,12 @@ function mountPresetEditor(parent, io) {
     addPage:(id,title,...content)=>{const body=section(title,false,id);body.append(...content);runtimePages.push(body);return body;},
     // Library/compose controls may be used while this tab's runner is busy; runtime pages and site-touching buttons may not.
     allowsWhileRunning:element=>root.contains(element) && !runtimePages.some(page=>page.contains(element)) && element.dataset?.siteIo == null,
+    refreshImageOptions:renderRecipeImages,
     refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();},
     reload:() => {
       const next=normalizePresetLibrary(io.load() || makePresetLibrary());
       library=next;selectedChunkIds=new Set();missingMaterials=[];loadedCombination=false;triggerPosition=1;
+      setRecipeImages();
       presetSearch.input.value='';
       chunkSearch.input.value='';chunkFilter.input.value='';pickerClosed.clear();
       for (const editor of [characterEditor,chunkEditor]) editor.resetView();
@@ -2282,7 +2327,7 @@ function mountPresetEditor(parent, io) {
   }
 
   const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
-  Object.assign(core,{queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -2546,6 +2591,7 @@ function mountPresetEditor(parent, io) {
   }
   function render() {
     if (!panel) return;
+    presetEditor?.refreshImageOptions?.();
     const rememberControl=panel.querySelector('[data-remember-api-key]');
     if(rememberControl)rememberControl.disabled=!rememberedKey.supported || running || starting || settingsBusy;
     const keyStatus=panel.querySelector('[data-api-key-state]');
@@ -2691,7 +2737,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.9', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.10', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2839,12 +2885,12 @@ function mountPresetEditor(parent, io) {
       isCompact:()=>(panel.getBoundingClientRect().width || document.documentElement?.clientWidth || window.innerWidth)<=760,
       loadLayout:key=>JSON.parse(localStorage.getItem(`local.pixai-web-queue.layout.v1.${key}`) || 'null'),
       saveLayout:(key,value)=>localStorage.setItem(`local.pixai-web-queue.layout.v1.${key}`,JSON.stringify(value)),
-      notify:notifyAction,
+      notify:notifyAction,getImageOptions:()=>apiOptions,
       captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
       applySettings:value=>settingsAction(()=>settings.apply(value)),
       enqueue:value=>queueEdit(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
-        for (const job of added) {job.apiOptions={...apiOptions};job.apiBatchSize=Number(imageCount.value) || expectedCount();}
+        for (const job of added) {job.apiOptions=normalizeApiOptions({...apiOptions,...job.apiOptions});job.apiBatchSize=Number(imageCount.value) || expectedCount();}
         if (jobs.length+added.length>1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
         if (value.reservations.some(res=>jobs.some(job=>job.composition?.reservation?.id===res.id))) throw new Error('이미 등록된 예약이 있습니다. 해당 예약을 제외하고 새로 예약해 주세요.');
         jobs.push(...added);persist();
@@ -2872,7 +2918,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.9',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.10',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3274,7 +3320,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.9', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.10', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
