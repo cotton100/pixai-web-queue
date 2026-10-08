@@ -419,6 +419,28 @@ test('production panel sends landscape ratio and saves four images without JSON 
   assert.equal(JSON.parse(requests.find(x=>x.method==='POST').data).aspectRatio,'5:3');
   assert(!JSON.stringify(saved).includes('fixture-key'));
 });
+test('invalid neighboring setting rolls visible ratio back and bulk apply uses the same committed value',async()=>{
+  const f=panelFixture(null,{queue:[{...job(),apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})}]});
+  const ratio=f.panel.querySelector('[aria-label="API 이미지 비율"]'),repeat=f.panel.querySelector('[aria-label="각 프롬프트 반복 횟수"]');
+  ratio.value='3:2';ratio.fire('change');const stored=f.records.get(runtimeSettingsKeys.options);
+  repeat.value='';ratio.value='5:3';ratio.fire('change');
+  assert.equal(ratio.value,'3:2');assert.equal(repeat.value,'1');assert.equal(f.records.get(runtimeSettingsKeys.options),stored);
+  assert.match(f.message(),/기본 옵션 저장 실패.*반복 횟수/);assert.match(f.message(),/이전 설정으로 되돌렸습니다/);
+  runtimePress(f,'미제출 대기 작업에 비율·크기 적용');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].apiOptions.aspectRatio,'3:2');
+  ratio.value='5:3';ratio.fire('change');runtimePress(f,'미제출 대기 작업에 비율·크기 적용');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].apiOptions.aspectRatio,'5:3');assert.equal(f.networkCalls,0);
+});
+
+test('corrupt stored options show matching defaults and explain the ratio for legacy queued jobs',()=>{
+  const f=panelFixture(null,{queue:[job()],records:new Map([[runtimeSettingsKeys.options,'{broken']])});
+  assert.equal(f.panel.querySelector('[aria-label="API 이미지 비율"]').value,'9:16');
+  assert.equal(f.panel.querySelector('[aria-label="API 이미지 크기"]').value,'1k');
+  assert.equal(f.records.get(runtimeSettingsKeys.options),'{broken');
+  assert.match(f.message(),/화면과 실행 모두 기본값/);
+  assert.match(f.panel.querySelectorAll('small').map(n=>n.textContent).join('\n'),/시작 시 현재 설정 9:16/);
+});
+
 test('panel displays frozen ratio and explicitly applies new ratio to pending jobs without network requests',async()=>{
   const pending={...job(),apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})};
   const paid={...job(),id:'paid',state:'waiting',taskId:'900',apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})};
