@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.4
+// @version      0.9.5
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -312,7 +312,7 @@
         job.saved.push({mediaId, file});
         io.persist();
       }
-      await io.saveMetadata(job);
+      if (io.saveMetadata) await io.saveMetadata(job);
       job.state = 'done';
       job.error = '';
       io.persist();
@@ -2134,6 +2134,22 @@ function mountPresetEditor(parent, io) {
     delete next.submittedAt;
     return next;
   }
+  function applyQueuedImageOptions(jobs,options) {
+    const current=normalizeApiOptions(options);
+    return jobs.map(job=>{
+      if (job.state!=='queued' || job.taskId || job.saved?.length || job.mediaIds?.length || job.metadataFile) return job;
+      if (job.submittedAt && !/^공식 API 오류 \((400|401|403|404|422)\)\./.test(job.error || '')) return job;
+      const previous=job.apiPayload || job.apiOptions;
+      if (previous?.aspectRatio===current.aspectRatio && previous?.size===current.size) return job;
+      const next={...job,apiOptions:{...(job.apiOptions || current),aspectRatio:current.aspectRatio,size:current.size},error:''};
+      if (job.apiPayload) {
+        next.apiRequestHistory=[...(job.apiRequestHistory || []),{payload:JSON.parse(JSON.stringify(job.apiPayload)),submittedAt:job.submittedAt ?? null,error:job.error || ''}];
+        next.apiPayload={...job.apiPayload,aspectRatio:current.aspectRatio,size:current.size};
+      }
+      delete next.submittedAt;
+      return next;
+    });
+  }
   function gmResponse(request, details, timeoutMs, timers={set:(fn,ms)=>setTimeout(fn,ms),clear:id=>clearTimeout(id)}) {
     return new Promise((resolve,reject)=>{
       let settled=false,control;
@@ -2219,7 +2235,7 @@ function mountPresetEditor(parent, io) {
   }
 
   const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
-  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,createSessionApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -2384,14 +2400,6 @@ function mountPresetEditor(parent, io) {
       const blob = await imageBlob(mediaId);
       const extension = {'image/png':'png','image/jpeg':'jpg','image/webp':'webp'}[blob.type];
       return writeNew(`${safeName(job.title)}_${job.taskId}_${index+1}_${mediaId}.${extension}`, blob);
-    },
-    async saveMetadata(job) {
-      if (job.metadataFile) return;
-      job.metadataFile = await writeNew(`${safeName(job.title)}_${job.taskId}.json`, JSON.stringify({
-        backend:job.backend || 'legacy-web', queryBackend:job.queryBackend, apiRequest:job.apiPayload || null, taskId:job.taskId, title:job.title, prompt:job.prompt, negativePrompt:job.appliedNegativePrompt ?? null, configuration:job.appliedConfiguration ?? null, composition:job.composition ?? null, images:job.saved, savedAt:new Date().toISOString(),
-        storage:{mode:storage.mode, fileNames:storage.mode === 'download' ? 'requested; browser may rename on collisions' : 'actual'},
-        previousDownloads:job.previousDownloads || []
-      }, null, 2));
     }
   };
   async function start({oneJob=false}={}) {
@@ -2490,6 +2498,11 @@ function mountPresetEditor(parent, io) {
     for (const job of jobs) {
       const row = node('div', null, {class:'pq-job'});
       row.append(node('strong', job.title), node('span', `${LABELS[job.state]}${job.expected ? ` · ${job.saved?.length || 0}/${job.expected}` : ''}`));
+      const imageOptions=job.apiPayload || job.apiOptions;
+      if (imageOptions?.aspectRatio) {
+        row.append(node('small',`적용 비율 ${imageOptions.aspectRatio} (가로:세로) · 크기 ${imageOptions.size || '1k'}`));
+        if (job.state==='queued' && !job.taskId && (imageOptions.aspectRatio!==apiOptions.aspectRatio || imageOptions.size!==apiOptions.size)) row.append(node('small',`현재 설정 ${apiOptions.aspectRatio} · ${apiOptions.size}과 다릅니다. 설정에서 대기 작업에 비율·크기를 적용할 수 있습니다.`));
+      }
       if (job.error) row.append(node('small', job.error));
       if (job.taskId) row.append(node('small', `작업 ${job.taskId}`));
       const timeline=node('div',null,{class:'pq-job-timeline','aria-label':`진행 단계: ${job.title}`});
@@ -2576,7 +2589,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.4', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.5', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2647,8 +2660,18 @@ function mountPresetEditor(parent, io) {
     }
     apiContent.append(keyInput,connectKey,clearKey,keyState,node('small','키는 파일·설정 백업·대기열에 저장하지 않습니다. 새로고침하면 다시 입력합니다.'),verifyId,verifyKey);
     apiField('modelVersionId','통짜 대기열 기본 모델 버전 ID (프리셋 지정 시 해당 프리셋 우선)');
-    apiField('aspectRatio','API 이미지 비율',API_RATIOS.map(value=>[value,value]));
+    apiField('aspectRatio','API 이미지 비율',API_RATIOS.map(value=>[value,`${value} · ${Number(value.split(':')[0])>Number(value.split(':')[1]) ? '가로' : Number(value.split(':')[0])<Number(value.split(':')[1]) ? '세로' : '정사각'}`]));
     apiField('size','API 이미지 크기',[['1k','1k'],['1.5k','1.5k']]);
+    apiContent.append(node('small','비율은 가로:세로입니다. 5:3은 가로, 3:5는 세로입니다. 설정 변경은 새로 등록하는 작업부터 적용됩니다. 기존 대기 작업은 아래 버튼으로 바꿉니다.'));
+    const applyImageOptions=button('미제출 대기 작업에 비율·크기 적용',async()=>{
+      if (running || starting || settingsBusy) throw new Error('실행 중에는 대기열 요청을 바꿀 수 없습니다.');
+      const options=readApiFields();let count=0;
+      await locked(()=>{
+        const before=jobs,next=applyQueuedImageOptions(jobs,options);count=next.filter((job,index)=>job!==before[index]).length;
+        jobs=next;try {persist();} catch(error) {jobs=before;throw error;}
+      });
+      message=`미제출 대기 작업 ${count}건에 ${options.aspectRatio} (가로:세로) · ${options.size} 적용 완료. 새 생성은 하지 않았습니다.`;render();
+    });applyImageOptions.dataset.edit='';apiContent.append(applyImageOptions);
     apiField('mode','츠바키 API 생성 모드',[['','모델 기본값 (모드 보내지 않음)'],['lite','Lite'],['standard','Standard'],['pro','Pro'],['ultra','Ultra']]);
     apiField('style','츠바키 API 스타일',[['','스타일 보내지 않음'],...API_STYLES.map(value=>[value,value])]);
     apiField('seed','API 시드 (빈칸은 작업별 랜덤)').setAttribute('placeholder','0~4294967295');
@@ -2670,7 +2693,7 @@ function mountPresetEditor(parent, io) {
     }
     try {loadOptions();} catch {message='기본 옵션을 읽지 못했습니다. 설정 불러오기로 복구하거나 입력값을 확인해 주세요.';}
     for (const input of [budget,title,repeat,imageCount,maxInFlight,...Object.values(apiFields)]) input.addEventListener('change',()=>{
-      try {const options=readOptions();localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));apiOptions=options.api;}
+      try {const options=readOptions();localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));apiOptions=options.api;render();}
       catch(error) {message=`기본 옵션 저장 실패: ${error.message}`;render();}
     });
     const add = button('대기열 추가', async () => locked(() => {
@@ -2731,7 +2754,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.4',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.5',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3120,7 +3143,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.4', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.5', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

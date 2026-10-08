@@ -393,7 +393,7 @@ test('runtime API key clears its field, stays out of storage/backup and disappea
   runtimePress(f,'설정 내보내기');await runtimeFlush();assert([...f.records.values()].every(value=>!value.includes('fixture-sensitive-key')));
   f.fireWindow('pagehide');runtimePress(f,'키 지우기');await runtimeFlush();assert.match(f.panel.querySelector('[data-api-key-state]').textContent,/미입력/);
 });
-test('production panel completes one official four-image task and JSON while leaving a later queued job untouched',async()=>{
+test('production panel sends landscape ratio and saves four images without JSON while leaving a later job untouched',async()=>{
   const files=new Map(),requests=[];
   const folder={name:'fixture',queryPermission:async()=> 'granted',getFileHandle:async(name,{create}={})=>{
     if (!create&&!files.has(name)) throw Object.assign(Error('missing'),{name:'NotFoundError'});
@@ -409,14 +409,29 @@ test('production panel completes one official four-image task and JSON while lea
     details.onload({status:details.method==='POST'?201:200,finalUrl:details.url,responseText:JSON.stringify(result)});
   });return {abort(){}};};
   const f=panelFixture(()=>Promise.resolve(folder),{queue,request});
+  const ratio=f.panel.querySelector('[aria-label="API 이미지 비율"]');ratio.value='5:3';ratio.fire('change');
   f.press(f.panel.querySelector('[data-choose-folder]'));await runtimeFlush();runtimePress(f,'첫 작업만 실행');
   for(let i=0;i<20;i++){await runtimeFlush();if(f.message().includes('첫 작업 실행과 저장이 끝났습니다'))break;}
   const saved=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
   assert.equal(saved[0].state,'done');assert.equal(saved[0].saved.length,4);assert.equal(saved[1].state,'queued');assert.equal(saved[1].apiPayload,undefined);
-  assert.equal(files.size,5);assert.equal(requests.filter(x=>x.method==='POST').length,1);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
-  const metadata=JSON.parse([...files].find(([name])=>name.endsWith('.json'))[1]);assert.equal(metadata.apiRequest.batchSize,4);assert.equal(metadata.backend,'official-api');assert.equal(metadata.images.length,4);
-  assert(!JSON.stringify(metadata).includes('fixture-key'));assert(!JSON.stringify(saved).includes('fixture-key'));
+  assert.equal(files.size,4);assert.equal(requests.filter(x=>x.method==='POST').length,1);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
+  assert([...files.keys()].every(name=>name.endsWith('.webp')));assert.equal(saved[0].metadataFile,undefined);
+  assert.equal(JSON.parse(requests.find(x=>x.method==='POST').data).aspectRatio,'5:3');
+  assert(!JSON.stringify(saved).includes('fixture-key'));
 });
+test('panel displays frozen ratio and explicitly applies new ratio to pending jobs without network requests',async()=>{
+  const pending={...job(),apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})};
+  const paid={...job(),id:'paid',state:'waiting',taskId:'900',apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})};
+  const f=panelFixture(null,{queue:[pending,paid]});
+  const ratio=f.panel.querySelector('[aria-label="API 이미지 비율"]');ratio.value='5:3';ratio.fire('change');
+  const descriptions=f.panel.querySelectorAll('small').map(node=>node.textContent).join('\n');
+  assert.match(descriptions,/적용 비율 3:5/);assert.match(descriptions,/현재 설정 5:3/);
+  runtimePress(f,'미제출 대기 작업에 비율·크기 적용');await runtimeFlush();
+  const jobs=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
+  assert.equal(jobs[0].apiOptions.aspectRatio,'5:3');assert.equal(jobs[1].apiOptions.aspectRatio,'3:5');
+  assert.match(f.message(),/1건에 5:3/);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
 test('known task recovery does not require generation consent or parse incompatible later API presets',async()=>{
   const f=panelFixture(()=>Promise.resolve({name:'fixture',queryPermission:async()=> 'granted'}),{queue:[{...job(),state:'waiting',taskId:'900',expected:1},{...job(),id:'later',configuration:{model:{versionId:'22'},loras:[{weight:2}]}}]});
   f.press(f.panel.querySelector('[data-choose-folder]'));await runtimeFlush();

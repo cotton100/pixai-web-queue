@@ -53,6 +53,21 @@ test('paid, uncertain, saved and ambiguous submissions cannot replace API reques
   }
   const j=job(),before=copy(j);assert.throws(()=>core.reconfigureQueuedApiJob(j,{mode:''},2,42));assert.deepEqual(j,before);
 });
+test('bulk image settings preserve frozen prompt, model, LoRAs, seed, mode and batch while keeping paid or uncertain jobs untouched',()=>{
+  const pending={...job(),apiOptions:core.normalizeApiOptions({aspectRatio:'3:5',mode:'pro'}),apiPayload:core.buildApiPayload(job(),{aspectRatio:'3:5',mode:'pro'},4,42)};
+  const blocked=[{state:'done',taskId:'900'},{state:'waiting',taskId:'901'},{state:'unknown'},{state:'queued',submittedAt:123,error:'network'},{state:'queued',saved:[{mediaId:'1'}]},{state:'queued',mediaIds:['1']}].map(extra=>({...job(),...extra}));
+  const before=copy(pending),all=[pending,...blocked],next=core.applyQueuedImageOptions(all,{aspectRatio:'5:3',size:'1.5k',mode:'ultra',seed:999});
+  assert.deepEqual(pending,before);assert.deepEqual(next[0].apiPayload,{...before.apiPayload,aspectRatio:'5:3',size:'1.5k'});
+  assert.equal(next[0].apiOptions.mode,'pro');assert.deepEqual(next[0].apiRequestHistory[0].payload,before.apiPayload);
+  blocked.forEach((entry,index)=>assert.equal(next[index+1],entry));
+  assert.equal(core.applyQueuedImageOptions(next,{aspectRatio:'5:3',size:'1.5k'})[0],next[0]);
+});
+test('bulk ratio applies to unfrozen jobs and confirmed rejected requests without generating or altering originals',()=>{
+  const fresh=job(),rejected={...job(),apiPayload:core.buildApiPayload(job(),{},4,42),submittedAt:123,error:'공식 API 오류 (422).'};
+  const next=core.applyQueuedImageOptions([fresh,rejected],{aspectRatio:'5:3',size:'1k'});
+  assert.equal(next[0].apiOptions.aspectRatio,'5:3');assert.equal(next[0].apiPayload,undefined);assert.equal(fresh.apiOptions,undefined);
+  assert.equal(next[1].submittedAt,undefined);assert.equal(next[1].apiPayload.aspectRatio,'5:3');assert.equal(rejected.apiPayload.aspectRatio,'9:16');
+});
 test('key vault clears without storage; API backup round trip preserves settings and rejects secrets',()=>{
   const vault=core.createSessionApiKey();assert.equal(vault.has(),false);assert.throws(()=>vault.set('bad\nkey'));vault.set('private-key');assert.equal(vault.has(),true);vault.clear();assert.throws(()=>vault.get(),/키/);
   const opts={maxCredits:7800,filePrefix:'asset',repeat:1,imageCount:4,maxInFlight:3,api:core.normalizeApiOptions({seed:0,mode:'pro'})};
