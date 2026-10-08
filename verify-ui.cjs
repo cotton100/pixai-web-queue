@@ -6,32 +6,56 @@ const path=require('node:path');
 const core=require(path.join(__dirname,'pixai-web-queue.user.js'));
 const copy=value=>JSON.parse(JSON.stringify(value));
 
-test('compose image controls preserve different reservation choices and show default updates without changing saved recipes',async t=>{
-  const f=fixture(t);await f.choose('표정');await f.select('조합 이미지 설정','custom');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');
+test('visible compose image controls preserve different reservation choices without changing earlier recipes',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');
   await f.press('이 조합 예약 추가');const first=copy(f.library().reservations[0]);
   f.setImageOptions({aspectRatio:'3:5',size:'1k'});assert.match(f.field('현재 조합 이미지 설정').textContent,/5:3.*1.5k/);
-  await f.select('조합 이미지 설정','default');assert.match(f.field('현재 조합 이미지 설정').textContent,/기본 3:5.*1k/);await f.press('이 조합 예약 추가');
-  assert.deepEqual(f.library().reservations[0],first);assert.deepEqual(first.imageOptions,{aspectRatio:'5:3',size:'1.5k'});assert.equal(Object.hasOwn(f.library().reservations[1],'imageOptions'),false);
-  assert.match(f.ui.root.querySelectorAll('.pq-reservation')[0].textContent,/5:3.*1.5k/);assert.match(f.ui.root.querySelectorAll('.pq-reservation')[1].textContent,/이미지 기본 설정 사용/);
-  await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs[0].apiOptions,first.imageOptions);assert.equal(f.jobs[1].apiOptions,undefined);
+  await f.select('조합 이미지 비율','3:5');await f.select('조합 이미지 크기','1k');await f.press('이 조합 예약 추가');
+  assert.deepEqual(f.library().reservations[0],first);assert.deepEqual(first.imageOptions,{aspectRatio:'5:3',size:'1.5k'});assert.deepEqual(f.library().reservations[1].imageOptions,{aspectRatio:'3:5',size:'1k'});
+  const images=f.field('현재 조합 이미지 설정').parentElement;assert.equal(images.parentElement.dataset.page,'compose');assert.equal(images.hidden,undefined);assert.equal(f.fields('조합 이미지 설정').length,0);
+  assert.match(f.ui.root.querySelectorAll('.pq-reservation')[0].textContent,/5:3.*1.5k/);assert.match(f.ui.root.querySelectorAll('.pq-reservation')[1].textContent,/3:5.*1k/);
+  await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs[0].apiOptions,first.imageOptions);assert.deepEqual(f.jobs[1].apiOptions,{aspectRatio:'3:5',size:'1k'});
 });
 
 test('custom recipe images reload from favorites and backups while old records reset custom draft dimensions',async t=>{
-  const f=fixture(t);await f.choose('행동');await f.select('조합 이미지 설정','custom');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');await f.press('현재 조합 즐겨찾기');
+  const f=fixture(t);await f.choose('행동');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');await f.press('현재 조합 즐겨찾기');
   const id=f.library().combinations[0].id;const backup=core.makeSettingsBackup(f.library(),{maxCredits:7800,filePrefix:'test',repeat:1},{appVersion:'0.9.10',exportedAt:'2026-10-09T00:00:00.000Z'});
   const fresh=fixture(t,core.parseSettingsBackup(JSON.stringify(backup)).library);await fresh.press(`조합 불러오기: ${id}`);
-  assert.equal(fresh.field('조합 이미지 설정').value,'custom');assert.equal(fresh.field('조합 이미지 비율').value,'5:3');assert.equal(fresh.field('조합 이미지 크기').value,'1.5k');assert.equal(fresh.jobs.length,0);
-  await fresh.select('조합 이미지 설정','default');await fresh.press('이 조합 예약 추가');const legacyId=fresh.library().combinations[0].id;
-  await fresh.press(`조합 불러오기: ${id}`);await fresh.press(`조합 불러오기: ${legacyId}`);assert.equal(fresh.field('조합 이미지 설정').value,'default');
-  fresh.setImageOptions({aspectRatio:'3:5',size:'1k'});assert.match(fresh.field('현재 조합 이미지 설정').textContent,/기본 3:5/);assert.equal(fresh.library().combinations.length,2);
+  assert.equal(fresh.field('조합 이미지 비율').value,'5:3');assert.equal(fresh.field('조합 이미지 크기').value,'1.5k');assert.equal(fresh.jobs.length,0);
+  const old=core.rememberCombination(fresh.library(),{presetId:'p1',characterId:'c1',sceneIds:['s2'],count:1},{idFactory:()=> 'legacy'});fresh.setLibrary(old);fresh.ui.refresh();
+  fresh.setImageOptions({aspectRatio:'3:5',size:'1k'});await fresh.press('조합 불러오기: legacy');assert.equal(fresh.field('조합 이미지 비율').value,'3:5');assert.match(fresh.field('현재 조합 이미지 설정').textContent,/3:5.*1k/);assert.equal(fresh.library().combinations.length,2);
 });
 
-test('reservation image choice is atomic on storage failure and button lists remain editable without changing global defaults',async t=>{
-  const f=fixture(t);await f.select('조합 이미지 설정','custom');
+test('reservation image choice is atomic on library storage failure and button lists remain editable',async t=>{
+  const f=fixture(t);
   const ratio=f.field('조합 이미지 비율: 5:3 · 가로');await ratio.emit('click');const size=f.field('조합 이미지 크기: 1.5k');await size.emit('click');
   const before=f.library();f.setSaveFailure('disk full');await f.press('이 조합 예약 추가');assert.deepEqual(f.library(),before);assert.equal(f.field('조합 이미지 비율').value,'5:3');assert.match(f.messages.at(-1),/disk full/);
   f.setSaveFailure(null);await f.press('이 조합 예약 추가');assert.deepEqual(f.library().reservations[0].imageOptions,{aspectRatio:'5:3',size:'1.5k'});
-  await f.select('조합 이미지 설정','default');assert.match(f.field('현재 조합 이미지 설정').textContent,/기본 9:16.*1k/);
+  assert.match(f.field('현재 조합 이미지 설정').textContent,/5:3.*1.5k/);
+});
+
+test('fresh compose mount restores selected materials, order, count, dimensions and LoRA trigger position without enqueuing',async t=>{
+  const f=fixture(t);await f.choose('행동');await f.choose('표정');await f.press('LoRA 트리거 아래로');await f.press('LoRA 트리거 아래로');await f.press('LoRA 트리거 아래로');
+  await f.select('이 조합의 생성 횟수','3');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');
+  assert.equal(f.preferences.draft.triggerPosition,'end');const before=copy(f.preferences.draft);
+  const fresh=fixture(t,f.library(),f.preferences);assert.deepEqual(fresh.preferences.draft,before);assert.match(fresh.preview(),/waving, smiling, trigger one/);
+  assert.equal(fresh.field('이 조합의 생성 횟수').value,'3');assert.equal(fresh.field('조합 이미지 비율').value,'5:3');assert.equal(fresh.field('청크 선택: 행동').checked,true);assert.equal(fresh.jobs.length,0);
+  await fresh.press('이 조합 예약 추가');assert.equal(fresh.library().reservations[0].triggerPosition,'end');assert.deepEqual(fresh.library().reservations[0].sceneIds,['s2','s1']);
+});
+
+test('image storage failure restores the last choice and invalid count does not erase the saved draft',async t=>{
+  const f=fixture(t);await f.choose('표정');const before=copy(f.preferences.draft);f.setImageSaveFailure('disk full');await f.select('조합 이미지 비율','5:3');
+  assert.equal(f.field('조합 이미지 비율').value,'9:16');assert.deepEqual(f.preferences.draft,before);assert.match(f.messages.at(-1),/이미지 설정 저장 실패/);
+  f.setImageSaveFailure(null);await f.select('조합 이미지 비율','5:3');assert.equal(f.preferences.imageOptions.aspectRatio,'5:3');const saved=copy(f.preferences.draft);
+  await f.select('이 조합의 생성 횟수','');assert.deepEqual(f.preferences.draft,saved);
+  const fresh=fixture(t,f.library(),f.preferences);assert.equal(fresh.field('이 조합의 생성 횟수').value,'1');assert.equal(fresh.field('조합 이미지 비율').value,'5:3');
+});
+
+test('malformed or missing draft materials are reported without paid work or silent draft replacement on mount',async t=>{
+  const bad={imageOptions:core.normalizeApiOptions(),draft:{presetId:'p1',characterId:'c1',sceneIds:['s1'],triggerPosition:'end',count:1,imageOptions:{aspectRatio:'5:3',size:'1k'},apiKey:'forbidden'}};
+  const broken=fixture(t,seed(),bad);assert.match(broken.messages.at(-1),/조합 편집 상태 복원 실패/);assert.equal(bad.draft.apiKey,'forbidden');assert.equal(broken.jobs.length,0);
+  const valid=copy(bad);delete valid.draft.apiKey;const library=seed();library.scenes=[];const missing=fixture(t,library,valid);
+  assert.match(missing.field('저장한 프롬프트 조합 미리보기').parentElement.textContent,/없는 재료.*청크 s1/);assert.equal(missing.button('이 조합 예약 추가').disabled,true);assert.equal(valid.draft.sceneIds[0],'s1');assert.equal(missing.jobs.length,0);
 });
 test('pointer recipe drag cancels safely and changes only composition order on a trusted release',async t=>{
   const f=fixture(t);await f.choose('표정');await f.choose('행동');const row=()=>f.ui.root.querySelectorAll('[data-recipe-chunk]').find(item=>item.dataset.recipeChunk==='s1');
@@ -142,16 +166,18 @@ function seed() {
     characters:[{id:'c1',name:'Alice',prompt:'character tags',negativePrompt:'character bad'}],
     scenes:[{id:'s1',name:'표정',prompt:'smiling',negativePrompt:'sad'},{id:'s2',name:'행동',prompt:'waving',negativePrompt:'standing still'}],reservations:[]};
 }
-function fixture(t,initial=seed()) {
+function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOptions(),draft:null}) {
   let library=core.normalizePresetLibrary(copy(initial)),captured=copy({model:library.presets[0].model,loras:library.presets[0].loras});
-  let loadResult,saveFailure,busy=false,imageOptions=core.normalizeApiOptions();
+  let loadResult,saveFailure,imageSaveFailure,busy=false;
   const messages=[],jobs=[],saves=[];let sequence=0;
   const parent=new Element('aside');const previousDocument=globalThis.document;
   globalThis.document={createElement:tag=>new Element(tag),createElementNS:(_namespace,tag)=>new Element(tag)};
   t.after(()=>{if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument;});
   const ui=core.mountPresetEditor(parent,{
     load:()=>copy(loadResult===undefined?library:loadResult),save:value=>{if(saveFailure)throw new Error(saveFailure);library=core.normalizePresetLibrary(copy(value));saves.push(copy(library));},
-    isBusy:()=>busy,getImageOptions:()=>imageOptions,
+    isBusy:()=>busy,getImageOptions:()=>preferences.imageOptions,
+    saveImageOptions:value=>{if(imageSaveFailure)throw new Error(imageSaveFailure);preferences.imageOptions=core.normalizeApiOptions(value);},
+    loadDraft:()=>copy(preferences.draft),saveDraft:value=>{preferences.draft=copy(value);},
     captureSettings:async()=>copy(captured),applySettings:async()=>{},notify:message=>messages.push(message),
     enqueue:async value=>{jobs.push(...core.expandPresetReservations(value,{idFactory:()=>`job-${++sequence}`,maxCredits:7800}));},
     button:(text,action)=>{const element=new Element('button');element.textContent=text;element.press=async()=>{if(element.disabled)return;try{await action();}catch(error){messages.push(error.message);}};return element;}
@@ -163,10 +189,10 @@ function fixture(t,initial=seed()) {
   const press=async name=>{const element=button(name);assert(Object.hasOwn(element.dataset,'edit'),`${name} must participate in running-state disable`);await element.press();};
   const select=async(name,value)=>{field(name).value=value;await field(name).emit('change');};
   const choose=async(name,checked=true)=>{const element=field(`청크 선택: ${name}`);assert.equal(element.type,'checkbox');element.checked=checked;await element.emit('change');};
-  return {ui,parent,all,field,fields,button,press,select,choose,messages,jobs,saves,
+  return {ui,parent,all,field,fields,button,press,select,choose,messages,jobs,saves,preferences,
     preview:()=>field('저장한 프롬프트 조합 미리보기').textContent,
     library:()=>copy(library),setLibrary:value=>{library=core.normalizePresetLibrary(copy(value));},
-    setLoadResult:value=>{loadResult=value===undefined?undefined:copy(value);},setImageOptions:value=>{imageOptions=core.normalizeApiOptions(value);ui.refreshImageOptions();},
+    setLoadResult:value=>{loadResult=value===undefined?undefined:copy(value);},setImageOptions:value=>{preferences.imageOptions=core.normalizeApiOptions(value);ui.refreshImageOptions();},setImageSaveFailure:value=>{imageSaveFailure=value;},
     setCapture:value=>{captured=copy(value);},setSaveFailure:value=>{saveFailure=value;},
     setBusy:value=>{busy=value;for(const element of all().filter(item=>Object.hasOwn(item.dataset,'edit')))element.disabled=busy||element.dataset.unavailable==='true';}};
 }

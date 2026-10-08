@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.10
+// @version      0.9.11
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -421,6 +421,13 @@
     const source=settingsBackupKeys(value,'예약 이미지 설정',['aspectRatio','size']);
     if (!API_RATIOS.includes(source.aspectRatio) || !['1k','1.5k'].includes(source.size)) throw new Error('예약 이미지 비율·크기를 확인해 주세요.');
     return {aspectRatio:source.aspectRatio,size:source.size};
+  }
+  function normalizeComposeDraft(value) {
+    const source=settingsBackupKeys(value,'조합 편집 상태',['presetId','characterId','sceneIds','triggerPosition','count','imageOptions']);
+    if (!Array.isArray(source.sceneIds) || source.sceneIds.length>1000 || new Set(source.sceneIds).size!==source.sceneIds.length) throw new Error('조합 편집 청크 목록을 확인해 주세요.');
+    return {presetId:source.presetId==='' ? '' : presetIdentifier(source.presetId,'편집 프리셋'),characterId:source.characterId==='' ? '' : presetIdentifier(source.characterId,'편집 캐릭터'),
+      sceneIds:source.sceneIds.map(id=>presetIdentifier(id,'편집 청크')),triggerPosition:normalizeTriggerPosition(source.triggerPosition,source.sceneIds.length),
+      count:presetInteger(source.count,'편집 횟수',1,100),imageOptions:normalizeReservationImageOptions(source.imageOptions)};
   }
   function normalizePresetLibrary(value, options = {}) {
     const source = presetObject(value, '프리셋 라이브러리');
@@ -1788,38 +1795,50 @@ function mountPresetEditor(parent, io) {
   const pickerClosed = new Set();
   let groupSummaries = new Map();
   let selectedChunkIds = new Set();
-  let missingMaterials=[],loadedCombination=false,recipeDrag=null,triggerPosition=1;
+  let missingMaterials=[],loadedCombination=false,recipeDrag=null,triggerPosition=1,draftReady=false,lastDraftText='',draftSaveError='';
   const reserveCount = field('이 조합의 생성 횟수','input',{type:'number',min:'1',max:'100',value:'1'});
-  const reserveImageMode=field('조합 이미지 설정','select');
-  for (const [value,name] of [['default','기본 설정 사용'],['custom','이 조합에 비율·크기 지정']]) reserveImageMode.input.append(el('option',name,{value}));
   const reserveRatio=field('조합 이미지 비율','select'),reserveSize=field('조합 이미지 크기','select');
   for (const ratio of API_RATIOS) {
     const [width,height]=ratio.split(':').map(Number);
     reserveRatio.input.append(el('option',`${ratio} · ${width>height ? '가로' : width<height ? '세로' : '정사각'}`,{value:ratio}));
   }
   for (const size of ['1k','1.5k']) reserveSize.input.append(el('option',size,{value:size}));
-  const reserveRatioPicker=buttonPicker(reserveRatio,{caption:'이미지 비율',icon:'image',empty:false,onChange:preview});
-  const reserveSizePicker=buttonPicker(reserveSize,{caption:'이미지 크기',icon:'image',empty:false,onChange:preview});
+  const reserveRatioPicker=buttonPicker(reserveRatio,{caption:'이미지 비율',icon:'image',empty:false,onChange:chooseRecipeImages});
+  const reserveSizePicker=buttonPicker(reserveSize,{caption:'이미지 크기',icon:'image',empty:false,onChange:chooseRecipeImages});
   const imageSettingsNote=el('small',null,{'aria-label':'현재 조합 이미지 설정',role:'status'});
   const imageSettings=el('div',null,{class:'pq-reservation-image'}),imagePickers=el('div',null,{class:'pq-inline'});
-  root.append(el('style','#local-pixai-queue .pq-reservation-image{padding:8px 0;border-bottom:1px solid #41474f;margin-bottom:8px}#local-pixai-queue .pq-reservation-image>.pq-inline{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:8px}#local-pixai-queue .pq-reservation-image .pq-choice-list{height:78px}'));
-  imagePickers.append(reserveRatioPicker.wrap,reserveSizePicker.wrap);imageSettings.append(reserveImageMode.wrap,imagePickers,imageSettingsNote);
+  root.append(el('style','#local-pixai-queue .pq-reservation-image{flex:none;padding:8px 12px;border-bottom:1px solid var(--pq-line,#41474f)}#local-pixai-queue .pq-reservation-image>.pq-inline{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px}#local-pixai-queue .pq-reservation-image .pq-choice-list{height:78px}'));
+  imagePickers.append(reserveRatioPicker.wrap,reserveSizePicker.wrap);imageSettings.append(imagePickers,imageSettingsNote);
   const defaultRecipeImages=()=>{const options=normalizeApiOptions(io.getImageOptions?.() || {});return {aspectRatio:options.aspectRatio,size:options.size};};
+  let recipeImages=defaultRecipeImages();
   function setRecipeImages(value) {
-    const images=value ? normalizeReservationImageOptions(value) : defaultRecipeImages();
-    reserveImageMode.input.value=value ? 'custom' : 'default';reserveRatio.input.value=images.aspectRatio;reserveSize.input.value=images.size;
+    recipeImages=value ? normalizeReservationImageOptions(value) : defaultRecipeImages();
+    reserveRatio.input.value=recipeImages.aspectRatio;reserveSize.input.value=recipeImages.size;
     reserveRatioPicker.render();reserveSizePicker.render();
   }
+  function chooseRecipeImages() {
+    try {
+      if (io.isBusy?.()) throw new Error('설정 처리가 끝난 뒤 이미지 비율·크기를 골라 주세요.');
+      const images=normalizeReservationImageOptions({aspectRatio:reserveRatio.input.value,size:reserveSize.input.value});
+      io.saveImageOptions?.(images);recipeImages=images;
+    } catch(error) {setRecipeImages(recipeImages);io.notify(`이미지 설정 저장 실패: ${error.message}`);}
+    preview();io.imageOptionsChanged?.();
+  }
   setRecipeImages();
-  reserveImageMode.input.addEventListener('change',()=>{setRecipeImages(reserveImageMode.input.value==='custom' ? defaultRecipeImages() : undefined);preview();});
-  for (const control of [reserveRatio.input,reserveSize.input]) control.addEventListener('change',preview);
+  for (const control of [reserveRatio.input,reserveSize.input]) control.addEventListener('change',chooseRecipeImages);
   const combined = el('div',null,{class:'pq-preview','aria-label':'저장한 프롬프트 조합 미리보기'});
   const sequenceList=el('div',null,{class:'pq-sequence-list','aria-label':'합쳐지는 순서'});
   const missingNotice=el('div',null,{class:'pq-missing-notice',role:'status'});
   const acknowledgeMissing=action('누락 재료 제외하고 계속',()=>{missingMaterials=[];preview();});
   const selectedChunksInOrder=()=>[...selectedChunkIds].map(id=>library.scenes.find(chunk=>chunk.id===id)).filter(Boolean);
-  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,count:repeatValue(reserveCount.input),
-    ...(reserveImageMode.input.value==='custom' ? {imageOptions:normalizeReservationImageOptions({aspectRatio:reserveRatio.input.value,size:reserveSize.input.value})} : {})});
+  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,count:repeatValue(reserveCount.input),imageOptions:{...recipeImages}});
+  function saveComposeDraft() {
+    if (!draftReady || !io.saveDraft) return;
+    let draft;try {draft=normalizeComposeDraft(recipe());} catch {return;} // An unfinished count must not erase the last valid draft.
+    const text=JSON.stringify(draft);if (text===lastDraftText) return;
+    try {io.saveDraft(draft);lastDraftText=text;draftSaveError='';}
+    catch(error) {const message=`조합 편집 상태 저장 실패: ${error.message}`;if (message!==draftSaveError) io.notify(message);draftSaveError=message;}
+  }
   function sequenceKeys() {
     const keys=['common','character',...[...selectedChunkIds].map(id=>'chunk:'+id)];
     keys.splice(triggerPosition==='end' ? keys.length : Math.min(triggerPosition,keys.length),0,'trigger');return keys;
@@ -1896,10 +1915,7 @@ function mountPresetEditor(parent, io) {
   clearSelected.setAttribute('aria-label','청크 선택 전부 해제');clearSelected.textContent='선택 해제';decorateIcon(clearSelected,'close');
   const choiceActions=el('div',null,{class:'pq-actions'});choiceActions.append(selectVisible,clearSelected);
   function renderRecipeImages() {
-    const customImages=reserveImageMode.input.value==='custom';
-    imagePickers.hidden=!customImages;
-    const images=customImages ? normalizeReservationImageOptions({aspectRatio:reserveRatio.input.value,size:reserveSize.input.value}) : defaultRecipeImages();
-    imageSettingsNote.textContent=customImages ? `${images.aspectRatio} · ${images.size}를 이 예약에 보관합니다. 다른 예약·기본 설정은 유지됩니다.` : `기본 ${images.aspectRatio} · ${images.size} 사용 · 대기열 등록 시점의 기본값이 적용됩니다.`;
+    imageSettingsNote.textContent=`${recipeImages.aspectRatio} (가로:세로) · ${recipeImages.size} · 새 예약마다 이 값을 보관합니다.`;
   }
   function preview() {
     renderRecipeImages();
@@ -1924,7 +1940,9 @@ function mountPresetEditor(parent, io) {
     if (missingMaterials.length) missingNotice.append(acknowledgeMissing);
     available(addReservation,!!preset && !!character && !missingMaterials.length && !!prompt);available(favoriteCurrent,!!preset && !!character && !missingMaterials.length && !!prompt);
     renderSequence(preset,character,chunks);
+    saveComposeDraft();
   }
+  for (const event of ['input','change']) reserveCount.input.addEventListener(event,preview);
   for (const select of [reservePreset.input,reserveCharacter.input]) select.addEventListener('change',preview);
   function renderChunkChoices() {
     for (const id of selectedChunkIds) if (!library.scenes.some(item=>item.id===id)) {missingMaterials.push(`청크 ${id}`);selectedChunkIds.delete(id);}
@@ -2042,11 +2060,11 @@ function mountPresetEditor(parent, io) {
       await io.enqueue(copy(library));
     });register.dataset.headerFeedback='';
   review.append(el('strong','합쳐지는 순서'),sequenceList,el('strong','전송 미리보기'),combined,missingNotice);
-  schedule.append(imageSettings,reserveCount.wrap,reservationActions,scheduleTabs,reservations,recentList,favoritesList);
+  schedule.append(reserveCount.wrap,reservationActions,scheduleTabs,reservations,recentList,favoritesList);
   const composeMode=el('div',null,{class:'pq-compose-mode'});
   for (const [id,name] of [['choices','재료'],['review','순서·미리보기'],['schedule','예약·기록']]) {const button=el('button',name,{type:'button','data-compose-mode':id});button.addEventListener('click',()=>{reserveBody.dataset.composeMode=id;for (const control of composeMode.children) control.setAttribute('aria-pressed',String(control===button));});composeMode.append(button);}
   reserveBody.dataset.composeMode='choices';composeMode.children[0].setAttribute('aria-pressed','true');
-  resizable(composeLayout,[choices,review,schedule],'조합 예약',[.35,.35,.30],[250,260,220]);reserveBody.append(composeMode,composeLayout);
+  resizable(composeLayout,[choices,review,schedule],'조합 예약',[.35,.35,.30],[250,260,220]);reserveBody.append(imageSettings,composeMode,composeLayout);
   const registrationBar=el('div',null,{class:'pq-registration-bar'}),reservationTotals=el('span',null,{role:'status'});registrationBar.append(reservationTotals,register);root.append(registrationBar);
   const originalRenderReservations=renderReservations;
   renderReservations=function() {originalRenderReservations();reservationTotals.textContent=`예약 ${library.reservations.length}조합 · ${library.reservations.reduce((sum,item)=>sum+item.count,0)}회`;available(register,library.reservations.length>0);};
@@ -2057,7 +2075,17 @@ function mountPresetEditor(parent, io) {
   navigation.replaceChildren(...['compose','library'].map(id=>views.find(item=>item.id===id).tab));
   libraryTab='chunks';
   showPage('compose');
-  refreshLists(); renderReservations(); preview(); parent.append(root);
+  refreshLists(); renderReservations(); preview();
+  try {
+    const saved=io.loadDraft?.();
+    if (saved) {
+      const draft=normalizeComposeDraft(saved),resolved=resolveCombination(library,draft);loadedCombination=true;
+      missingMaterials=resolved.missing.filter(item=>!(item==='프리셋' && !draft.presetId) && !(item==='캐릭터' && !draft.characterId));
+      reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);triggerPosition=resolved.triggerPosition;
+      setRecipeImages(resolved.imageOptions);reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();
+    }
+  } catch(error) {io.notify(`조합 편집 상태 복원 실패: ${error.message}`);}
+  draftReady=true;parent.append(root);
   return {
     root,
     showPage,
@@ -2065,6 +2093,8 @@ function mountPresetEditor(parent, io) {
     // Library/compose controls may be used while this tab's runner is busy; runtime pages and site-touching buttons may not.
     allowsWhileRunning:element=>root.contains(element) && !runtimePages.some(page=>page.contains(element)) && element.dataset?.siteIo == null,
     refreshImageOptions:renderRecipeImages,
+    getImageOptions:()=>({...recipeImages}),
+    addImageActions:(...content)=>imageSettings.append(...content),
     refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();},
     reload:() => {
       const next=normalizePresetLibrary(io.load() || makePresetLibrary());
@@ -2327,12 +2357,14 @@ function mountPresetEditor(parent, io) {
   }
 
   const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
-  Object.assign(core,{queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeComposeDraft,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
   const LIBRARY_KEY = 'local.pixai-web-queue.presets.v1';
   const OPTIONS_KEY = 'local.pixai-web-queue.options.v1';
+  const COMPOSE_DRAFT_KEY = 'local.pixai-web-queue.compose.v1';
+  const API_COST_ACK_KEY = 'local.pixai-web-queue.api-cost-ack.v1';
   const PREVIOUS_SETTINGS_KEY = 'local.pixai-web-queue.before-import.v1';
   const LOCK = 'local.pixai-web-queue.runner.v1';
   const LABELS = {queued:'대기', submitting:'제출 중', waiting:'완료 확인', saving:'저장 중', save_failed:'저장 재시도 필요', done:'저장 완료', unknown:'제출 결과 확인 필요', skipped:'건너뜀'};
@@ -2355,6 +2387,7 @@ function mountPresetEditor(parent, io) {
   const apiKey=createSessionApiKey();
   const rememberedKey=createRememberedApiKey(apiKey,typeof GM_getValue==='function' && typeof GM_setValue==='function' && typeof GM_deleteValue==='function' ? {get:GM_getValue,set:GM_setValue,remove:GM_deleteValue} : null);
   let apiOptions=normalizeApiOptions();
+  function currentApiOptions() {return normalizeApiOptions({...apiOptions,...presetEditor?.getImageOptions?.()});}
   const api=createOfficialApiClient(typeof GM_xmlhttpRequest==='function' ? GM_xmlhttpRequest : null,()=>apiKey.get());
   window.addEventListener('pagehide',()=>apiKey.clear());
   let choosingFolder = false;
@@ -2431,7 +2464,7 @@ function mountPresetEditor(parent, io) {
     if (!job.apiPayload && !job.configuration && !(job.apiOptions || apiOptions).modelVersionId) {
       job.configuration=await settings.capture();job.negativePrompt=await settings.captureNegative();
     }
-    const payload=job.apiPayload || buildApiPayload(job,job.apiOptions || apiOptions,job.apiBatchSize || runImageCount,crypto.getRandomValues(new Uint32Array(1))[0]);
+    const payload=job.apiPayload || buildApiPayload(job,job.apiOptions || currentApiOptions(),job.apiBatchSize || runImageCount,crypto.getRandomValues(new Uint32Array(1))[0]);
     return {backend:'official-api',queryBackend:'official-v1',apiPayload:payload,expected:payload.batchSize,
       budgetEnforcement:'unavailable; acknowledged at start',appliedConfiguration:job.configuration || {model:{versionId:payload.modelVersionId},loras:payload.loras},appliedNegativePrompt:payload.negativePrompt};
   }
@@ -2530,7 +2563,7 @@ function mountPresetEditor(parent, io) {
       if (storage.mode === 'download') resetDownloadProgress(jobs);
       const selectedCount=Number(panel.querySelector('[data-image-count]').value);
       runImageCount=selectedCount || (newJobs.length ? expectedCount() : 1);
-      const payloads=newJobs.filter(item=>!item.apiPayload).map(job=>[job,buildApiPayload(job,job.apiOptions || apiOptions,job.apiBatchSize || runImageCount,crypto.getRandomValues(new Uint32Array(1))[0])]);
+      const payloads=newJobs.filter(item=>!item.apiPayload).map(job=>[job,buildApiPayload(job,job.apiOptions || currentApiOptions(),job.apiBatchSize || runImageCount,crypto.getRandomValues(new Uint32Array(1))[0])]);
       for (const [job,payload] of payloads) job.apiPayload=payload;
       persist(); // Freeze all new payloads before the first paid request.
       if (stopRequested) throw new Error('시작 준비가 중지됐습니다. 이미지를 생성하지 않았습니다.');
@@ -2649,8 +2682,9 @@ function mountPresetEditor(parent, io) {
       const imageOptions=job.apiPayload || job.apiOptions;
       if (imageOptions?.aspectRatio) {
         row.append(node('small',`적용 비율 ${imageOptions.aspectRatio} (가로:세로) · 크기 ${imageOptions.size || '1k'}`));
-        if (job.state==='queued' && !job.taskId && (imageOptions.aspectRatio!==apiOptions.aspectRatio || imageOptions.size!==apiOptions.size)) row.append(node('small',`현재 설정 ${apiOptions.aspectRatio} · ${apiOptions.size}과 다릅니다. 설정에서 대기 작업에 비율·크기를 적용할 수 있습니다.`));
-      } else if (job.state==='queued' && !job.taskId) row.append(node('small',`시작 시 현재 설정 ${apiOptions.aspectRatio} (가로:세로) · ${apiOptions.size} 적용 예정`));
+        const current=currentApiOptions();
+        if (job.state==='queued' && !job.taskId && (imageOptions.aspectRatio!==current.aspectRatio || imageOptions.size!==current.size)) row.append(node('small',`현재 설정 ${current.aspectRatio} · ${current.size}과 다릅니다. 조합 예약에서 대기 작업에 비율·크기를 적용할 수 있습니다.`));
+      } else if (job.state==='queued' && !job.taskId) {const current=currentApiOptions();row.append(node('small',`시작 시 현재 설정 ${current.aspectRatio} (가로:세로) · ${current.size} 적용 예정`));}
       if (job.error) row.append(node('small', job.error));
       if (job.taskId) row.append(node('small', `작업 ${job.taskId}`));
       const timeline=node('div',null,{class:'pq-job-timeline','aria-label':`진행 단계: ${job.title}`});
@@ -2667,7 +2701,7 @@ function mountPresetEditor(parent, io) {
           await locked(()=>{
             const index=jobs.findIndex(item=>item.id===job.id);
             if (index<0) throw new Error('대기 작업을 찾지 못했습니다.');
-            const next=reconfigureQueuedApiJob(jobs[index],apiOptions,Number(panel.querySelector('[data-image-count]').value) || expectedCount(),crypto.getRandomValues(new Uint32Array(1))[0]);
+            const next=reconfigureQueuedApiJob(jobs[index],currentApiOptions(),Number(panel.querySelector('[data-image-count]').value) || expectedCount(),crypto.getRandomValues(new Uint32Array(1))[0]);
             const before=jobs[index];jobs[index]=next;
             try {persist();} catch(error) {jobs[index]=before;throw error;}
           });
@@ -2737,7 +2771,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.10', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.11', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2768,7 +2802,7 @@ function mountPresetEditor(parent, io) {
     try {minimized=JSON.parse(localStorage.getItem('local.pixai-web-queue.minimized.v1')||'false')===true;} catch { /* Ignore malformed or unavailable view preferences. */ }
     minimize(minimized,false,false);
     const toast=node('div',null,{'data-toast':'',role:'status','aria-live':'polite'});toast.hidden=true;
-    panel.append(style,launcher,header, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}),toast, node('small','공식 API로 생성·저장 · 사이트 생성 버튼은 누르지 않습니다. API 비율·크기·스타일은 설정 탭에서 정합니다.'));
+    panel.append(style,launcher,header, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}),toast, node('small','공식 API로 생성·저장 · 이미지 비율·크기는 조합 예약에서, 스타일은 설정에서 정합니다.'));
     panel.append(node('div','저장 폴더 미선택',{'data-folder':''}));
     const choose = button('저장 폴더 선택', chooseFolder);
     choose.dataset.chooseFolder = '';
@@ -2822,25 +2856,30 @@ function mountPresetEditor(parent, io) {
     }
     apiContent.append(keyInput,rememberLabel,connectKey,clearKey,keyState,note('공용 PC에서는 키를 기억하지 마세요 · 자세히','기본값은 저장 안 함입니다. 기억하기는 Tampermonkey의 이 스크립트 저장소를 사용합니다. 키는 이 도구의 설정·대기열 백업에서 제외됩니다.','암호화 금고는 아닙니다. 입력칸은 PixAI 페이지 안에 있으며, 확장 관리자 백업·동기화에는 키가 포함될 수 있습니다.'),verifyId,verifyKey);
     apiField('modelVersionId','통짜 대기열 기본 모델 버전 ID (프리셋 지정 시 해당 프리셋 우선)');
-    apiField('aspectRatio','API 이미지 비율',API_RATIOS.map(value=>[value,`${value} · ${Number(value.split(':')[0])>Number(value.split(':')[1]) ? '가로' : Number(value.split(':')[0])<Number(value.split(':')[1]) ? '세로' : '정사각'}`]));
-    apiField('size','API 이미지 크기',[['1k','1k'],['1.5k','1.5k']]);
-    apiContent.append(note('비율은 가로:세로 (5:3 가로 · 3:5 세로) · 새로 등록하는 작업부터 적용','이미 등록한 대기 작업은 등록 당시 비율을 유지합니다. 아래 「미제출 대기 작업에 비율·크기 적용」으로 한꺼번에 바꿀 수 있습니다.'));
     const applyImageOptions=button('미제출 대기 작업에 비율·크기 적용',async()=>{
       if (running || starting || settingsBusy) throw new Error('실행 중에는 대기열 요청을 바꿀 수 없습니다.');
-      const options={...apiOptions};let count=0;
+      const options=currentApiOptions();let count=0;
       await locked(()=>{
         const before=jobs,next=applyQueuedImageOptions(jobs,options);count=next.filter((job,index)=>job!==before[index]).length;
         jobs=next;try {persist();} catch(error) {jobs=before;throw error;}
       });
       message=`미제출 대기 작업 ${count}건에 ${options.aspectRatio} (가로:세로) · ${options.size} 적용 완료. 새 생성은 하지 않았습니다.`;render();
-    });applyImageOptions.dataset.edit='';apiContent.append(applyImageOptions);
+    });applyImageOptions.dataset.edit='';applyImageOptions.dataset.siteIo='';
+    const imageActions=node('details');imageActions.append(node('summary','기존 대기 작업의 비율·크기 변경'),note('이미 등록한 작업은 기존 비율·크기를 유지합니다.','아래 버튼은 미제출 작업에만 현재 선택값을 적용합니다. 예약별로 다른 비율을 유지하려면 적용 대상을 확인하세요.'),applyImageOptions);
     apiField('mode','츠바키 API 생성 모드',[['','모델 기본값 (모드 보내지 않음)'],['lite','Lite'],['standard','Standard'],['pro','Pro'],['ultra','Ultra']]);
     apiField('style','츠바키 API 스타일',[['','스타일 보내지 않음'],...API_STYLES.map(value=>[value,value])]);
     apiField('seed','API 시드 (빈칸은 작업별 랜덤)').setAttribute('placeholder','0~4294967295');
     const costAck=node('input',null,{type:'checkbox','data-api-cost-ack':'','data-edit':''});
+    costAck.checked=false;
+    try {costAck.checked=JSON.parse(localStorage.getItem(API_COST_ACK_KEY) || 'false')===true;} catch {message='과금 안내 체크를 읽지 못했습니다. 내용을 확인하고 다시 체크해 주세요.';}
+    let savedCostAck=costAck.checked;
+    costAck.addEventListener('change',()=>{
+      try {localStorage.setItem(API_COST_ACK_KEY,JSON.stringify(costAck.checked));savedCostAck=costAck.checked;}
+      catch(error) {costAck.checked=savedCostAck;message=`과금 안내 체크 저장 실패: ${error.message}`;render();}
+    });
     const costAckLabel=node('label',null,{class:'pq-check-label'});costAckLabel.append(costAck,node('span','시작은 크레딧을 사용하는 공식 API 생성 요청이며, 기존 사이트 비용 상한을 이 API 실행에 적용할 수 없음을 확인했습니다.'));
-    apiContent.append(note('모델·LoRA는 프리셋에서, 나머지 옵션은 여기서 정합니다 · 자세히','사이트의 해상도·스타일·참조 설정은 자동 복사하지 않습니다. LoRA 수치는 0~1, 최대 5개입니다.'),costAckLabel);
-    function readApiFields() {return normalizeApiOptions(Object.fromEntries(Object.entries(apiFields).map(([key,input])=>[key,input.value])));}
+    apiContent.append(note('이미지 비율·크기는 조합 예약에서 고릅니다 · 자세히','모델·LoRA는 프리셋에서, 생성 모드·스타일·시드는 여기서 정합니다. 사이트의 해상도·스타일·참조 설정은 자동 복사하지 않습니다. LoRA 수치는 0~1, 최대 5개입니다.'),costAckLabel);
+    function readApiFields() {return normalizeApiOptions({...apiOptions,...Object.fromEntries(Object.entries(apiFields).map(([key,input])=>[key,input.value]))});}
     function readOptions() {
       return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value),imageCount:Number(imageCount.value),maxInFlight:Number(maxInFlight.value),api:readApiFields()});
     }
@@ -2855,7 +2894,7 @@ function mountPresetEditor(parent, io) {
     function loadOptions() {
       fillOptions(normalizeSettingsOptions(JSON.parse(localStorage.getItem(OPTIONS_KEY) || '{"maxCredits":7800,"filePrefix":"","repeat":1}')));
     }
-    try {loadOptions();} catch {fillOptions(savedOptions);message='기본 옵션을 읽지 못했습니다. 화면과 실행 모두 기본값(9:16·1k)으로 맞췄습니다. 설정 불러오기로 복구하거나 입력값을 확인해 주세요.';}
+    try {loadOptions();} catch {fillOptions(savedOptions);message='기본 옵션을 읽지 못해 기본값으로 열었습니다. 기억한 조합 편집 상태가 있으면 비율·크기는 그 값으로 복원합니다. 조합 예약 상단에서 확인해 주세요.';}
     for (const input of [budget,title,repeat,imageCount,maxInFlight,...Object.values(apiFields)]) input.addEventListener('change',()=>{
       try {const options=readOptions();localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));fillOptions(options);render();}
       catch(error) {fillOptions(savedOptions);message=`기본 옵션 저장 실패: ${error.message}\n화면과 실행 옵션을 이전 설정으로 되돌렸습니다.`;render();}
@@ -2869,7 +2908,7 @@ function mountPresetEditor(parent, io) {
       if (jobs.length + parts.length * count > 1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
       const added = [];
       for (let index=0; index<parts.length; index++) for (let n=0; n<count; n++) added.push({
-        id:crypto.randomUUID(), title:`${title.value.trim() || 'PixAI'}_${index+1}_${n+1}`, prompt:parts[index], maxCredits, state:'queued', saved:[],apiOptions:{...apiOptions},apiBatchSize:Number(imageCount.value) || expectedCount()
+        id:crypto.randomUUID(), title:`${title.value.trim() || 'PixAI'}_${index+1}_${n+1}`, prompt:parts[index], maxCredits, state:'queued', saved:[],apiOptions:currentApiOptions(),apiBatchSize:Number(imageCount.value) || expectedCount()
       });
       jobs.push(...added); persist(); prompts.value=''; message=`${added.length}개 작업을 추가했습니다.`; render();
     }));
@@ -2886,11 +2925,17 @@ function mountPresetEditor(parent, io) {
       loadLayout:key=>JSON.parse(localStorage.getItem(`local.pixai-web-queue.layout.v1.${key}`) || 'null'),
       saveLayout:(key,value)=>localStorage.setItem(`local.pixai-web-queue.layout.v1.${key}`,JSON.stringify(value)),
       notify:notifyAction,getImageOptions:()=>apiOptions,
+      saveImageOptions:images=>{
+        const options=normalizeSettingsOptions({...savedOptions,api:{...apiOptions,...normalizeReservationImageOptions(images)}});
+        localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));savedOptions=options;apiOptions=normalizeApiOptions(options.api);
+      },imageOptionsChanged:render,
+      loadDraft:()=>JSON.parse(localStorage.getItem(COMPOSE_DRAFT_KEY) || 'null'),
+      saveDraft:draft=>localStorage.setItem(COMPOSE_DRAFT_KEY,JSON.stringify(normalizeComposeDraft(draft))),
       captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
       applySettings:value=>settingsAction(()=>settings.apply(value)),
       enqueue:value=>queueEdit(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
-        for (const job of added) {job.apiOptions=normalizeApiOptions({...apiOptions,...job.apiOptions});job.apiBatchSize=Number(imageCount.value) || expectedCount();}
+        for (const job of added) {job.apiOptions=normalizeApiOptions({...currentApiOptions(),...job.apiOptions});job.apiBatchSize=Number(imageCount.value) || expectedCount();}
         if (jobs.length+added.length>1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
         if (value.reservations.some(res=>jobs.some(job=>job.composition?.reservation?.id===res.id))) throw new Error('이미 등록된 예약이 있습니다. 해당 예약을 제외하고 새로 예약해 주세요.');
         jobs.push(...added);persist();
@@ -2918,7 +2963,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.10',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.11',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3001,7 +3046,7 @@ function mountPresetEditor(parent, io) {
     backups.open=true;
     const queueContent=node('div',null,{class:'pq-queue-content'});queueContent.append(node('h3','등록된 대기열'),jobsView,simple,exportQueue);
     attachRuntimePages=()=>{
-      presetEditor.addPage('queue','대기열',queueContent);presetEditor.addPage('settings','설정',settingsContent);
+      presetEditor.addPage('queue','대기열',queueContent);presetEditor.addPage('settings','설정',settingsContent);presetEditor.addImageActions(imageActions);
       editorSlot.replaceChildren(presetEditor.root);
     };
     if (presetEditor) attachRuntimePages();else editorSlot.append(settingsContent,queueContent);
@@ -3320,7 +3365,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.10', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.11', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

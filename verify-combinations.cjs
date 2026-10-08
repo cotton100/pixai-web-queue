@@ -39,7 +39,7 @@ test('production queue registration merges each reservation image choice with gl
   const begin=source.indexOf('      enqueue:value=>queueEdit(()=>{'),end=source.indexOf('\n      })',begin);
   assert(begin>=0&&end>begin);const events=[];
   const context={...core,apiOptions:core.normalizeApiOptions({aspectRatio:'1:1',size:'1k',mode:'pro',style:'chibi',seed:7}),imageCount:{value:'4'},expectedCount:()=>1,budget:{value:''},title:{value:'test'},jobs:[],running:false,stopRequested:false,oneJobRun:false,
-    queueEdit:async fn=>fn(),persist:()=>events.push('persist'),saveLibrary:value=>{context.savedLibrary=value;},presetEditor:{refresh(){}},render(){},message:''};
+    currentApiOptions:()=>context.apiOptions,queueEdit:async fn=>fn(),persist:()=>events.push('persist'),saveLibrary:value=>{context.savedLibrary=value;},presetEditor:{refresh(){}},render(){},message:''};
   vm.runInNewContext(`const callback={${source.slice(begin,end+9).trim()}};this.enqueue=callback.enqueue;`,context);
   const library=seed(),recipe={presetId:'p',characterId:'c',sceneIds:['s'],count:1};
   library.reservations=[{id:'wide',...recipe,imageOptions:{aspectRatio:'5:3',size:'1.5k'}},{id:'tall',...recipe,imageOptions:{aspectRatio:'3:5',size:'1k'}},{id:'legacy',...recipe}];

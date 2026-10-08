@@ -363,7 +363,7 @@ function panelFixture(nativePicker, gm={}) {
   const window={innerWidth:1200,innerHeight:900,addEventListener(type,fn){(windowListeners[type]??=[]).push(fn);}};window.top=window.self=window;
   if(nativePicker)window.showDirectoryPicker=(...args)=>{pickerCalls++;return nativePicker(...args)};
   const context={window,document,location:{hostname:'pixai.art',pathname:'/ko/generator/image'},
-    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.queueStorageFailure&&key==='local.pixai-web-queue.v1')throw new Error('Queue storage unavailable');if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
+    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.queueStorageFailure&&key==='local.pixai-web-queue.v1')throw new Error('Queue storage unavailable');if(gm.storageFailureKey===key)throw new Error('Settings storage unavailable');if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
     navigator:{locks:{request:async(name,options,callback)=>{lockRequests++;return callback(gm.lockUnavailable?null:{});}}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
     fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id',getRandomValues:array=>array.fill(42)},
@@ -386,7 +386,44 @@ function panelFixture(nativePicker, gm={}) {
     message:()=>panel.querySelector('[data-message]').textContent};
 }
 
-const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1'};
+const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1',draft:'local.pixai-web-queue.compose.v1',ack:'local.pixai-web-queue.api-cost-ack.v1'};
+
+test('ratio and size appear once at compose top and persist through fresh mount and unrelated setting changes',()=>{
+  const f=panelFixture(null),ratio=f.panel.querySelector('[aria-label="조합 이미지 비율"]'),size=f.panel.querySelector('[aria-label="조합 이미지 크기"]');
+  assert.equal(ratio.closest('[data-page]').getAttribute('data-page'),'compose');assert.equal(f.panel.querySelectorAll('[aria-label="조합 이미지 비율"]').length,1);
+  assert.equal(f.panel.querySelector('[aria-label="API 이미지 비율"]'),null);assert.equal(f.panel.querySelector('[aria-label="API 이미지 크기"]'),null);
+  ratio.value='5:3';ratio.fire('change');size.value='1.5k';size.fire('change');
+  const mode=f.panel.querySelector('[aria-label="츠바키 API 생성 모드"]');mode.value='pro';mode.fire('change');
+  const options=JSON.parse(f.records.get(runtimeSettingsKeys.options));assert.equal(options.api.aspectRatio,'5:3');assert.equal(options.api.size,'1.5k');assert.equal(options.api.mode,'pro');
+  const fresh=panelFixture(null,{records:new Map(f.records)});assert.equal(fresh.panel.querySelector('[aria-label="조합 이미지 비율"]').value,'5:3');assert.equal(fresh.panel.querySelector('[aria-label="조합 이미지 크기"]').value,'1.5k');
+  assert.equal(fresh.networkCalls,0);assert.equal(fresh.generateCalls,0);assert.equal(fresh.storageMutations.length,0);
+});
+
+test('cost acknowledgment remembers explicit check and uncheck locally without starting or changing API settings',async()=>{
+  const f=panelFixture(null,{info:{downloadMode:'browser'},download:details=>{details.onload();return {};}}),ack=f.panel.querySelector('[data-api-cost-ack]');assert.equal(ack.checked,false);
+  ack.checked=true;ack.fire('change');assert.equal(f.records.get(runtimeSettingsKeys.ack),'true');
+  const fresh=panelFixture(null,{records:new Map(f.records)}),restored=fresh.panel.querySelector('[data-api-cost-ack]');assert.equal(restored.checked,true);assert.equal(fresh.networkCalls,0);assert.equal(fresh.generateCalls,0);
+  runtimePress(f,'설정 내보내기');await runtimeFlush();const backupOptions=JSON.parse(f.records.get(runtimeSettingsKeys.options)||'null');assert.equal(backupOptions,null);
+  restored.checked=false;restored.fire('change');const unchecked=panelFixture(null,{records:new Map(fresh.records)});assert.equal(unchecked.panel.querySelector('[data-api-cost-ack]').checked,false);
+});
+
+test('checkbox persistence failure rolls back and malformed acknowledgment is never accepted automatically',()=>{
+  const f=panelFixture(null,{storageFailureKey:runtimeSettingsKeys.ack}),ack=f.panel.querySelector('[data-api-cost-ack]');ack.checked=true;ack.fire('change');assert.equal(ack.checked,false);assert.match(f.message(),/과금 안내 체크 저장 실패/);
+  for(const raw of ['{broken','"true"','1']){const bad=panelFixture(null,{records:new Map([[runtimeSettingsKeys.ack,raw]])});assert.equal(bad.panel.querySelector('[data-api-cost-ack]').checked,false);assert.equal(bad.records.get(runtimeSettingsKeys.ack),raw);assert.equal(bad.networkCalls,0);}
+});
+
+test('production draft restores checked chunks, count and trigger order without adding reservations or generation',()=>{
+  const library={version:1,common:{prompt:'quality',negativePrompt:''},presets:[{id:'p',name:'preset',model:{id:'101',versionId:'201',name:'Model'},loras:[{id:'301',versionId:'401',weight:0.5,triggerWords:'trigger'}]}],characters:[{id:'c',name:'character',prompt:'character',negativePrompt:''}],scenes:[{id:'s',name:'chunk',prompt:'smile',negativePrompt:''}],reservations:[]};
+  const f=panelFixture(null,{records:new Map([[runtimeSettingsKeys.library,JSON.stringify(library)]])}),chunk=f.panel.querySelector('[aria-label="청크 선택: chunk"]');chunk.checked=true;chunk.fire('change');
+  for(let n=0;n<2;n++)f.press(f.panel.querySelector('[aria-label="LoRA 트리거 아래로"]'));
+  const count=f.panel.querySelector('[aria-label="이 조합의 생성 횟수"]');count.value='3';count.fire('change');const raw=f.records.get(runtimeSettingsKeys.draft);assert.equal(JSON.parse(raw).triggerPosition,'end');
+  const fresh=panelFixture(null,{records:new Map(f.records)});assert.equal(fresh.panel.querySelector('[aria-label="청크 선택: chunk"]').checked,true);assert.equal(fresh.panel.querySelector('[aria-label="이 조합의 생성 횟수"]').value,'3');
+  assert.match(fresh.panel.querySelector('[aria-label="저장한 프롬프트 조합 미리보기"]').textContent,/character, smile, trigger/);assert.equal(fresh.records.get(runtimeSettingsKeys.draft),raw);assert.equal(JSON.parse(fresh.records.get(runtimeSettingsKeys.library)).reservations.length,0);assert.equal(fresh.networkCalls,0);assert.equal(fresh.generateCalls,0);
+});
+
+test('image option storage failure restores both visible and saved dimensions without neighboring draft loss',()=>{
+  const f=panelFixture(null,{storageFailureKey:runtimeSettingsKeys.options}),ratio=f.panel.querySelector('[aria-label="조합 이미지 비율"]');ratio.value='5:3';ratio.fire('change');assert.equal(ratio.value,'9:16');assert.match(f.panel.querySelector('[data-toast]').textContent,/이미지 설정 저장 실패/);assert.equal(f.records.has(runtimeSettingsKeys.options),false);assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.draft)).imageOptions.aspectRatio,'9:16');assert.equal(f.networkCalls,0);
+});
 test('runtime API key clears its field, stays out of storage/backup and disappears on page hide',async()=>{
   const f=panelFixture(null,{info:{downloadMode:'browser'},download:details=>{details.onload();return {};}});
   const input=f.panel.querySelector('[aria-label="공식 API 키"]');input.value='fixture-sensitive-key';runtimePress(f,'이 탭에 키 연결');await runtimeFlush();
@@ -427,7 +464,7 @@ test('production panel sends landscape ratio and saves four images without JSON 
     details.onload({status:details.method==='POST'?201:200,finalUrl:details.url,responseText:JSON.stringify(result)});
   });return {abort(){}};};
   const f=panelFixture(()=>Promise.resolve(folder),{queue,request});
-  const ratio=f.panel.querySelector('[aria-label="API 이미지 비율"]');ratio.value='5:3';ratio.fire('change');
+  const ratio=f.panel.querySelector('[aria-label="조합 이미지 비율"]');ratio.value='5:3';ratio.fire('change');
   f.press(f.panel.querySelector('[data-choose-folder]'));await runtimeFlush();runtimePress(f,'첫 작업만 실행');
   for(let i=0;i<20;i++){await runtimeFlush();if(f.message().includes('첫 작업 실행과 저장이 끝났습니다'))break;}
   const saved=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
@@ -437,33 +474,37 @@ test('production panel sends landscape ratio and saves four images without JSON 
   assert.equal(JSON.parse(requests.find(x=>x.method==='POST').data).aspectRatio,'5:3');
   assert(!JSON.stringify(saved).includes('fixture-key'));
 });
-test('invalid neighboring setting rolls visible ratio back and bulk apply uses the same committed value',async()=>{
+test('invalid neighboring setting does not discard a compose ratio change and bulk apply uses its committed value',async()=>{
   const f=panelFixture(null,{queue:[{...job(),apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})}]});
-  const ratio=f.panel.querySelector('[aria-label="API 이미지 비율"]'),repeat=f.panel.querySelector('[aria-label="각 프롬프트 반복 횟수"]');
+  const ratio=f.panel.querySelector('[aria-label="조합 이미지 비율"]'),repeat=f.panel.querySelector('[aria-label="각 프롬프트 반복 횟수"]');
   ratio.value='3:2';ratio.fire('change');const stored=f.records.get(runtimeSettingsKeys.options);
   repeat.value='';ratio.value='5:3';ratio.fire('change');
-  assert.equal(ratio.value,'3:2');assert.equal(repeat.value,'1');assert.equal(f.records.get(runtimeSettingsKeys.options),stored);
-  assert.match(f.message(),/기본 옵션 저장 실패.*반복 횟수/);assert.match(f.message(),/이전 설정으로 되돌렸습니다/);
+  assert.equal(ratio.value,'5:3');assert.equal(repeat.value,'');assert.notEqual(f.records.get(runtimeSettingsKeys.options),stored);assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.options)).repeat,1);
   runtimePress(f,'미제출 대기 작업에 비율·크기 적용');await runtimeFlush();
-  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].apiOptions.aspectRatio,'3:2');
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].apiOptions.aspectRatio,'5:3');
+  repeat.fire('change');assert.equal(repeat.value,'1');assert.match(f.message(),/기본 옵션 저장 실패.*반복 횟수/);assert.match(f.message(),/이전 설정으로 되돌렸습니다/);
   ratio.value='5:3';ratio.fire('change');runtimePress(f,'미제출 대기 작업에 비율·크기 적용');await runtimeFlush();
   assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].apiOptions.aspectRatio,'5:3');assert.equal(f.networkCalls,0);
 });
 
 test('corrupt stored options show matching defaults and explain the ratio for legacy queued jobs',()=>{
   const f=panelFixture(null,{queue:[job()],records:new Map([[runtimeSettingsKeys.options,'{broken']])});
-  assert.equal(f.panel.querySelector('[aria-label="API 이미지 비율"]').value,'9:16');
-  assert.equal(f.panel.querySelector('[aria-label="API 이미지 크기"]').value,'1k');
+  assert.equal(f.panel.querySelector('[aria-label="조합 이미지 비율"]').value,'9:16');
+  assert.equal(f.panel.querySelector('[aria-label="조합 이미지 크기"]').value,'1k');
   assert.equal(f.records.get(runtimeSettingsKeys.options),'{broken');
-  assert.match(f.message(),/화면과 실행 모두 기본값/);
+  assert.match(f.message(),/기본 옵션을 읽지 못해 기본값/);
   assert.match(f.panel.querySelectorAll('small').map(n=>n.textContent).join('\n'),/시작 시 현재 설정 9:16/);
+  const draft={presetId:'',characterId:'',sceneIds:[],triggerPosition:'end',count:1,imageOptions:{aspectRatio:'5:3',size:'1.5k'}};
+  const restored=panelFixture(null,{queue:[job()],records:new Map([[runtimeSettingsKeys.options,'{broken'],[runtimeSettingsKeys.draft,JSON.stringify(draft)]])});
+  assert.equal(restored.panel.querySelector('[aria-label="조합 이미지 비율"]').value,'5:3');assert.equal(restored.panel.querySelector('[aria-label="조합 이미지 크기"]').value,'1.5k');
+  assert.match(restored.message(),/기억한 조합 편집 상태/);assert.match(restored.panel.querySelectorAll('small').map(n=>n.textContent).join('\n'),/시작 시 현재 설정 5:3/);assert.equal(restored.records.get(runtimeSettingsKeys.options),'{broken');assert.equal(restored.storageMutations.length,0);
 });
 
 test('panel displays frozen ratio and explicitly applies new ratio to pending jobs without network requests',async()=>{
   const pending={...job(),apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})};
   const paid={...job(),id:'paid',state:'waiting',taskId:'900',apiOptions:sandbox.module.exports.normalizeApiOptions({aspectRatio:'3:5'})};
   const f=panelFixture(null,{queue:[pending,paid]});
-  const ratio=f.panel.querySelector('[aria-label="API 이미지 비율"]');ratio.value='5:3';ratio.fire('change');
+  const ratio=f.panel.querySelector('[aria-label="조합 이미지 비율"]');ratio.value='5:3';ratio.fire('change');
   const descriptions=f.panel.querySelectorAll('small').map(node=>node.textContent).join('\n');
   assert.match(descriptions,/적용 비율 3:5/);assert.match(descriptions,/현재 설정 5:3/);
   runtimePress(f,'미제출 대기 작업에 비율·크기 적용');await runtimeFlush();
@@ -1719,6 +1760,7 @@ function startFixture(options = {}) {
     let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false,oneJobRun=false;
     let initialModel=null,runImageCount=null,baselineSettings=null,baselineNegative=null,message='';
     const apiKey={get:()=> 'fixture-key'},apiOptions={modelVersionId:''},crypto={getRandomValues:array=>array.fill(42)};
+    const currentApiOptions=()=>apiOptions;
     const panel={querySelector:selector=>({checked:true,value:selector==='[data-image-count]' ? String(options.imageCount ?? 4) : String(options.maxInFlight ?? 3)})};
     const expectedCount=()=>options.siteImageCount ?? 1;
     let jobs=loadStored(),currentModel='/ko/model/11/111';

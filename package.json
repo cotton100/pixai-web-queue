@@ -1,6 +1,6 @@
 {
   "name": "pixai-web-queue",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "private": true,
   "description": "PixAI 웹 프롬프트 대기열 유저스크립트",
   "scripts": {
