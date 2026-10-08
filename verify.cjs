@@ -122,20 +122,14 @@ test('English Generate price is parsed only with a complete amount and still enf
   for(const text of ['GenerateCtrl+','Generate0Ctrl+','Generate3.2Ctrl+','Generate3,200 credits 4,000Ctrl+'])assert.throws(()=>checkCost(text,7800),/비용/);
 });
 
-test('production generation controls recognize both site languages and reject ambiguous or disabled submit buttons',()=>{
+test('production API generation bypasses the site submit button in both languages',async()=>{
   const source=fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8');
-  const begin=source.indexOf('  function generateButton() {'),end=source.indexOf('  async function ensureDestination()',begin);
-  for(const english of [false,true]) {
-    let buttons=[{textContent:english?'SubmittingGenerate3,200Ctrl+⏎Task submitted':'생성!3,200Ctrl+⏎작업 제출',getAttribute:()=>null}];
-    let choice=english?'Single':'단일';
-    const radio={getAttribute:()=>null,get textContent(){return choice;}},group={querySelector:()=>radio};
-    const context={settings:{readImageCount:()=>{if (/x4|×4/.test(choice))return 4;if (/단일|single/i.test(choice))return 1;throw new Error('이미지 수 확인 실패');}},visible:()=>true,groupName:()=>english?'Number of images':'이미지 수',all:selector=>selector.includes('button')?buttons:[group]};
-    vm.runInNewContext(`${source.slice(begin,end)};this.button=generateButton;this.count=expectedCount;`,context);
-    assert.equal(context.button(),buttons[0]);assert.equal(context.count(),1);choice='Batch (x4)';assert.equal(context.count(),4);
-    buttons[0].disabled=true;assert.throws(()=>context.button(),/생성 버튼/);buttons[0].disabled=false;
-    buttons=[...buttons,{...buttons[0]}];assert.throws(()=>context.button(),/생성 버튼/);
-    choice='unknown';assert.throws(()=>context.count(),/이미지 수/);
-  }
+  const begin=source.indexOf('  async function submit(job) {'),end=source.indexOf('  async function waitTask(job) {',begin);
+  const context={stopRequested:false,api:{create:payload=>payload.modelVersionId}};
+  vm.runInNewContext(source.slice(begin,end)+';this.submit=submit;',context);
+  assert.equal(await context.submit({apiPayload:{modelVersionId:'201'}}),'201');
+  context.stopRequested=true;await assert.rejects(context.submit({apiPayload:{modelVersionId:'201'}}),error=>error.notSubmitted===true);
+  assert(!source.slice(begin,end).includes('.click()'));
 });
 
 function dragFixture(saved=null) {
@@ -372,19 +366,65 @@ function panelFixture(nativePicker, gm={}) {
     localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
     navigator:{locks:{request:async(name,options,callback)=>{lockRequests++;return callback(gm.lockUnavailable?null:{});}}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
-    fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id'},
-    Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info};
+    fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id',getRandomValues:array=>array.fill(42)},
+    GM_xmlhttpRequest:gm.request || (()=>{networkCalls++;throw Error('No network in UI fixture');}),Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info};
   if(gm.folderStore)context.indexedDB=folderDatabase(gm.folderStore);
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
   return {panel,document,siteQueries,records,storageMutations,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},get lockRequests(){return lockRequests},
-    press(button){button.fire('pointerdown');button.fire('pointerup');},
+    press(button){
+      if(button.getAttribute('data-start')!=null || button.textContent==='첫 작업만 실행') {
+        const key=panel.querySelector('[aria-label="공식 API 키"]');key.value='fixture-key';
+        const connect=panel.querySelectorAll('button').find(item=>item.textContent==='이 탭에 키 연결');connect.fire('pointerdown');connect.fire('pointerup');
+        panel.querySelector('[data-api-cost-ack]').checked=true;
+        const model=panel.querySelector('[aria-label="통짜 대기열 기본 모델 버전 ID (프리셋 지정 시 해당 프리셋 우선)"]');model.value='201';model.fire('change');
+      }
+      button.fire('pointerdown');button.fire('pointerup');},
     fireDocument(type,target,extra={}){const event={type,target,isTrusted:true,prevented:false,preventDefault(){this.prevented=true;},stopImmediatePropagation(){},...extra};for(const fn of documentListeners[type]||[])fn(event);return event;},
     fireWindow(type,extra={}){const event={type,...extra};for(const fn of windowListeners[type]||[])fn(event);return event;},
     message:()=>panel.querySelector('[data-message]').textContent};
 }
 
 const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1'};
+test('runtime API key clears its field, stays out of storage/backup and disappears on page hide',async()=>{
+  const f=panelFixture(null,{info:{downloadMode:'browser'},download:details=>{details.onload();return {};}});
+  const input=f.panel.querySelector('[aria-label="공식 API 키"]');input.value='fixture-sensitive-key';runtimePress(f,'이 탭에 키 연결');await runtimeFlush();
+  assert.equal(input.value,'');assert.match(f.panel.querySelector('[data-api-key-state]').textContent,/키 입력됨/);
+  runtimePress(f,'설정 내보내기');await runtimeFlush();assert([...f.records.values()].every(value=>!value.includes('fixture-sensitive-key')));
+  f.fireWindow('pagehide');runtimePress(f,'키 지우기');await runtimeFlush();assert.match(f.panel.querySelector('[data-api-key-state]').textContent,/미입력/);
+});
+test('production panel completes one official four-image task and JSON while leaving a later queued job untouched',async()=>{
+  const files=new Map(),requests=[];
+  const folder={name:'fixture',queryPermission:async()=> 'granted',getFileHandle:async(name,{create}={})=>{
+    if (!create&&!files.has(name)) throw Object.assign(Error('missing'),{name:'NotFoundError'});
+    return {createWritable:async()=>({write:async value=>files.set(name,value),close:async()=>{},abort:async()=>{}}),getFile:async()=>({size:files.get(name) instanceof Blob ? files.get(name).size : new TextEncoder().encode(files.get(name)).length})};
+  }};
+  const queue=[job(),{...job(),id:'later',title:'later'}];
+  const request=details=>{requests.push(details);queueMicrotask(()=>{
+    let result;
+    if(details.method==='POST') result={id:'900',status:'waiting'};
+    else if(details.url.includes('/v1/task/')) result={id:'900',createdAt:new Date().toISOString(),status:'completed',outputs:{mediaIds:['100','101','102','103']}};
+    else if(details.url.includes('/v1/media/')) {const id=details.url.split('/').at(-1);result={id,urls:[{variant:'PUBLIC',url:'https://images.pixai.art/images/orig/'+id+'.webp'}]};}
+    else {details.onload({status:200,finalUrl:details.url,response:new Blob(['mock-image'],{type:'image/webp'})});return;}
+    details.onload({status:details.method==='POST'?201:200,finalUrl:details.url,responseText:JSON.stringify(result)});
+  });return {abort(){}};};
+  const f=panelFixture(()=>Promise.resolve(folder),{queue,request});
+  f.press(f.panel.querySelector('[data-choose-folder]'));await runtimeFlush();runtimePress(f,'첫 작업만 실행');
+  for(let i=0;i<20;i++){await runtimeFlush();if(f.message().includes('첫 작업 실행과 저장이 끝났습니다'))break;}
+  const saved=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
+  assert.equal(saved[0].state,'done');assert.equal(saved[0].saved.length,4);assert.equal(saved[1].state,'queued');assert.equal(saved[1].apiPayload,undefined);
+  assert.equal(files.size,5);assert.equal(requests.filter(x=>x.method==='POST').length,1);assert.equal(f.generateCalls,0);assert.equal(f.siteQueries.length,0);
+  const metadata=JSON.parse([...files].find(([name])=>name.endsWith('.json'))[1]);assert.equal(metadata.apiRequest.batchSize,4);assert.equal(metadata.backend,'official-api');assert.equal(metadata.images.length,4);
+  assert(!JSON.stringify(metadata).includes('fixture-key'));assert(!JSON.stringify(saved).includes('fixture-key'));
+});
+test('known task recovery does not require generation consent or parse incompatible later API presets',async()=>{
+  const f=panelFixture(()=>Promise.resolve({name:'fixture',queryPermission:async()=> 'granted'}),{queue:[{...job(),state:'waiting',taskId:'900',expected:1},{...job(),id:'later',configuration:{model:{versionId:'22'},loras:[{weight:2}]}}]});
+  f.press(f.panel.querySelector('[data-choose-folder]'));await runtimeFlush();
+  f.panel.querySelector('[aria-label="공식 API 키"]').value='fixture-key';runtimePress(f,'이 탭에 키 연결');
+  runtimePress(f,'시작 / 같은 작업 재개');await runtimeFlush();
+  assert.equal(f.networkCalls,1);assert.match(f.message(),/공식 API 네트워크/);assert.equal(f.generateCalls,0);
+  const saved=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;assert.equal(saved[0].taskId,'900');assert.equal(saved[1].apiPayload,undefined);
+});
 function rememberedDirectory(name,initial='granted') {
   let permission=initial;
   const handle={kind:'directory',name,queries:0,requests:0,writes:0,
@@ -568,7 +608,7 @@ test('runtime settings export downloads saved library and current option fields 
   runtimePress(f,'설정 내보내기');await runtimeFlush();
   assert.ok(details.url instanceof Blob);assert.match(details.name,/^PixAI_설정_.*\.json$/);assert.equal(details.saveAs,false);
   const exported=JSON.parse(await details.url.text());assert.equal(exported.format,'pixai-web-queue-settings');
-  assert.deepEqual(exported.library,JSON.parse(records.get(runtimeSettingsKeys.library)));assert.deepEqual(exported.options,{maxCredits:6500,filePrefix:'current name',repeat:3,maxInFlight:3,imageCount:4});assert.equal(exported.jobs,undefined);
+  assert.deepEqual(exported.library,JSON.parse(records.get(runtimeSettingsKeys.library)));assert.deepEqual(exported.options,{maxCredits:6500,filePrefix:'current name',repeat:3,maxInFlight:3,imageCount:4,api:JSON.parse(JSON.stringify(sandbox.module.exports.normalizeApiOptions()))});assert.equal(exported.jobs,undefined);
   assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);assert.match(f.message(),/설정 JSON 다운로드 완료/);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
 });
 
@@ -862,24 +902,10 @@ function runningPanel(gm={}) {
   }};
 }
 
-test('while running, keystrokes and input that land on the site are swallowed and focus returns to the panel field, while a drop or click on the site still stops the run',async()=>{
-  const {f,tick,finish,start}=runningPanel();await start();
-  const site=f.document.body.querySelector('main'),search=f.panel.querySelector('[aria-label="청크 검색"]');assert(site&&search);
-  f.fireDocument('focusin',search);f.document.activeElement=site;
-  const before=f.message(),toast=f.panel.querySelector('[data-toast]');
-  for (const type of ['keydown','beforeinput']) {
-    const event=f.fireDocument(type,site,{key:'a'});
-    assert.equal(event.prevented,true,type);assert.equal(f.message(),before);assert.equal(f.document.activeElement,search);
-    assert.match(toast.textContent,/실행 중에는 사이트에 입력할 수 없습니다/);assert.equal(toast.hidden,false);
-    assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');
-  }
-  const panelKey=f.fireDocument('keydown',search,{key:'b'});assert.equal(panelKey.prevented,false);
-  const drop=f.fireDocument('drop',site);
-  assert.equal(drop.prevented,true);assert.match(f.message(),/실행 중 사이트 조작으로 중지했습니다/);
-  const click=f.fireDocument('click',site);assert.equal(click.prevented,true);
-  finish('denied');await tick();
-  assert.equal(f.panel.querySelector('[data-start]').disabled,false);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
-  const idle=f.fireDocument('keydown',site,{key:'c'});assert.equal(idle.prevented,false);
+test('official API execution leaves site input and clicks usable without stopping the queue',async()=>{
+  const {f,tick,finish,start}=runningPanel();await start();const site=f.document.body.querySelector('main'),before=f.message();
+  for(const type of ['keydown','beforeinput','drop','click']){const event=f.fireDocument(type,site,{key:'a'});assert.equal(event.prevented,false);assert.equal(f.message(),before);assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');}
+  finish('denied');await tick();assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
 });
 
 test('a library change from another tab during a run is picked up by the editor and survives a registration from this tab',async()=>{
@@ -1541,7 +1567,7 @@ const path=require('node:path');
 const copy = value => JSON.parse(JSON.stringify(value));
 const baseline = {model:{id:'11',versionId:'111',name:'Original model'},loras:[{id:'22',versionId:'222',name:'Original LoRA',weight:0.5}]};
 const selectedPreset = {model:{id:'33',versionId:'333',name:'Preset model'},loras:[{id:'44',versionId:'444',name:'Preset LoRA',weight:0.75}]};
-const mixedJobs = () => [{id:'preset',state:'queued',configuration:copy(selectedPreset),negativePrompt:'preset negative'},
+const mixedJobs = () => [{id:'preset',state:'queued',prompt:'preset prompt',configuration:copy(selectedPreset),negativePrompt:'preset negative'},
   {id:'legacy',state:'queued',prompt:'legacy prompt',saved:[]}];
 const deferred = () => {let resolve,reject;const promise = new Promise((yes,no) => {resolve=yes;reject=no;});return {promise,resolve,reject};};
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -1554,11 +1580,12 @@ function startFixture(options = {}) {
   let stored = copy(options.jobs || mixedJobs());
   const context = {facts,options,copy,
     loadStored:() => copy(stored),saveStored:value => {stored=copy(value);},
-    baseline:copy(baseline)};
+    baseline:copy(baseline),buildApiPayload:sandbox.module.exports.buildApiPayload};
   vm.runInNewContext(`
     let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false,oneJobRun=false;
     let initialModel=null,runImageCount=null,baselineSettings=null,baselineNegative=null,message='';
-    const panel={querySelector:selector=>({value:selector==='[data-image-count]' ? String(options.imageCount ?? 4) : String(options.maxInFlight ?? 3)})};
+    const apiKey={get:()=> 'fixture-key'},apiOptions={modelVersionId:''},crypto={getRandomValues:array=>array.fill(42)};
+    const panel={querySelector:selector=>({checked:true,value:selector==='[data-image-count]' ? String(options.imageCount ?? 4) : String(options.maxInFlight ?? 3)})};
     const expectedCount=()=>options.siteImageCount ?? 1;
     let jobs=loadStored(),currentModel='/ko/model/11/111';
     const storage={mode:'folder'},folderToken='fixture-folder',folderRestoration=options.folderRestoration || Promise.resolve();
@@ -1571,7 +1598,7 @@ function startFixture(options = {}) {
     const locked=async action=>{facts.locks++;jobs=loadStored();return action();};
     const settings={
       revealModelPanel:async()=>{facts.reveal++;if(options.reveal)await options.reveal();},
-      capture:async()=>{facts.capture++;return options.capture ? options.capture() : copy(baseline);},
+      capture:async()=>{facts.capture++;if(options.hiddenModel||options.reveal){facts.reveal++;if(options.reveal)await options.reveal();}return options.capture ? options.capture() : copy(baseline);},
       captureNegative:async()=>{facts.captureNegative++;return options.captureNegative ? options.captureNegative() : 'original negative';}
     };
     const processJob=async job=>{
@@ -1600,7 +1627,7 @@ test('first mixed start persists an independent configuration/negative snapshot 
   const firstPersist=f.facts.persists[0];
   assert.deepEqual(firstPersist.find(job=>job.id==='legacy').configuration,baseline);
   assert.equal(firstPersist.find(job=>job.id==='legacy').negativePrompt,'original negative');
-  assert.equal(firstPersist.find(job=>job.id==='legacy').settingsOrigin,'legacy-at-first-mixed-start');
+  assert.equal(firstPersist.find(job=>job.id==='legacy').settingsOrigin,'site-at-first-api-start');
   assert.deepEqual(firstPersist.find(job=>job.id==='legacy2').configuration,baseline);
   assert.deepEqual(f.facts.process.find(job=>job.id==='legacy').configuration,baseline);
   assert.equal(f.state().running,false);assert.equal(f.state().starting,false);
@@ -1625,7 +1652,7 @@ test('resume after the first preset finishes retains the persisted original sett
   assert.equal(f.facts.capture,1);assert.equal(f.facts.captureNegative,1);
   const resumed=f.facts.process.find(job=>job.id==='legacy');
   assert.deepEqual(resumed.configuration,baseline);assert.equal(resumed.negativePrompt,'original negative');
-  assert.equal(resumed.settingsOrigin,'legacy-at-first-mixed-start');
+  assert.equal(resumed.settingsOrigin,'site-at-first-api-start');
 });
 
 for (const pause of ['destination','capture','captureNegative']) test(`Stop during pending ${pause} prevents every processJob and clears pending-start flags`,async () => {
@@ -1652,10 +1679,10 @@ test('a second Start while destination permission is pending cannot enter the ru
   assert.deepEqual(f.facts.process.map(job=>job.id),['preset','legacy']);assert.equal(f.facts.locks,1);
 });
 
-test('a legacy-only queue reveals its model card before reading the current version, without capturing preset settings',async () => {
+test('legacy-only API queue captures model and negative once when no default API model is set',async()=>{
   const f=startFixture({hiddenModel:true,jobs:[{id:'legacy',state:'queued',prompt:'legacy prompt',saved:[]}]});await f.run();
-  assert.equal(f.facts.capture,0);assert.equal(f.facts.captureNegative,0);assert.equal(f.facts.process.length,1);
-  assert.equal(f.facts.process[0].configuration,undefined);assert.equal(f.state().starting,false);assert.equal(f.facts.reveal,1);assert.equal(f.facts.modelReads,1);
+  assert.equal(f.facts.capture,1);assert.equal(f.facts.captureNegative,1);assert.equal(f.facts.process.length,1);
+  assert.deepEqual(f.facts.process[0].configuration,baseline);assert.equal(f.state().starting,false);assert.equal(f.facts.modelReads,0);
 });
 
 test('a preset-only queue starts without reading a hidden current model; its saved configuration reaches the runner',async()=>{
@@ -1800,7 +1827,7 @@ test('regression: a visibility-hidden retained LoRA row must not become a duplic
 
 function settingsWrapper(storageValue) {
   const begin=mainSource.indexOf('  async function settingsAction(');
-  const end=mainSource.indexOf('  async function request(',begin);
+  const end=mainSource.indexOf('  async function getTask(',begin);
   assert.ok(begin>=0&&end>begin,'settingsAction wrapper not found');
   const ctx={navigator:{locks:{request:async(_name,_options,run)=>run({})}},localStorage:{getItem:()=>storageValue,setItem(){}},recover:core.recover};
   vm.runInNewContext(`let running=false,starting=false,settingsBusy=false,stopRequested=false,jobs=[];const KEY='test-queue',LOCK='test-lock';function render(){}\n${mainSource.slice(begin,end)}\nthis.run=settingsAction;`,ctx);

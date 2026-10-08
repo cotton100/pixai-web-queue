@@ -14,12 +14,11 @@ const unauthorized={errors:[{message:'must be logged in to access this resource'
 const response=(status,body,{json=true}={})=>({ok:status>=200&&status<300,status,json:async()=>{if(!json)throw new SyntaxError('not json');return body;}});
 const fetchWith=(result,calls=[])=>async(url,init)=>{calls.push({url,init});if(result instanceof Error)throw result;return typeof result==='function'?result():result;};
 
-test('사이트 스키마에 맞게 getMedia 변수는 String!이고 urls{variant url}을 함께 요청하며, getTaskById 변수는 ID!',()=>{
-  assert.equal(MEDIA_QUERY,'query getMedia($id: String!) { media(id: $id) { id width height imageType fileUrl urls { variant url } } }');
-  assert.doesNotMatch(source,/getMedia\(\$id: ID!\)/);
-  assert.match(source,/request\('getMedia', MEDIA_QUERY, \{id:mediaId\}\)/);
-  assert.match(source,/query getTaskById\(\$id: ID!\) \{ task\(id: \$id\)/);
+test('production task and media lookup use official REST rather than internal GraphQL',()=>{
+  assert.match(source,/return api.task\(id\)/);assert.match(source,/await api.media\(mediaId\)/);
+  const runtime=source.slice(source.indexOf("  const KEY = 'local.pixai-web-queue.v1';"));assert(!runtime.includes('graphqlQuery('));
 });
+
 test('원본은 urls의 PUBLIC 변형을 고른다 — fileUrl이 null이어도, 썸네일이 먼저 와도',()=>{
   const media={id:'774095702306134297',width:1104,height:1824,imageType:'webp',fileUrl:null,urls:[{variant:'THUMBNAIL',url:'https://images-ng.pixai.art/images/thumb/a'},{variant:'PUBLIC',url:'https://images-ng.pixai.art/images/orig/a'},{variant:'STILL_THUMBNAIL',url:'https://images-ng.pixai.art/images/stillThumb/a'}]};
   assert.deepEqual(pickOriginalMedia(media,'774095702306134297'),{url:'https://images-ng.pixai.art/images/orig/a',variant:'PUBLIC',width:1104,height:1824});
@@ -44,11 +43,10 @@ test('내려받은 이미지 크기가 서버 원본 크기와 다르면(미리�
   const bitmap={width:10,height:10,closed:0,close(){this.closed++;}};
   await assertOriginalDimensions({},{width:10,height:10},async()=>bitmap);assert.equal(bitmap.closed,1);
 });
-test('조회 함수가 core에서 노출되고 브라우저 request는 그 함수에 위임한다',()=>{
-  assert.equal(typeof graphqlQuery,'function');assert.equal(typeof describeQueryFailure,'function');
-  assert.match(source,/async function request\(operation, query, variables\) \{[\s\S]*?graphqlQuery\(\(\.\.\.args\) => fetch\(\.\.\.args\), operation, query, variables, \{signal:controller\.signal\}\)/);
-  assert.doesNotMatch(source,/로그인을 확인해 주세요/);
+test('official API client is exported and used by the production runtime',()=>{
+  assert.equal(typeof core.createOfficialApiClient,'function');assert.match(source,/const api=createOfficialApiClient\(/);
 });
+
 test('요청 형식: 같은 엔드포인트·POST·쿠키 포함·JSON 본문',async()=>{
   const calls=[];const data=await graphqlQuery(fetchWith(response(200,{data:{media:{id:'7',fileUrl:'https://images-ng.pixai.art/x.png'}}}),calls),'getMedia','query getMedia($id: String!) { media(id: $id) { id fileUrl } }',{id:'7'});
   assert.deepEqual(data,{media:{id:'7',fileUrl:'https://images-ng.pixai.art/x.png'}});

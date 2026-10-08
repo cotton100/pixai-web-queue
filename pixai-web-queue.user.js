@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.8.5
+// @version      0.9.0
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -9,6 +9,9 @@
 // @match        https://pixai.art/*
 // @grant        GM_download
 // @grant        GM_info
+// @grant        GM_xmlhttpRequest
+// @connect      api.pixai.art
+// @connect      *.pixai.art
 // @sandbox      DOM
 // @run-at       document-start
 // @noframes
@@ -252,12 +255,15 @@
     }
     const parameters = jsonObject(task.parameters);
     const original = parameters.extra?.naturalPrompts ?? parameters.prompts;
+    // Public REST omits prompt parameters. Receipt ID + creation time are the
+    // available evidence; do not fabricate server confirmation of the prompt.
+    if (job.queryBackend === 'official-v1' && original == null) return parameters;
     if (normalize(original) !== normalize(job.prompt)) throw new Error('해당 작업의 프롬프트가 대기열과 다릅니다.');
     return parameters;
   }
   function outputIds(task, expected) {
     const outputs = jsonObject(task.outputs);
-    const ids = Array.isArray(outputs.batch)
+    const ids = Array.isArray(outputs.mediaIds) ? outputs.mediaIds.map(String) : Array.isArray(outputs.batch)
       ? outputs.batch.map(item => String(item.mediaId ?? ''))
       : [String(task.mediaId ?? outputs.mediaId ?? '')];
     if (ids.length !== expected || ids.some(id => !/^\d+$/.test(id)) || new Set(ids).size !== ids.length) {
@@ -675,13 +681,14 @@
     return source;
   }
   function normalizeSettingsOptions(value) {
-    const source = settingsBackupKeys(value, '대기열 옵션', ['maxCredits','filePrefix','repeat'], ['maxCredits','filePrefix','repeat','maxInFlight','imageCount']);
+    const source = settingsBackupKeys(value, '대기열 옵션', ['maxCredits','filePrefix','repeat'], ['maxCredits','filePrefix','repeat','maxInFlight','imageCount','api']);
     if (source.maxCredits !== null && (typeof source.maxCredits !== 'number' || !Number.isSafeInteger(source.maxCredits) || source.maxCredits < 1)) {
       throw new Error('크레딧 상한은 양의 정수 또는 제한 없음이어야 합니다.');
     }
     if (typeof source.filePrefix !== 'string') throw new Error('파일 이름은 문자열이어야 합니다.');
     if (typeof source.repeat !== 'number') throw new Error('반복 횟수는 1~100의 정수여야 합니다.');
     const extra={};
+    if (Object.hasOwn(source,'api')) extra.api=normalizeApiOptions(source.api);
     if (Object.hasOwn(source,'maxInFlight')) extra.maxInFlight=presetInteger(source.maxInFlight,'미리 등록할 작업 수',1,10);
     if (Object.hasOwn(source,'imageCount')) {
       extra.imageCount=presetInteger(source.imageCount,'생성당 이미지 수',0,4);
@@ -2071,6 +2078,85 @@ function mountPresetEditor(parent, io) {
     if (url.protocol !== "https:" || !(url.hostname === "pixai.art" || url.hostname.endsWith(".pixai.art"))) throw new Error("예상하지 못한 원본 이미지 호스트입니다. 저장하지 않습니다.");
     return url;
   }
+  const API_RATIOS=['1:1','2:3','3:2','3:4','4:3','3:5','5:3','9:16','16:9','1:3','3:1'];
+  const API_STYLES=['anime-watercolor-impasto','art-crayon','bold-line-soft-color','chibi','classic-japanese','clean-flat-illustration','colored-pencil-grain','cool-warm-oil-contrast','desaturated-cool','flat-anime-pastel','glossy-glass-anime','grey-blocks-lineless','hard-line-monochrome-accent','high-contrast-retro-vivid','holographic','korean-style','lineart-watercolor-airy','low-saturation-expressive-eyes','lucid-dreamy','luminous-retro-impasto','minimal-flat-color','modern-oil-glamour','moe-pastel','oil-watercolor-blend','painterly-doodle','paper-watercolor','pencil-sketch','poster-graffiti','retro-comic-fusion','retro-oil-glamour','retro-tv-anime','semi-realistic','stable-vaporwave','tinted-sketch','vintage-collage'];
+  function normalizeApiOptions(value={}) {
+    const s=presetObject(value,'공식 API 옵션');
+    if (Object.keys(s).some(key=>!['modelVersionId','aspectRatio','size','mode','style','seed'].includes(key))) throw new Error('공식 API 옵션 형식을 확인해 주세요. 키는 백업에 넣을 수 없습니다.');
+    const out={modelVersionId:presetText(s.modelVersionId),aspectRatio:s.aspectRatio ?? '9:16',size:s.size ?? '1k',mode:s.mode ?? 'standard',style:s.style ?? '',seed:s.seed ?? ''};
+    if (out.modelVersionId && !/^\d+$/.test(out.modelVersionId)) throw new Error('기본 모델 버전 ID를 숫자로 입력해 주세요.');
+    if (!API_RATIOS.includes(out.aspectRatio) || !['1k','1.5k'].includes(out.size)) throw new Error('공식 API 비율·크기를 확인해 주세요.');
+    if (!['','lite','standard','pro','ultra'].includes(out.mode)) throw new Error('공식 API 생성 모드를 확인해 주세요.');
+    if (out.style!=='' && !API_STYLES.includes(out.style)) throw new Error('공식 API 스타일을 확인해 주세요.');
+    if (out.seed!=='') out.seed=presetInteger(out.seed,'시드',0,4294967295);
+    return out;
+  }
+  function buildApiPayload(job, options, batchSize, randomSeed) {
+    const opts=normalizeApiOptions(options),config=job.configuration;
+    if (![1,4].includes(batchSize)) throw new Error('공식 API는 1장 또는 4장 배치를 지원합니다.');
+    const modelVersionId=presetIdentifier(config?.model?.versionId || opts.modelVersionId,'모델 버전',true);
+    const prompt=presetText(job.prompt);
+    if (!prompt) throw new Error('프롬프트를 입력해 주세요.');
+    const loras=config?.loras ?? [];
+    if (!Array.isArray(loras) || loras.length>5) throw new Error('공식 API는 LoRA 최대 5개를 지원합니다.');
+    const seen=new Set();
+    const payload={modelVersionId,prompt,negativePrompt:presetText(job.negativePrompt),aspectRatio:opts.aspectRatio,size:opts.size,
+      batchSize,seed:presetInteger(opts.seed==='' ? randomSeed : opts.seed,'시드',0,4294967295),promptHelper:'disable',
+      loras:loras.map(item=>{
+        const modelId=presetIdentifier(item.versionId,'LoRA 버전',true);
+        if (seen.has(modelId)) throw new Error('같은 LoRA 버전이 중복됐습니다.');seen.add(modelId);
+        const weight=Number(item.weight);
+        if (!['number','string'].includes(typeof item.weight) || (typeof item.weight==='string' && !item.weight.trim()) || !Number.isFinite(weight) || weight<0 || weight>1) throw new Error(`공식 API의 LoRA 수치는 0~1입니다: ${item.name || modelId}. 기존 값을 자동으로 바꾸지 않습니다.`);
+        const lora={modelId,weight};
+        // Composition already contains the trigger at the user-selected position.
+        // Override server defaults to avoid injecting it a second time.
+        if (job.composition || Object.hasOwn(item,'triggerWords')) lora.triggerWords='';
+        return lora;
+      })};
+    if (opts.mode) payload.mode=opts.mode;
+    if (opts.style) payload.style={type:'preset',key:opts.style};
+    return payload;
+  }
+  function createSessionApiKey() {
+    let key='';
+    return {set(value){const next=String(value ?? '').trim();if (!next || /[^\x21-\x7e]/.test(next)) throw new Error('API 키 형식을 확인해 주세요.');key=next;},
+      clear(){key='';},has(){return !!key;},get(){if (!key) throw new Error('설정 탭에서 공식 API 키를 이 탭에 연결해 주세요.');return key;}};
+  }
+  function gmResponse(request, details, timeoutMs, timers={set:(fn,ms)=>setTimeout(fn,ms),clear:id=>clearTimeout(id)}) {
+    return new Promise((resolve,reject)=>{
+      let settled=false,control;
+      const finish=(action,value)=>{if (settled) return;settled=true;timers.clear(timer);action(value);};
+      const fail=()=>finish(reject,new Error('공식 API 네트워크·시간 초과 오류. 제출 결과가 불명확하면 자동 재제출하지 않습니다.'));
+      const timer=timers.set(()=>{fail();try {control?.abort();} catch {}},timeoutMs);
+      try {control=request({...details,anonymous:true,fetch:true,redirect:'error',onload:value=>finish(resolve,value),onerror:fail,onabort:fail,ontimeout:fail});}
+      catch {fail();}
+    });
+  }
+  function apiHttpError(status,method) {
+    const advice={400:'입력값·모델/LoRA 버전과 모드 호환성을 확인해 주세요.',401:'API 키 인증 실패입니다. 키를 다시 연결해 주세요.',403:'이 키의 접근 권한을 확인해 주세요.',404:'작업·모델·미디어를 찾지 못했습니다. 키 유효성은 이 응답으로 판정하지 않습니다.',422:'API 입력값을 확인해 주세요.',429:'API 대기열·요청 제한입니다. 추가 제출을 멈췄습니다.'};
+    return Object.assign(new Error(`공식 API 오류 (${status}). ${advice[status] || '같은 작업 ID를 보존합니다. 제출 결과가 불명확하면 재제출하지 않습니다.'}`),
+      {status,notSubmitted:method==='POST' && [400,401,403,404,422].includes(status)});
+  }
+  function createOfficialApiClient(request,getKey,timers) {
+    async function json(method,path,payload) {
+      if (!((method==='POST' && path==='/v2/image/create') || (method==='GET' && /^\/v1\/(?:task|media)\/\d+$/.test(path)))) throw new Error('허용되지 않은 공식 API 경로입니다.');
+      if (typeof request!=='function') throw Object.assign(new Error('최신 Tampermonkey로 업데이트하고 스크립트의 API 접근 권한을 허용해 주세요.'),{notSubmitted:true});
+      let key;try {key=getKey();} catch(error) {error.notSubmitted=true;throw error;}
+      const response=await gmResponse(request,{method,url:'https://api.pixai.art'+path,responseType:'text',
+        headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},...(payload ? {data:JSON.stringify(payload)} : {})},30000,timers);
+      if (response.finalUrl && response.finalUrl!=='https://api.pixai.art'+path) throw new Error('공식 API의 예상하지 못한 이동 응답입니다.');
+      if ((method==='POST' && response.status!==201) || (method==='GET' && response.status!==200)) throw apiHttpError(response.status,method);
+      try {const value=JSON.parse(response.responseText);if (!value || typeof value!=='object' || Array.isArray(value)) throw new Error();return value;}
+      catch {throw new Error('공식 API 응답 형식을 확인하지 못했습니다. 자동 재제출하지 않습니다.');}
+    }
+    return {async create(payload){const task=await json('POST','/v2/image/create',payload);if (typeof task.id!=='string' || !/^\d+$/.test(task.id)) throw new Error('공식 API 작업 ID를 확인하지 못했습니다. 자동 재제출하지 않습니다.');return task.id;},
+      task:id=>json('GET','/v1/task/'+presetIdentifier(id,'작업',true)),media:id=>json('GET','/v1/media/'+presetIdentifier(id,'미디어',true)),
+      async image(url){const allowed=mediaUrlAllowed(url);if (allowed.username || allowed.password || allowed.port) throw new Error('이미지 주소 형식을 확인해 주세요.');
+        const response=await gmResponse(request,{method:'GET',url:allowed.href,responseType:'blob'},90000,timers);
+        if (response.finalUrl && mediaUrlAllowed(response.finalUrl).origin!==allowed.origin) throw new Error('이미지 서버 이동으로 저장을 중단했습니다.');
+        if (response.status!==200) throw apiHttpError(response.status,'GET');return response.response;}
+    };
+  }
   // 서버가 알려준 원본 크기와 실제 내려받은 이미지 크기가 다르면(미리보기 등) 저장하지 않는다.
   async function assertOriginalDimensions(blob, expected, decode) {
     if (!expected.width || !expected.height) return;
@@ -2082,6 +2168,7 @@ function mountPresetEditor(parent, io) {
   }
 
   const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,createSessionApiKey,gmResponse,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -2102,11 +2189,14 @@ function mountPresetEditor(parent, io) {
   let starting = false;
   let stopRequested = false;
   let internalAction = false;
-  let initialModel = null;
   let runImageCount = null;
   let settingsBusy = false;
   let presetEditor;
   let panel;
+  const apiKey=createSessionApiKey();
+  let apiOptions=normalizeApiOptions();
+  const api=createOfficialApiClient(typeof GM_xmlhttpRequest==='function' ? GM_xmlhttpRequest : null,()=>apiKey.get());
+  window.addEventListener('pagehide',()=>apiKey.clear());
   let choosingFolder = false;
   const download = typeof GM_download === 'function' ? GM_download : null;
   const storage = storageSupport(window, download, typeof GM_info === 'object' ? GM_info : null);
@@ -2117,8 +2207,6 @@ function mountPresetEditor(parent, io) {
   const all = selector => [...document.querySelectorAll(selector)];
   const visible = element => element && element.getClientRects().length > 0;
   const onGenerator = () => /^\/(?:[a-z]{2}\/)?generator\/image\/?$/.test(location.pathname);
-  const taskIds = () => new Set(all('main [data-task-id]').map(element => element.dataset.taskId));
-  const taskCard = id => all('main [data-testid="mobile-task-card"]').find(element => element.dataset.taskId === id);
   const modelId = () => settings.modelKey();
   const settings = createPixaiSettingsAdapter(document, {
     win:window, sleep,
@@ -2156,31 +2244,9 @@ function mountPresetEditor(parent, io) {
       return action();
     });
   }
-  async function request(operation, query, variables) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000);
-    try { return await graphqlQuery((...args) => fetch(...args), operation, query, variables, {signal:controller.signal}); }
-    finally { clearTimeout(timeout); }
-  }
-  async function getTask(id) {
-    const data = await request('getTaskById', 'query getTaskById($id: ID!) { task(id: $id) { id status createdAt parameters outputs mediaId } }', {id});
-    if (!data.task) throw new Error('작업을 찾을 수 없습니다.');
-    return data.task;
-  }
+  async function getTask(id) { return api.task(id); }
   function groupName(element) {
     return element.getAttribute('aria-label') || (element.getAttribute('aria-labelledby') || '').split(/\s+/).map(id=>document.getElementById(id)?.textContent || '').join(' ');
-  }
-  function editor() {
-    const found = all('main .tiptap[contenteditable="true"]').filter(visible);
-    if (found.length !== 1) throw new Error('새 에디터의 프롬프트 입력창을 찾을 수 없습니다.');
-    return found[0];
-  }
-  function generateButton() {
-    const found = all('main button[data-react-aria-pressable]').filter(element => visible(element) && element.textContent.includes('Ctrl+') && (element.textContent.includes('작업 제출') || element.textContent.includes('Task submitted')));
-    if (found.length !== 1 || found[0].disabled || found[0].getAttribute('aria-disabled') === 'true') {
-      throw new Error('생성 버튼을 확정할 수 없습니다.');
-    }
-    return found[0];
   }
   function expectedCount() {
     return settings.readImageCount();
@@ -2198,66 +2264,25 @@ function mountPresetEditor(parent, io) {
   }
   async function prepare(job) {
     if (stopRequested) throw new Error('다음 작업 제출이 중지됐습니다.');
-    if (!onGenerator()) throw new Error('이미지 생성 화면에서 실행해 주세요.');
-    const configuration = job.configuration;
-    if (!configuration && modelId() !== initialModel) throw new Error('실행 중 모델이 변경됐습니다.');
+    apiKey.get();
     await ensureDestination();
-    if (configuration) {
-      message=`설정 적용 중: ${job.title}`;render();
-      await settings.apply(configuration);
-      await settings.setNegative(job.negativePrompt);
+    if (job.maxCredits!=null && !panel.querySelector('[data-api-cost-ack]').checked) throw new Error('공식 API는 이 스크립트의 크레딧 상한을 적용할 수 없습니다. 설정 탭에서 이를 확인한 뒤 실행해 주세요.');
+    if (!job.apiPayload && !job.configuration && !(job.apiOptions || apiOptions).modelVersionId) {
+      job.configuration=await settings.capture();job.negativePrompt=await settings.captureNegative();
     }
-    await settings.setImageCount(runImageCount);
-    if (stopRequested) throw new Error('프롬프트 입력 전 중지됐습니다.');
-    const input = editor();
-    internalAction = true;
-    try {
-      input.focus();
-      const range = document.createRange();
-      range.selectNodeContents(input);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-      if (!document.execCommand('insertText', false, job.prompt)) throw new Error('프롬프트 입력에 실패했습니다.');
-      input.dispatchEvent(new Event('input', {bubbles:true}));
-    } finally { internalAction = false; }
-    await sleep(700);
-    if (normalize(readPromptEditorText(input)) !== normalize(job.prompt)) throw new Error('프롬프트 입력값이 일치하지 않습니다.');
-    if (generateButton().dataset.promptInputMissing === 'true') throw new Error('사이트가 프롬프트를 인식하지 못했습니다.');
-    if (configuration) { assertConfiguration(configuration,settings.read()); settings.verifyNegative(job.negativePrompt); }
-    return {expected:expectedCount(), estimatedCost:checkCost(generateButton().textContent, job.maxCredits), ...(configuration ? {appliedConfiguration:configuration,appliedNegativePrompt:job.negativePrompt} : {})};
+    const payload=job.apiPayload || buildApiPayload(job,job.apiOptions || apiOptions,job.apiBatchSize || runImageCount,crypto.getRandomValues(new Uint32Array(1))[0]);
+    return {backend:'official-api',queryBackend:'official-v1',apiPayload:payload,expected:payload.batchSize,
+      budgetEnforcement:'unavailable; acknowledged at start',appliedConfiguration:job.configuration || {model:{versionId:payload.modelVersionId},loras:payload.loras},appliedNegativePrompt:payload.negativePrompt};
   }
   async function submit(job) {
-    const before = taskIds();
-    internalAction = true;
-    try {
-      let button;
-      try {
-        if (stopRequested) throw new Error('제출 직전 중지됐습니다. 이미지를 생성하지 않았습니다.');
-        button = generateButton();
-        if (!onGenerator()) throw new Error('생성 화면을 벗어났습니다.');
-        if (normalize(readPromptEditorText(editor())) !== normalize(job.prompt)) throw new Error('제출 직전 프롬프트가 변경됐습니다.');
-        if (job.appliedConfiguration) { assertConfiguration(job.appliedConfiguration,settings.read()); settings.verifyNegative(job.appliedNegativePrompt); }
-        else if (modelId() !== initialModel) throw new Error('제출 직전 모델이 변경됐습니다.');
-        if (expectedCount() !== job.expected) throw new Error('제출 직전 이미지 수가 변경됐습니다.');
-        checkCost(button.textContent, job.maxCredits);
-      } catch(error) {error.notSubmitted=true;throw error;}
-      button.click();
-    } finally { internalAction = false; }
-    const deadline = Date.now() + 90000;
-    while (Date.now() < deadline) {
-      const added = [...taskIds()].filter(id => !before.has(id));
-      if (added.length === 1) return added[0];
-      if (added.length > 1) throw new Error('여러 새 작업이 나타나 제출 결과를 확정할 수 없습니다.');
-      if (!onGenerator()) throw new Error('생성 화면을 벗어났습니다. 제출 결과를 직접 확인해 주세요.');
-      await sleep(500);
-    }
-    throw new Error('90초 안에 작업 ID를 확인하지 못했습니다. 자동 재제출하지 않습니다.');
+    if (stopRequested) throw Object.assign(new Error('제출 직전 중지됐습니다. 이미지를 생성하지 않았습니다.'),{notSubmitted:true});
+    return api.create(job.apiPayload);
   }
   async function waitTask(job) {
     const deadline = Date.now() + 60 * 60 * 1000;
     while (Date.now() < deadline) {
       const task = await getTask(job.taskId);
+      job.queryBackend="official-v1";
       verifyTask(job, task);
       const status = String(task.status).toLowerCase();
       if (['completed','succeeded','success','done'].includes(status)) return task;
@@ -2270,19 +2295,12 @@ function mountPresetEditor(parent, io) {
     throw new Error('완료 확인 시간 초과. 같은 작업 ID로 재개할 수 있습니다.');
   }
   async function imageBlob(mediaId) {
-    const data = await request('getMedia', MEDIA_QUERY, {id:mediaId});
-    const original = pickOriginalMedia(data.media, mediaId);
-    const url = mediaUrlAllowed(original.url);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 90000);
-    try {
-      const response = await fetch(url.href, {credentials:'omit', signal:controller.signal});
-      if (!response.ok) throw new Error(`이미지 다운로드 실패 (${response.status})`);
-      const blob = await response.blob();
-      if (!['image/png','image/jpeg','image/webp'].includes(blob.type) || blob.size === 0) throw new Error('다운로드한 파일이 지원 이미지가 아닙니다.');
-      await assertOriginalDimensions(blob, original, image => createImageBitmap(image));
-      return blob;
-    } finally { clearTimeout(timeout); }
+    const media=await api.media(mediaId);
+    const original=pickOriginalMedia(media,mediaId);
+    const blob=await api.image(original.url);
+    if (!['image/png','image/jpeg','image/webp'].includes(blob?.type) || blob.size===0) throw new Error('다운로드한 파일이 지원 이미지가 아닙니다.');
+    await assertOriginalDimensions(blob,original,image=>createImageBitmap(image));
+    return blob;
   }
   async function writeNew(name, data) {
     if (storage.mode === 'download') {
@@ -2319,7 +2337,7 @@ function mountPresetEditor(parent, io) {
     async saveMetadata(job) {
       if (job.metadataFile) return;
       job.metadataFile = await writeNew(`${safeName(job.title)}_${job.taskId}.json`, JSON.stringify({
-        taskId:job.taskId, title:job.title, prompt:job.prompt, negativePrompt:job.appliedNegativePrompt ?? null, configuration:job.appliedConfiguration ?? null, composition:job.composition ?? null, images:job.saved, savedAt:new Date().toISOString(),
+        backend:job.backend || 'legacy-web', queryBackend:job.queryBackend, apiRequest:job.apiPayload || null, taskId:job.taskId, title:job.title, prompt:job.prompt, negativePrompt:job.appliedNegativePrompt ?? null, configuration:job.appliedConfiguration ?? null, composition:job.composition ?? null, images:job.saved, savedAt:new Date().toISOString(),
         storage:{mode:storage.mode, fileNames:storage.mode === 'download' ? 'requested; browser may rename on collisions' : 'actual'},
         previousDownloads:job.previousDownloads || []
       }, null, 2));
@@ -2342,22 +2360,26 @@ function mountPresetEditor(parent, io) {
       if (storage.mode === 'folder' && jobs.some(job => job.saved?.length && !['done','skipped'].includes(job.state) && job.folderToken !== folderToken)) {
         throw new Error('부분 저장 작업의 폴더를 다시 선택해 확인해 주세요.');
       }
-      if (jobs.some(job=>!job.configuration && job.state==='queued')) {
-        message='시작 준비: 사이트의 현재 모델 확인 중…';render();
-        await settings.revealModelPanel();
-        initialModel = modelId();
-        if (!initialModel) throw new Error('선택된 모델을 확인하지 못했습니다.');
+      apiKey.get();
+      const pendingJobs=jobs.filter(job=>!['done','skipped'].includes(job.state));
+      const newJobs=(oneJob ? pendingJobs.slice(0,1) : pendingJobs.some(job=>job.state!=='queued') ? [] : pendingJobs).filter(job=>job.state==='queued');
+      if (newJobs.length && !panel.querySelector('[data-api-cost-ack]').checked) {
+        throw new Error('설정 탭에서 공식 API 과금·비용 상한 미지원 안내를 확인해 주세요. 기존 작업 조회만 재개할 때는 필요하지 않습니다.');
       }
-      if (jobs.some(job=>job.configuration && job.state==='queued') && jobs.some(job=>!job.configuration && job.state==='queued')) {
-        const baseline=await settings.capture(), negative=await settings.captureNegative();
-        for (const job of jobs.filter(item=>!item.configuration && item.state==='queued')) Object.assign(job, {
-          configuration:JSON.parse(JSON.stringify(baseline)),negativePrompt:negative,settingsOrigin:'legacy-at-first-mixed-start'
-        });
-        persist(); // Legacy settings must survive stop/reload after a preset has run.
+      const needsSite=newJobs.some(job=>!job.apiPayload && !job.configuration && !(job.apiOptions || apiOptions).modelVersionId);
+      if (needsSite) {
+        message='기본 모델 미지정: 사이트 설정을 읽는 중…';render();
+        const baseline=await settings.capture(),negative=await settings.captureNegative();
+        for (const job of newJobs.filter(item=>!item.apiPayload && !item.configuration && !(item.apiOptions || apiOptions).modelVersionId)) {
+          Object.assign(job,{configuration:JSON.parse(JSON.stringify(baseline)),negativePrompt:negative,settingsOrigin:'site-at-first-api-start'});
+        }
       }
       if (storage.mode === 'download') resetDownloadProgress(jobs);
       const selectedCount=Number(panel.querySelector('[data-image-count]').value);
-      runImageCount=selectedCount || expectedCount();
+      runImageCount=selectedCount || (newJobs.length ? expectedCount() : 1);
+      const payloads=newJobs.filter(item=>!item.apiPayload).map(job=>[job,buildApiPayload(job,job.apiOptions || apiOptions,job.apiBatchSize || runImageCount,crypto.getRandomValues(new Uint32Array(1))[0])]);
+      for (const [job,payload] of payloads) job.apiPayload=payload;
+      persist(); // Freeze all new payloads before the first paid request.
       if (stopRequested) throw new Error('시작 준비가 중지됐습니다. 이미지를 생성하지 않았습니다.');
       running = true;
       starting = false;
@@ -2402,6 +2424,8 @@ function mountPresetEditor(parent, io) {
   }
   function render() {
     if (!panel) return;
+    const keyStatus=panel.querySelector('[data-api-key-state]');
+    if (keyStatus) keyStatus.textContent=apiKey.has() ? '키 입력됨 · 이 탭에서만 보관 · 인증 확인은 별도 조회로 진행' : 'API 키 미입력 · 새로고침하면 다시 입력해 주세요';
     const launcher=panel.querySelector('[data-launcher]');
     if (launcher) launcher.title=`클릭해 PixAI 대기열 열기 · 드래그해 이동 · ${running ? '실행 중' : starting ? '시작 준비 중' : settingsBusy ? '설정 확인 중' : '대기'}\n${message}`;
     panel.querySelector('[data-message]').textContent = message;
@@ -2487,7 +2511,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.8.5', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.0', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2516,7 +2540,7 @@ function mountPresetEditor(parent, io) {
     try {minimized=JSON.parse(localStorage.getItem('local.pixai-web-queue.minimized.v1')||'false')===true;} catch { /* Ignore malformed or unavailable view preferences. */ }
     minimize(minimized,false,false);
     const toast=node('div',null,{'data-toast':'',role:'status','aria-live':'polite'});toast.hidden=true;
-    panel.append(style,launcher,header, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}),toast, node('small','제목줄을 드래그해서 이동 · 조합별 모델·LoRA를 적용합니다. 해상도·이미지 수 등은 사이트 설정을 확인하세요.'));
+    panel.append(style,launcher,header, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}),toast, node('small','공식 API로 생성·저장 · 사이트 생성 버튼은 누르지 않습니다. API 비율·크기·스타일은 설정 탭에서 정합니다.'));
     panel.append(node('div','저장 폴더 미선택',{'data-folder':''}));
     const choose = button('저장 폴더 선택', chooseFolder);
     choose.dataset.chooseFolder = '';
@@ -2537,20 +2561,51 @@ function mountPresetEditor(parent, io) {
     const inFlightLabel=node('label','미리 등록할 작업 수 (1~10)');
     const maxInFlight=node('input',null,{type:'number',min:'1',max:'10',value:'3','data-edit':'','data-max-in-flight':'','aria-label':'미리 등록할 작업 수'});
     inFlightLabel.append(maxInFlight);
+    budget.hidden=true;budgetLabel.hidden=true; // Retain old backup values, without promising API budget enforcement.
+    const apiContent=node('div',null,{class:'pq-api-settings'});
+    const keyInput=node('input',null,{type:'password',autocomplete:'off',placeholder:'공식 API 키 · 이 탭에서만 보관','aria-label':'공식 API 키','data-edit':''});
+    const keyState=node('small',null,{'data-api-key-state':'',role:'status'});
+    const connectKey=button('이 탭에 키 연결',()=>{try {apiKey.set(keyInput.value);message='키 입력 완료. 연결 확인은 기존 작업 조회로 할 수 있습니다. 새 생성은 아직 실행하지 않았습니다.';} finally {keyInput.value='';render();}});connectKey.dataset.edit='';
+    const clearKey=button('키 지우기',()=>{apiKey.clear();keyInput.value='';message='이 탭의 API 키를 지웠습니다.';render();});clearKey.dataset.edit='';
+    const verifyId=node('input',null,{'aria-label':'연결 확인용 기존 작업 ID',placeholder:'기존 작업 ID (조회만 함)','data-edit':''});
+    const verifyKey=button('기존 작업으로 연결 확인',()=>settingsAction(async()=>{
+      const id=verifyId.value.trim() || jobs.find(job=>job.taskId)?.taskId;
+      const task=await api.task(presetIdentifier(id,'기존 작업',true));
+      if (String(task.id)!==String(id) || !['waiting','running','completed','failed','cancelled'].includes(task.status)) throw new Error('조회 응답의 작업 ID·상태를 확인하지 못했습니다.');
+      message=`공식 API 인증·조회 성공 · 작업 ${id} · ${task.status}. 새 생성·다운로드는 실행하지 않았습니다.`;render();
+    },{readOnly:true}));verifyKey.dataset.edit='';
+    const apiFields={};
+    function apiField(key,label,values) {
+      const wrapper=node('label',label),control=values ? node('select',null,{'data-edit':'','aria-label':label}) : node('input',null,{'data-edit':'','aria-label':label});
+      if (values) for (const [value,name] of values) control.append(node('option',name,{value}));
+      apiFields[key]=control;wrapper.append(control);apiContent.append(wrapper);return control;
+    }
+    apiContent.append(keyInput,connectKey,clearKey,keyState,node('small','키는 파일·설정 백업·대기열에 저장하지 않습니다. 새로고침하면 다시 입력합니다.'),verifyId,verifyKey);
+    apiField('modelVersionId','통짜 대기열 기본 모델 버전 ID (프리셋 지정 시 해당 프리셋 우선)');
+    apiField('aspectRatio','API 이미지 비율',API_RATIOS.map(value=>[value,value]));
+    apiField('size','API 이미지 크기',[['1k','1k'],['1.5k','1.5k']]);
+    apiField('mode','츠바키 API 생성 모드',[['','다른 모델: 모드 보내지 않음'],['lite','Lite'],['standard','Standard'],['pro','Pro'],['ultra','Ultra']]);
+    apiField('style','츠바키 API 스타일',[['','스타일 보내지 않음'],...API_STYLES.map(value=>[value,value])]);
+    apiField('seed','API 시드 (빈칸은 작업별 랜덤)').setAttribute('placeholder','0~4294967295');
+    const costAck=node('input',null,{type:'checkbox','data-api-cost-ack':'','data-edit':''});
+    const costAckLabel=node('label',null);costAckLabel.append(costAck,node('span','시작은 크레딧을 사용하는 공식 API 생성 요청이며, 기존 사이트 비용 상한을 이 API 실행에 적용할 수 없음을 확인했습니다.'));
+    apiContent.append(node('small','모델·LoRA는 프리셋에서 가져옵니다. 나머지 API 옵션은 여기서 정하며 사이트의 해상도·스타일·참조 설정을 자동 복사하지 않습니다. LoRA 수치는 0~1, 최대 5개입니다.'),costAckLabel);
+    function readApiFields() {return normalizeApiOptions(Object.fromEntries(Object.entries(apiFields).map(([key,input])=>[key,input.value])));}
     function readOptions() {
-      return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value),imageCount:Number(imageCount.value),maxInFlight:Number(maxInFlight.value)});
+      return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value),imageCount:Number(imageCount.value),maxInFlight:Number(maxInFlight.value),api:readApiFields()});
     }
     function fillOptions(value) {
       budget.value=value.maxCredits == null ? '' : String(value.maxCredits);
       title.value=value.filePrefix;repeat.value=String(value.repeat);
       imageCount.value=String(value.imageCount ?? 4);maxInFlight.value=String(value.maxInFlight ?? 3);
+      apiOptions=normalizeApiOptions(value.api);for (const [key,input] of Object.entries(apiFields)) input.value=String(apiOptions[key]);
     }
     function loadOptions() {
       fillOptions(normalizeSettingsOptions(JSON.parse(localStorage.getItem(OPTIONS_KEY) || '{"maxCredits":7800,"filePrefix":"","repeat":1}')));
     }
     try {loadOptions();} catch {message='기본 옵션을 읽지 못했습니다. 설정 불러오기로 복구하거나 입력값을 확인해 주세요.';}
-    for (const input of [budget,title,repeat,imageCount,maxInFlight]) input.addEventListener('change',()=>{
-      try {localStorage.setItem(OPTIONS_KEY,JSON.stringify(readOptions()));}
+    for (const input of [budget,title,repeat,imageCount,maxInFlight,...Object.values(apiFields)]) input.addEventListener('change',()=>{
+      try {const options=readOptions();localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));apiOptions=options.api;}
       catch(error) {message=`기본 옵션 저장 실패: ${error.message}`;render();}
     });
     const add = button('대기열 추가', async () => locked(() => {
@@ -2562,7 +2617,7 @@ function mountPresetEditor(parent, io) {
       if (jobs.length + parts.length * count > 1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
       const added = [];
       for (let index=0; index<parts.length; index++) for (let n=0; n<count; n++) added.push({
-        id:crypto.randomUUID(), title:`${title.value.trim() || 'PixAI'}_${index+1}_${n+1}`, prompt:parts[index], maxCredits, state:'queued', saved:[]
+        id:crypto.randomUUID(), title:`${title.value.trim() || 'PixAI'}_${index+1}_${n+1}`, prompt:parts[index], maxCredits, state:'queued', saved:[],apiOptions:readApiFields(),apiBatchSize:Number(imageCount.value) || expectedCount()
       });
       jobs.push(...added); persist(); prompts.value=''; message=`${added.length}개 작업을 추가했습니다.`; render();
     }));
@@ -2583,6 +2638,7 @@ function mountPresetEditor(parent, io) {
       applySettings:value=>settingsAction(()=>settings.apply(value)),
       enqueue:value=>queueEdit(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
+        for (const job of added) {job.apiOptions=readApiFields();job.apiBatchSize=Number(imageCount.value) || expectedCount();}
         if (jobs.length+added.length>1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
         if (value.reservations.some(res=>jobs.some(job=>job.composition?.reservation?.id===res.id))) throw new Error('이미 등록된 예약이 있습니다. 해당 예약을 제외하고 새로 예약해 주세요.');
         jobs.push(...added);persist();
@@ -2610,7 +2666,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.8.5',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.0',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -2686,7 +2742,7 @@ function mountPresetEditor(parent, io) {
     const folderStatus=panel.querySelector('[data-folder]'),jobsView=panel.querySelector('[data-jobs]');
     const intro=[...panel.children].find(child=>child.tagName.toLowerCase()==='small');
     const settingsContent=node('div',null,{class:'pq-settings-content'});
-    settingsContent.append(node('h3','저장 위치'),folderStatus,choose,chooseOther,node('h3','실행 옵션'),...(budgetLabel ? [budgetLabel] : []),budget,imageCountLabel,inFlightLabel,node('small','작업별 프롬프트를 순서대로 미리 등록합니다. 한 작업을 저장하면 다음 작업을 채웁니다. 첫 작업만 실행은 1건만 처리합니다.'),node('h3','설정 백업'),backups);
+    settingsContent.append(node('h3','공식 API 연결·생성 옵션'),apiContent,node('h3','저장 위치'),folderStatus,choose,chooseOther,node('h3','실행 옵션'),budgetLabel,budget,imageCountLabel,inFlightLabel,node('small','작업별 프롬프트를 순서대로 미리 등록합니다. 한 작업을 저장하면 다음 작업을 채웁니다. 첫 작업만 실행은 1건만 처리합니다.'),node('h3','설정 백업'),backups);
     backups.open=true;
     const queueContent=node('div',null,{class:'pq-queue-content'});queueContent.append(node('h3','등록된 대기열'),testRun,jobsView,simple,exportQueue);simple.open=true;
     attachRuntimePages=()=>{
@@ -2999,7 +3055,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.8.5', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.0', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
@@ -3034,22 +3090,7 @@ function mountPresetEditor(parent, io) {
     } catch (error) { message = folderError(error); }
     finally { choosingFolder = false; render(); }
   }
-  // A manual click or drop on the site pauses the run. Keystrokes that land on the site while the panel
-  // stays editable (0.8.2) are swallowed instead, because the runner itself moves focus into the site's
-  // prompt box; focus returns to the panel field being edited. No synthetic event is treated as permission.
-  let lastPanelFocus=null;
-  document.addEventListener('focusin',event=>{if (panel?.contains(event.target)) lastPanelFocus=event.target;},true);
-  for (const type of ['click','keydown','beforeinput','drop']) document.addEventListener(type,event=>{
-    if (!(running || starting) || internalAction || panel?.contains(event.target) || !event.isTrusted || !onGenerator()) return;
-    event.preventDefault(); event.stopImmediatePropagation();
-    if (running && (type==='keydown' || type==='beforeinput')) {
-      if (lastPanelFocus && lastPanelFocus.isConnected !== false && !lastPanelFocus.disabled) lastPanelFocus.focus({preventScroll:true});
-      notifyAction('실행 중에는 사이트에 입력할 수 없습니다. 패널 안에서 계속 편집할 수 있습니다.');
-      return;
-    }
-    stopRequested=true;
-    message='실행 중 사이트 조작으로 중지했습니다. 같은 작업은 재개할 수 있습니다.'; render();
-  },true);
+  // Official API execution does not take focus from or intercept site input.
   window.addEventListener('storage', event=>{
     // Library edits from another tab are picked up even while this tab runs, so a later commit here cannot overwrite them.
     if (event.key===LIBRARY_KEY && !starting && !settingsBusy) { try {presetEditor?.refresh();} catch {message='프리셋 라이브러리 읽기 실패';render();} }
