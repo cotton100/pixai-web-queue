@@ -363,11 +363,12 @@ function panelFixture(nativePicker, gm={}) {
   const window={innerWidth:1200,innerHeight:900,addEventListener(type,fn){(windowListeners[type]??=[]).push(fn);}};window.top=window.self=window;
   if(nativePicker)window.showDirectoryPicker=(...args)=>{pickerCalls++;return nativePicker(...args)};
   const context={window,document,location:{hostname:'pixai.art',pathname:'/ko/generator/image'},
-    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
+    localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.queueStorageFailure&&key==='local.pixai-web-queue.v1')throw new Error('Queue storage unavailable');if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
     navigator:{locks:{request:async(name,options,callback)=>{lockRequests++;return callback(gm.lockUnavailable?null:{});}}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
     fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id',getRandomValues:array=>array.fill(42)},
-    GM_xmlhttpRequest:gm.request || (()=>{networkCalls++;throw Error('No network in UI fixture');}),Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info};
+    GM_xmlhttpRequest:gm.request || (()=>{networkCalls++;throw Error('No network in UI fixture');}),Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info,
+    GM_getValue:gm.keyStorage?.get,GM_setValue:gm.keyStorage?.set,GM_deleteValue:gm.keyStorage?.remove};
   if(gm.folderStore)context.indexedDB=folderDatabase(gm.folderStore);
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
@@ -393,6 +394,23 @@ test('runtime API key clears its field, stays out of storage/backup and disappea
   runtimePress(f,'설정 내보내기');await runtimeFlush();assert([...f.records.values()].every(value=>!value.includes('fixture-sensitive-key')));
   f.fireWindow('pagehide');runtimePress(f,'키 지우기');await runtimeFlush();assert.match(f.panel.querySelector('[data-api-key-state]').textContent,/미입력/);
 });
+test('optional remembered key restores without DOM exposure or requests and turning it off deletes only the stored copy',async()=>{
+  const values=new Map(),keyStorage={get:(k,d)=>values.has(k)?values.get(k):d,set:(k,v)=>values.set(k,v),remove:k=>values.delete(k)};
+  const f=panelFixture(null,{keyStorage}),input=f.panel.querySelector('[aria-label="공식 API 키"]'),remember=f.panel.querySelector('[data-remember-api-key]');
+  assert.equal(remember.checked,false);assert.equal(remember.disabled,false);input.value='fixture-remember-secret';
+  remember.checked=true;remember.fire('change');assert.equal(values.size,0);
+  runtimePress(f,'이 탭에 키 연결');await runtimeFlush();assert.equal(values.size,1);assert.equal(input.value,'');
+  assert([...f.records.values()].every(value=>!value.includes('fixture-remember-secret')));assert.equal(f.networkCalls,0);
+  f.fireWindow('pagehide');const fresh=panelFixture(null,{keyStorage});
+  assert.equal(fresh.panel.querySelector('[aria-label="공식 API 키"]').value,'');assert.equal(fresh.panel.querySelector('[data-remember-api-key]').checked,true);
+  assert.match(fresh.panel.querySelector('[data-api-key-state]').textContent,/스크립트 관리자에 저장됨/);assert.equal(fresh.networkCalls,0);
+  const toggle=fresh.panel.querySelector('[data-remember-api-key]');toggle.checked=false;toggle.fire('change');assert.equal(values.size,0);
+  assert.match(fresh.panel.querySelector('[data-api-key-state]').textContent,/이 탭에서만/);
+  runtimePress(fresh,'키 지우기');await runtimeFlush();assert.match(fresh.panel.querySelector('[data-api-key-state]').textContent,/미입력/);
+  assert.equal(remember.parentElement.getAttribute('class'),'pq-check-label');
+  assert.equal(f.panel.querySelector('[data-api-cost-ack]').parentElement.getAttribute('class'),'pq-check-label');
+});
+
 test('production panel sends landscape ratio and saves four images without JSON while leaving a later job untouched',async()=>{
   const files=new Map(),requests=[];
   const folder={name:'fixture',queryPermission:async()=> 'granted',getFileHandle:async(name,{create}={})=>{
@@ -599,10 +617,58 @@ function runtimePress(f,label) {
   const element=f.panel.querySelectorAll('button').find(item=>item.textContent===label);assert.ok(element,`Missing runtime button ${label}`);f.press(element);
 }
 const runtimeFlush=()=>new Promise(resolve=>setImmediate(resolve));
+test('queue active/history views preserve completed records; scoped delete requires confirmation',async()=>{
+  const f=panelFixture(null,{queue:[job(),{...job(),id:'done',state:'done',taskId:'900'}]});
+  assert.equal(f.panel.querySelectorAll('[data-queue-job]').length,1);
+  runtimePress(f,'현재 목록 전체 삭제');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs.length,2);
+  runtimePress(f,'취소');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs.length,2);
+  runtimePress(f,'현재 목록 전체 삭제');runtimePress(f,'확인하고 적용');await runtimeFlush();
+  assert.deepEqual(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs.map(j=>j.id),['done']);
+  assert.equal(f.panel.querySelectorAll('[data-queue-job]').length,0);
+  f.press(f.panel.querySelector('[data-queue-view="history"]'));
+  assert.equal(f.panel.querySelectorAll('[data-queue-job]').length,1);
+  runtimePress(f,'현재 목록 전체 삭제');runtimePress(f,'확인하고 적용');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs.length,0);
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+test('queue selection deletes only chosen records and new queue archives remaining jobs reversibly',async()=>{
+  const f=panelFixture(null,{queue:[job(),{...job(),id:'second',prompt:'keep prompt'}]});
+  const check=f.panel.querySelector('[data-select-job="fixture"]');check.checked=true;check.fire('change');
+  runtimePress(f,'선택 삭제 (1)');runtimePress(f,'확인하고 적용');await runtimeFlush();
+  let saved=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
+  assert.deepEqual(saved.map(j=>j.id),['second']);
+  runtimePress(f,'새 대기열');runtimePress(f,'확인하고 적용');await runtimeFlush();
+  saved=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
+  assert.equal(saved[0].state,'skipped');assert.equal(saved[0].prompt,'keep prompt');
+  assert.equal(f.panel.querySelectorAll('[data-queue-job]').length,0);
+  f.press(f.panel.querySelector('[data-queue-view="history"]'));runtimePress(f,'건너뛰기 취소');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].state,'queued');
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+test('queue deletion revalidates paid task protection after lock reload',async()=>{
+  const f=panelFixture(null,{queue:[job()]});
+  runtimePress(f,'현재 목록 전체 삭제');
+  f.records.set(runtimeSettingsKeys.queue,JSON.stringify({version:1,jobs:[{...job(),state:'waiting',taskId:'900'}]}));
+  runtimePress(f,'확인하고 적용');await runtimeFlush();
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].taskId,'900');
+  assert.match(f.panel.querySelector('[data-message]').textContent,/미완료/);
+  assert.equal(f.panel.querySelector('[data-select-job="fixture"]').disabled,true);
+});
+test('queue deletion fails closed on storage failure or another tab lock',async()=>{
+  for(const option of ['queueStorageFailure','lockUnavailable']) {
+    const f=panelFixture(null,{queue:[job()],[option]:true});
+    runtimePress(f,'현재 목록 전체 삭제');runtimePress(f,'확인하고 적용');await runtimeFlush();
+    assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs.length,1);
+    assert.equal(f.panel.querySelectorAll('[data-queue-job]').length,1);
+    assert.equal(f.networkCalls,0);
+  }
+});
 test('runtime skip undo restores an old unsubmitted job in place without applying settings or submitting',async()=>{
   const original={...job(),state:'skipped',configuration:{modelId:'101'},prompt:'preserved\n\nprompt'};
   const f=panelFixture(null,{queue:[original,{...job(),id:'other',title:'Other'}]});
-  runtimePress(f,'건너뛰기 취소');await runtimeFlush();
+  f.press(f.panel.querySelector('[data-queue-view="history"]'));runtimePress(f,'건너뛰기 취소');await runtimeFlush();
   const current=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
   assert.equal(current.length,2);assert.equal(current[0].state,'queued');
   assert.equal(current[0].id,original.id);assert.equal(current[0].prompt,original.prompt);
@@ -620,7 +686,7 @@ test('runtime skip undo keeps known paid task and saved progress while uncertain
     {...job(),state:'skipped',submittedAt:Date.now()},
     {...job(),state:'skipped',skippedFrom:'unknown'}
   ]) {
-    const f=panelFixture(null,{queue:[original]});runtimePress(f,'건너뛰기 취소');await runtimeFlush();
+    const f=panelFixture(null,{queue:[original]});f.press(f.panel.querySelector('[data-queue-view="history"]'));runtimePress(f,'건너뛰기 취소');await runtimeFlush();
     const current=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0];
     assert.equal(current.state,original.taskId?'waiting':'unknown');
     assert.equal(current.taskId,original.taskId);assert.deepEqual(current.saved,original.saved);assert.equal(current.folderToken,original.folderToken);
@@ -631,7 +697,7 @@ test('runtime skip and undo preserve the exact queued record and order',async()=
   const original=job();const f=panelFixture(null,{queue:[original]});
   runtimePress(f,'건너뛰기');await runtimeFlush();
   assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs[0].skippedFrom,'queued');
-  runtimePress(f,'건너뛰기 취소');await runtimeFlush();
+  f.press(f.panel.querySelector('[data-queue-view="history"]'));runtimePress(f,'건너뛰기 취소');await runtimeFlush();
   assert.deepEqual(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs,[original]);
   assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
 });

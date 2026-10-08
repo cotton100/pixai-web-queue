@@ -75,6 +75,35 @@ test('key vault clears without storage; API backup round trip preserves settings
   assert.deepEqual(core.parseSettingsBackup(JSON.stringify(backup)).options,opts);assert(!JSON.stringify(backup).includes('private-key'));
   assert.throws(()=>core.normalizeSettingsOptions({...opts,api:{apiKey:'secret'}}),/키/);
 });
+test('remembered key is opt-in, restores into memory and can be removed without exposing it through state',()=>{
+  const values=new Map(),storage={get:(k,d)=>values.has(k)?values.get(k):d,set:(k,v)=>values.set(k,v),remove:k=>values.delete(k)};
+  const vault=core.createSessionApiKey(),manager=core.createRememberedApiKey(vault,storage);
+  manager.restore();manager.connect('fixture-secret');assert.equal(values.size,0);assert.equal(manager.status(),'none');
+  manager.connect('fixture-secret',true);assert.equal(values.size,1);vault.clear();manager.restore();assert.equal(vault.get(),'fixture-secret');
+  manager.forget();assert.equal(values.size,0);assert.equal(vault.has(),true);assert.equal(manager.status(),'none');
+  manager.clear();assert.equal(vault.has(),false);
+  const unsupported=core.createRememberedApiKey(vault,null);assert.throws(()=>unsupported.connect('fixture-secret',true),/지원하지/);assert.equal(vault.has(),false);
+});
+test('remembered key storage errors clear the session, redact details and never report deletion as successful',()=>{
+  for(const method of ['get','set','remove']){
+    const vault=core.createSessionApiKey();vault.set('prior-secret');
+    const storage={get:()=>null,set(){},remove(){}};storage[method]=()=>{throw Error('fixture-secret');};
+    const manager=core.createRememberedApiKey(vault,storage);
+    assert.throws(()=>method==='get'?manager.restore():method==='set'?manager.connect('fixture-secret',true):manager.clear(),e=>e.message.includes('저장 상태')&&!e.message.includes('fixture-secret'));
+    assert.equal(manager.status(),'unknown');assert.equal(vault.has(),false);
+  }
+  const vault=core.createSessionApiKey(),manager=core.createRememberedApiKey(vault,{get:()=> 'fixture-secret',set(){},remove(){}});
+  manager.restore();assert.throws(()=>manager.forget(),/저장 상태/);assert.equal(vault.has(),false);
+});
+test('invalid persisted key cannot auto-connect and a failed write cannot pretend to remember a key',()=>{
+  const vault=core.createSessionApiKey();
+  for(const value of [{key:'fixture-secret'},'bad\nkey',42]){
+    const manager=core.createRememberedApiKey(vault,{get:()=>value,set(){},remove(){}});
+    assert.throws(()=>manager.restore(),/저장 상태/);assert.equal(vault.has(),false);
+  }
+  const manager=core.createRememberedApiKey(vault,{get:()=>null,set(){},remove(){}});
+  assert.throws(()=>manager.connect('fixture-secret',true),/저장 상태/);assert.equal(vault.has(),false);
+});
 test('official transport uses fixed REST routes, anonymous fetch and blocked redirects, with no cookie or key in payload',async()=>{
   const f=transport(d=>({status:d.method==='POST' ? 201:200,responseText:JSON.stringify({id:'900',status:'completed'})}));
   assert.equal(await f.api.create(core.buildApiPayload(job(),{},4,42)),'900');await f.api.task('900');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.6
+// @version      0.9.7
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -10,6 +10,9 @@
 // @grant        GM_download
 // @grant        GM_info
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @connect      api.pixai.art
 // @connect      *.pixai.art
 // @connect      d2doj8oszwtcqy.cloudfront.net
@@ -2125,6 +2128,29 @@ function mountPresetEditor(parent, io) {
     return {set(value){const next=String(value ?? '').trim();if (!next || /[^\x21-\x7e]/.test(next)) throw new Error('API 키 형식을 확인해 주세요.');key=next;},
       clear(){key='';},has(){return !!key;},get(){if (!key) throw new Error('설정 탭에서 공식 API 키를 이 탭에 연결해 주세요.');return key;}};
   }
+  function createRememberedApiKey(vault, storage) {
+    const slot='pixai.official-api-key.v1';
+    const supported=!!storage && ['get','set','remove'].every(name=>typeof storage[name]==='function');
+    let state='none';
+    const validated=value=>{const candidate=createSessionApiKey();if(typeof value!=='string') throw new Error('API 키 형식을 확인해 주세요.');candidate.set(value);return candidate.get();};
+    const checked=action=>{try {return action();} catch {state='unknown';vault.clear();throw new Error('키 저장 상태를 확인하지 못해 이 탭의 연결을 해제했습니다. 저장된 키 삭제 후 다시 연결해 주세요.');}};
+    const remove=()=>{storage.remove(slot);if(storage.get(slot,null)!==null) throw new Error('delete verification');};
+    return {
+      supported,status:()=>state,
+      restore(){if(!supported)return;checked(()=>{const saved=storage.get(slot,null);if(saved===null){state='none';return;}vault.set(validated(saved));state='saved';});},
+      connect(value,remember=false){
+        vault.clear();
+        const key=validated(value);
+        if(remember && !supported) throw new Error('이 환경에서는 키 기억하기를 지원하지 않습니다. 저장 안 함으로 연결해 주세요.');
+        checked(()=>{
+          if(supported){if(remember){storage.set(slot,key);if(storage.get(slot,null)!==key)throw new Error('write verification');}else remove();}
+          state=remember?'saved':'none';vault.set(key);
+        });
+      },
+      forget(){checked(()=>{if(supported)remove();state='none';});},
+      clear(){vault.clear();this.forget();}
+    };
+  }
   function reconfigureQueuedApiJob(job,options,batchSize,randomSeed) {
     if (job.state!=='queued' || job.taskId || job.saved?.length || job.mediaIds?.length || job.metadataFile) throw new Error('미제출 대기 작업의 API 옵션만 바꿀 수 있습니다. 제출된 작업은 같은 ID로 재개해 주세요.');
     if (job.submittedAt && !/^공식 API 오류 \((400|401|403|404|422)\)\./.test(job.error || '')) throw new Error('이전 제출 결과를 확인할 수 없어 요청을 바꾸지 않습니다.');
@@ -2234,8 +2260,20 @@ function mountPresetEditor(parent, io) {
     } finally { if (typeof bitmap?.close === "function") bitmap.close(); }
   }
 
+  function queueHistory(job) {return ['done','skipped'].includes(job.state);}
+  function queueJobRemovable(job) {
+    return job.state==='done' || (['queued','skipped'].includes(job.state) && !job.taskId && !job.submittedAt && !job.saved?.length && !job.mediaIds?.length && !job.metadataFile && !['unknown','submitting','waiting','saving','save_failed'].includes(job.skippedFrom));
+  }
+  function changeQueueRecords(jobs,ids,action) {
+    if(!['delete','archive'].includes(action))throw new Error('지원하지 않는 대기열 변경입니다.');
+    const selected=new Set(ids),targets=jobs.filter(job=>selected.has(job.id));
+    if(!selected.size || targets.length!==selected.size)throw new Error('목록이 변경됐습니다. 다시 선택해 주세요.');
+    if(targets.some(job=>!queueJobRemovable(job) || (action==='archive' && queueHistory(job))))throw new Error('제출된 미완료 작업·결과 확인이 필요한 작업은 지울 수 없습니다. 먼저 같은 작업을 재개해 저장해 주세요.');
+    return action==='delete' ? jobs.filter(job=>!selected.has(job.id)) : jobs.map(job=>selected.has(job.id) ? {...job,state:'skipped',skippedFrom:job.state} : job);
+  }
+
   const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
-  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -2261,6 +2299,7 @@ function mountPresetEditor(parent, io) {
   let presetEditor;
   let panel;
   const apiKey=createSessionApiKey();
+  const rememberedKey=createRememberedApiKey(apiKey,typeof GM_getValue==='function' && typeof GM_setValue==='function' && typeof GM_deleteValue==='function' ? {get:GM_getValue,set:GM_setValue,remove:GM_deleteValue} : null);
   let apiOptions=normalizeApiOptions();
   const api=createOfficialApiClient(typeof GM_xmlhttpRequest==='function' ? GM_xmlhttpRequest : null,()=>apiKey.get());
   window.addEventListener('pagehide',()=>apiKey.clear());
@@ -2269,6 +2308,7 @@ function mountPresetEditor(parent, io) {
   const storage = storageSupport(window, download, typeof GM_info === 'object' ? GM_info : null);
   let downloadsReady = false;
   let message = storage.message;
+  try {rememberedKey.restore();} catch(error) {message=error.message;}
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const $ = selector => document.querySelector(selector);
   const all = selector => [...document.querySelectorAll(selector)];
@@ -2474,7 +2514,21 @@ function mountPresetEditor(parent, io) {
     return element;
   }
   let notificationTimer;
-  const expandedJobs=new Set();
+  const expandedJobs=new Set(),selectedJobs=new Set();
+  let queueView='active',queueConfirmation=null;
+  async function confirmQueueChange() {
+    if(running || starting || settingsBusy)throw new Error('실행을 중지한 뒤 목록을 정리해 주세요.');
+    const request=queueConfirmation;if(!request)return;
+    await locked(()=>{
+      const before=jobs;const next=changeQueueRecords(jobs,request.ids,request.action);
+      jobs=next;
+      try {persist();} catch(error) {jobs=before;throw error;}
+    });
+    queueConfirmation=null;selectedJobs.clear();
+    if(request.action==='archive')queueView='active';
+    message=request.action==='archive' ? `${request.ids.length}개를 보관했습니다. 새 작업을 등록해 주세요. 기록에서 건너뛰기 취소로 복원할 수 있습니다.` : `${request.ids.length}개 목록을 삭제했습니다. 저장된 이미지·프리셋·청크는 유지됩니다.`;
+    render();
+  }
   function notifyAction(text) {
     if (!panel) return;
     const toast=panel.querySelector('[data-toast]');if (!toast) return;
@@ -2483,8 +2537,10 @@ function mountPresetEditor(parent, io) {
   }
   function render() {
     if (!panel) return;
+    const rememberControl=panel.querySelector('[data-remember-api-key]');
+    if(rememberControl)rememberControl.disabled=!rememberedKey.supported || running || starting || settingsBusy;
     const keyStatus=panel.querySelector('[data-api-key-state]');
-    if (keyStatus) keyStatus.textContent=apiKey.has() ? '키 입력됨 · 이 탭에서만 보관 · 인증 확인은 별도 조회로 진행' : 'API 키 미입력 · 새로고침하면 다시 입력해 주세요';
+    if (keyStatus) keyStatus.textContent=rememberedKey.status()==='unknown' ? '키 저장 상태 확인 필요 · 저장된 키를 삭제하고 다시 연결해 주세요' : apiKey.has() ? `키 입력됨 · ${rememberedKey.status()==='saved' ? '스크립트 관리자에 저장됨' : '이 탭에서만 보관'} · 인증 확인은 별도 조회로 진행` : rememberedKey.status()==='saved' ? '저장된 키 있음 · 이 탭 연결 해제됨 · 키를 다시 입력하거나 저장된 키를 삭제해 주세요' : 'API 키 미입력 · 설정에서 연결해 주세요';
     const launcher=panel.querySelector('[data-launcher]');
     if (launcher) launcher.title=`클릭해 PixAI 대기열 열기 · 드래그해 이동 · ${running ? '실행 중' : starting ? '시작 준비 중' : settingsBusy ? '설정 확인 중' : '대기'}\n${message}`;
     panel.querySelector('[data-message]').textContent = message;
@@ -2495,9 +2551,40 @@ function mountPresetEditor(parent, io) {
       : (folder ? `저장 폴더: ${folder.name}` : rememberedFolder ? `기억한 폴더: ${rememberedFolder.handle.name} · 권한 허용 필요` : restoringFolder ? '이전 저장 폴더 확인 중…' : '저장 폴더 미선택');
     const list = panel.querySelector('[data-jobs]');
     list.replaceChildren();
-    for (const job of jobs) {
-      const row = node('div', null, {class:'pq-job'});
-      row.append(node('strong', job.title), node('span', `${LABELS[job.state]}${job.expected ? ` · ${job.saved?.length || 0}/${job.expected}` : ''}`));
+    const visible=jobs.filter(job=>queueHistory(job)===(queueView==='history'));
+    for(const id of selectedJobs)if(!visible.some(job=>job.id===id))selectedJobs.delete(id);
+    const toolbar=node('div',null,{class:'pq-queue-toolbar'});
+    for(const [view,title] of [['active','진행 대기열'],['history','완료·보관 기록']]) {
+      const tab=button(`${title} (${jobs.filter(job=>queueHistory(job)===(view==='history')).length})`,()=>{queueView=view;selectedJobs.clear();queueConfirmation=null;render();});
+      tab.setAttribute('aria-pressed',String(queueView===view));tab.setAttribute('data-queue-view',view);toolbar.append(tab);
+    }
+    const selectable=visible.filter(queueJobRemovable);
+    const selectAll=button('전체 선택',()=>{for(const job of selectable)selectedJobs.add(job.id);queueConfirmation=null;render();});
+    const deselect=button('선택 해제',()=>{selectedJobs.clear();queueConfirmation=null;render();});
+    const requestChange=(ids,action)=>{if(running || starting || settingsBusy)throw new Error('실행을 중지한 뒤 목록을 정리해 주세요.');changeQueueRecords(jobs,ids,action);queueConfirmation={ids,action};render();};
+    const removeSelected=button(`선택 삭제 (${selectedJobs.size})`,()=>requestChange([...selectedJobs],'delete'));
+    const removeAll=button('현재 목록 전체 삭제',()=>requestChange(visible.map(job=>job.id),'delete'));
+    const fresh=button('새 대기열',()=>requestChange(jobs.filter(job=>!queueHistory(job)).map(job=>job.id),'archive'));
+    for(const control of [selectAll,deselect,removeSelected,removeAll,fresh])control.dataset.edit='';
+    removeSelected.setAttribute('data-unavailable',String(!selectedJobs.size));removeAll.setAttribute('data-unavailable',String(!visible.length));
+    fresh.setAttribute('data-unavailable',String(!jobs.some(job=>!queueHistory(job))));
+    toolbar.append(selectAll,deselect,removeSelected,removeAll,fresh,node('small','완료 항목은 기록으로 이동합니다. 새 대기열은 미제출 항목을 보관합니다. 제출된 미완료 작업은 삭제하지 않습니다.'));
+    if(queueConfirmation) {
+      const box=node('div',null,{class:'pq-queue-confirm','role':'alert'});
+      box.append(node('strong',queueConfirmation.action==='archive' ? `미제출 ${queueConfirmation.ids.length}개를 기록으로 옮길까요?` : `${queueConfirmation.ids.length}개 목록을 영구 삭제할까요? 저장된 이미지 파일은 유지됩니다.`));
+      const yes=button('확인하고 적용',confirmQueueChange);yes.dataset.edit='';
+      box.append(yes,button('취소',()=>{queueConfirmation=null;render();}));toolbar.append(box);
+    }
+    list.append(toolbar);
+    if(!visible.length)list.append(node('small',queueView==='history' ? '완료·보관 기록이 없습니다.' : '대기열이 비었습니다. 새 조합을 등록해 주세요.'));
+    for (const job of visible) {
+      const row = node('div', null, {class:'pq-job','data-queue-job':job.id});
+      const selection=node('label',null,{class:'pq-check-label'}),check=node('input',null,{type:'checkbox','aria-label':`작업 선택: ${job.title}`,'data-select-job':job.id});
+      check.checked=selectedJobs.has(job.id);check.disabled=running || starting || settingsBusy || !queueJobRemovable(job);
+      check.addEventListener('change',()=>{if(check.disabled)return;if(check.checked)selectedJobs.add(job.id);else selectedJobs.delete(job.id);queueConfirmation=null;render();});
+      selection.append(check,node('strong',job.title));row.append(selection);
+      if(!queueJobRemovable(job))row.append(node('small','복구 필요 · 삭제 보호'));
+      row.append(node('span', `${LABELS[job.state]}${job.expected ? ` · ${job.saved?.length || 0}/${job.expected}` : ''}`));
       const imageOptions=job.apiPayload || job.apiOptions;
       if (imageOptions?.aspectRatio) {
         row.append(node('small',`적용 비율 ${imageOptions.aspectRatio} (가로:세로) · 크기 ${imageOptions.size || '1k'}`));
@@ -2577,7 +2664,7 @@ function mountPresetEditor(parent, io) {
       ? (choosingFolder ? '확인 파일 다운로드 중…' : '자동 다운로드 준비 확인')
       : (choosingFolder ? (rememberedFolder && !folder ? '권한 확인 중…' : '폴더 선택 중…') : rememberedFolder && !folder ? '저장 폴더 권한 허용' : '저장 폴더 선택');
     const chooseOther=panel.querySelector('[data-choose-other-folder]');
-    const queueCounts=panel.querySelector('[data-queue-counts]');if (queueCounts) queueCounts.textContent=`등록 ${jobs.length} · 저장 완료 ${jobs.filter(job=>job.state==='done').length} · 확인 필요 ${jobs.filter(job=>job.error || job.state==='unknown').length}`;
+    const queueCounts=panel.querySelector('[data-queue-counts]');if (queueCounts) queueCounts.textContent=`진행 ${jobs.filter(job=>!queueHistory(job)).length} · 기록 ${jobs.filter(queueHistory).length} · 저장 완료 ${jobs.filter(job=>job.state==='done').length} · 확인 필요 ${jobs.filter(job=>job.error || job.state==='unknown').length}`;
     if (chooseOther) { chooseOther.hidden=storage.mode !== 'folder' || !rememberedFolder || !!folder;chooseOther.disabled=choose.disabled; }
     panel.querySelector('[data-start]').textContent = running ? '실행 중' : starting ? '시작 준비 중…' : '시작 / 같은 작업 재개';
     decorateIcon(panel.querySelector('[data-start]'),'play_arrow');
@@ -2589,7 +2676,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.6', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.7', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2641,10 +2728,20 @@ function mountPresetEditor(parent, io) {
     inFlightLabel.append(maxInFlight);
     budget.hidden=true;budgetLabel.hidden=true; // Retain old backup values, without promising API budget enforcement.
     const apiContent=node('div',null,{class:'pq-api-settings'});
-    const keyInput=node('input',null,{type:'password',autocomplete:'off',placeholder:'공식 API 키 · 이 탭에서만 보관','aria-label':'공식 API 키','data-edit':''});
+    const keyInput=node('input',null,{type:'password',autocomplete:'off',placeholder:'공식 API 키 · 기본값은 저장 안 함','aria-label':'공식 API 키','data-edit':''});
     const keyState=node('small',null,{'data-api-key-state':'',role:'status'});
-    const connectKey=button('이 탭에 키 연결',()=>{try {apiKey.set(keyInput.value);message='키 입력 완료. 연결 확인은 기존 작업 조회로 할 수 있습니다. 새 생성은 아직 실행하지 않았습니다.';} finally {keyInput.value='';render();}});connectKey.dataset.edit='';
-    const clearKey=button('키 지우기',()=>{apiKey.clear();keyInput.value='';message='이 탭의 API 키를 지웠습니다.';render();});clearKey.dataset.edit='';
+    const rememberInput=node('input',null,{type:'checkbox','data-remember-api-key':'','aria-label':'이 브라우저에 API 키 기억하기 (선택)'});rememberInput.checked=rememberedKey.status()==='saved';rememberInput.disabled=!rememberedKey.supported;
+    const rememberLabel=node('label',null,{class:'pq-check-label'});rememberLabel.append(rememberInput,node('span','이 브라우저에 API 키 기억하기 (선택)'));
+    rememberInput.addEventListener('change',event=>{
+      if(event.isTrusted===false){rememberInput.checked=rememberedKey.status()==='saved';return;}
+      try {
+        if(running || starting || settingsBusy)throw new Error('실행이 끝난 뒤 키 저장 설정을 바꿔 주세요.');
+        if(!rememberInput.checked){rememberedKey.forget();message='저장된 키를 삭제했습니다. 현재 탭의 연결은 유지하며 다른 탭의 연결은 각 탭에서 지워 주세요.';}
+        else message='키 연결 버튼을 누르면 스크립트 관리자에 저장합니다. 체크만으로 저장하지 않습니다.';
+      } catch(error) {rememberInput.checked=rememberedKey.status()==='saved';message=error.message;}render();
+    });
+    const connectKey=button('이 탭에 키 연결',()=>{try {rememberedKey.connect(keyInput.value || (apiKey.has()?apiKey.get():''),rememberInput.checked);message=`키 입력 완료. ${rememberedKey.status()==='saved' ? '다음 방문에 저장된 키를 불러옵니다.' : '이 탭에서만 보관합니다.'} 연결 확인은 기존 작업 조회로 할 수 있습니다. 새 생성은 아직 실행하지 않았습니다.`;} finally {keyInput.value='';render();}});connectKey.dataset.edit='';
+    const clearKey=button('키 지우기',()=>{try {rememberedKey.clear();rememberInput.checked=false;message='이 탭과 스크립트 관리자에 저장된 API 키를 지웠습니다. 다른 탭의 연결은 각 탭에서 지워 주세요.';} finally {keyInput.value='';render();}});clearKey.dataset.edit='';
     const verifyId=node('input',null,{'aria-label':'연결 확인용 기존 작업 ID',placeholder:'기존 작업 ID (조회만 함)','data-edit':''});
     const verifyKey=button('기존 작업으로 연결 확인',()=>settingsAction(async()=>{
       const id=verifyId.value.trim() || jobs.find(job=>job.taskId)?.taskId;
@@ -2658,7 +2755,7 @@ function mountPresetEditor(parent, io) {
       if (values) for (const [value,name] of values) control.append(node('option',name,{value}));
       apiFields[key]=control;wrapper.append(control);apiContent.append(wrapper);return control;
     }
-    apiContent.append(keyInput,connectKey,clearKey,keyState,node('small','키는 파일·설정 백업·대기열에 저장하지 않습니다. 새로고침하면 다시 입력합니다.'),verifyId,verifyKey);
+    apiContent.append(keyInput,rememberLabel,connectKey,clearKey,keyState,node('small','기본값은 저장 안 함입니다. 기억하기는 Tampermonkey의 이 스크립트 저장소를 사용합니다. 키는 이 도구의 설정·대기열 백업에서 제외됩니다.'),node('small','암호화 금고는 아닙니다. 공용 PC에서는 저장하지 마세요. 입력칸은 PixAI 페이지 안에 있으며, 확장 관리자 백업·동기화에는 키가 포함될 수 있습니다.'),verifyId,verifyKey);
     apiField('modelVersionId','통짜 대기열 기본 모델 버전 ID (프리셋 지정 시 해당 프리셋 우선)');
     apiField('aspectRatio','API 이미지 비율',API_RATIOS.map(value=>[value,`${value} · ${Number(value.split(':')[0])>Number(value.split(':')[1]) ? '가로' : Number(value.split(':')[0])<Number(value.split(':')[1]) ? '세로' : '정사각'}`]));
     apiField('size','API 이미지 크기',[['1k','1k'],['1.5k','1.5k']]);
@@ -2676,7 +2773,7 @@ function mountPresetEditor(parent, io) {
     apiField('style','츠바키 API 스타일',[['','스타일 보내지 않음'],...API_STYLES.map(value=>[value,value])]);
     apiField('seed','API 시드 (빈칸은 작업별 랜덤)').setAttribute('placeholder','0~4294967295');
     const costAck=node('input',null,{type:'checkbox','data-api-cost-ack':'','data-edit':''});
-    const costAckLabel=node('label',null);costAckLabel.append(costAck,node('span','시작은 크레딧을 사용하는 공식 API 생성 요청이며, 기존 사이트 비용 상한을 이 API 실행에 적용할 수 없음을 확인했습니다.'));
+    const costAckLabel=node('label',null,{class:'pq-check-label'});costAckLabel.append(costAck,node('span','시작은 크레딧을 사용하는 공식 API 생성 요청이며, 기존 사이트 비용 상한을 이 API 실행에 적용할 수 없음을 확인했습니다.'));
     apiContent.append(node('small','모델·LoRA는 프리셋에서 가져옵니다. 나머지 API 옵션은 여기서 정하며 사이트의 해상도·스타일·참조 설정을 자동 복사하지 않습니다. LoRA 수치는 0~1, 최대 5개입니다.'),costAckLabel);
     function readApiFields() {return normalizeApiOptions(Object.fromEntries(Object.entries(apiFields).map(([key,input])=>[key,input.value])));}
     function readOptions() {
@@ -2756,7 +2853,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.6',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.7',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3092,6 +3189,7 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-registration-bar{gap:6px;padding:6px 8px}#local-pixai-queue .pq-registration-bar button{font-size:12px;padding:6px}
 }
 `));
+    style.textContent+='#local-pixai-queue label.pq-check-label{display:flex;align-items:flex-start;justify-content:flex-start;gap:9px;text-align:left;cursor:pointer;max-width:none;margin:10px 0}#local-pixai-queue label.pq-check-label>input[type="checkbox"]{width:17px;height:17px;flex:0 0 17px;margin:3px 0 0;padding:0;align-self:flex-start}#local-pixai-queue .pq-queue-toolbar button[aria-pressed="true"]{border-color:#62bea8;background:#21483f}#local-pixai-queue .pq-queue-confirm{padding:10px;border:1px solid #c9a469;border-radius:8px;margin:8px 0}#local-pixai-queue label.pq-check-label>strong{flex:1;min-width:0;overflow-wrap:anywhere}#local-pixai-queue label.pq-check-label>span{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere}';
     document.body.append(panel);
     try { load(); } catch(error) { message=`대기열 읽기 실패: ${error.message}\n프리셋 읽기·편집은 사용할 수 있습니다. 대기열 원본은 유지했습니다.`; }
     render();
@@ -3145,7 +3243,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.6', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.7', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

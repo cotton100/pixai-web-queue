@@ -57,3 +57,16 @@ test('library placement moves before/after a target and rejects stale IDs withou
   assert.deepEqual(placeLibraryItem(l,'chunkFolders','a','c',true).chunkFolders.map(i=>i.id),['b','c','a']);
   assert.deepEqual(l.chunkFolders.map(i=>i.id),['a','b','c']);assert.throws(()=>placeLibraryItem(l,'chunkFolders','gone','a'));assert.throws(()=>placeLibraryItem(l,'scenes','a','b'));
 });
+
+const {queueHistory,queueJobRemovable,changeQueueRecords}=require('./pixai-web-queue.user.js');
+test('queue management protects every unfinished submission and does not mutate input',()=>{
+  const queued={id:'q',state:'queued',saved:[],prompt:'exact'},done={id:'d',state:'done',taskId:'9',saved:[{mediaId:'7'}]};
+  for(const extra of [{state:'unknown'},{state:'submitting'},{taskId:'9'},{submittedAt:123},{saved:[{}]},{mediaIds:['7']},{metadataFile:'old.json'},{state:'skipped',skippedFrom:'unknown'},{state:'skipped',taskId:'9'}]) {
+    const protectedJob={...queued,...extra};assert.equal(queueJobRemovable(protectedJob),false);
+    for(const action of ['archive','delete'])assert.throws(()=>changeQueueRecords([protectedJob],['q'],action));
+  }
+  assert.equal(queueHistory(done),true);assert.equal(queueJobRemovable(done),true);
+  const source=[queued,done];assert.deepEqual(changeQueueRecords(source,['q'],'delete'),[done]);
+  const archived=changeQueueRecords(source,['q'],'archive');assert.equal(archived[0].state,'skipped');assert.equal(archived[0].prompt,'exact');assert.equal(queued.state,'queued');assert.equal(archived[1],done);
+  assert.throws(()=>changeQueueRecords(source,['missing'],'delete'));assert.throws(()=>changeQueueRecords(source,[],'delete'));assert.throws(()=>changeQueueRecords(source,['d'],'archive'));
+});
