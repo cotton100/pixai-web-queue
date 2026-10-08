@@ -602,9 +602,24 @@ test('runtime workbench puts storage and backup in Settings, jobs in Queue, and 
   assert(queue.contains(panel.querySelector('[data-jobs]')));assert(queue.contains(runtimeField(f,'대기열 프롬프트')));
   const footer=panel.querySelector('[class="pq-footer"]');assert(footer.contains(panel.querySelector('[data-start]')));
   assert.equal(panel.querySelector('[data-start]').closest('[role="tabpanel"]'),null);
-  const openSettings=panel.querySelector('[aria-label="저장 설정 열기"]');openSettings.fire('click',{detail:0});
-  assert.equal(settings.hidden,false);assert.equal(compose.hidden,true);assert.equal(f.document.activeElement.getAttribute('id'),'pq-tab-settings');
+  assert.equal(panel.querySelector('[aria-label="저장 설정 열기"]'),null); // the Settings tab is the only entry
+  panel.querySelector('#pq-tab-settings').fire('click',{detail:0});
+  assert.equal(settings.hidden,false);assert.equal(compose.hidden,true);
+  assert.equal(settings.querySelectorAll('[class="pq-settings-column"]').length,2);
   assert.equal(f.storageMutations.length,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('footer groups both run buttons, the legacy prompt box starts folded, and an empty queue offers a jump to compose',()=>{
+  const f=panelFixture(),panel=f.panel;
+  const footer=panel.querySelector('[class="pq-footer"]'),buttons=footer.querySelectorAll('button').map(item=>item.textContent);
+  assert.deepEqual(buttons,['첫 작업만 실행','시작 / 같은 작업 재개','중지']);
+  const queue=panel.querySelector('[data-page="queue"]'),simple=queue.querySelectorAll('details').find(item=>item.querySelector('summary')?.textContent==='통짜 프롬프트 · 간단 대기열');
+  assert(simple);assert(!simple.open);
+  const go=panel.querySelector('[data-go-compose]');assert(go);assert(queue.contains(go));
+  panel.querySelector('#pq-tab-queue').fire('click',{detail:0});assert.equal(queue.hidden,false);
+  go.fire('click',{detail:0});
+  assert.equal(panel.querySelector('[data-page="compose"]').hidden,false);assert.equal(queue.hidden,true);
+  const notes=panel.querySelectorAll('[class="pq-note"]');assert(notes.length>=3);assert(notes.every(item=>!item.open&&item.querySelector('summary')));
+  assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);assert.equal(f.siteQueries.length,0);
 });
 function runtimeSettingsBackup() {
   const library=runtimeSettingsLibrary('imported common');library.presets[0].loras[0].triggerWords='imported trigger';
