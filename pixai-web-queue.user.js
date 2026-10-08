@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.2
+// @version      0.9.3
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -2083,7 +2083,7 @@ function mountPresetEditor(parent, io) {
   function normalizeApiOptions(value={}) {
     const s=presetObject(value,'공식 API 옵션');
     if (Object.keys(s).some(key=>!['modelVersionId','aspectRatio','size','mode','style','seed'].includes(key))) throw new Error('공식 API 옵션 형식을 확인해 주세요. 키는 백업에 넣을 수 없습니다.');
-    const out={modelVersionId:presetText(s.modelVersionId),aspectRatio:s.aspectRatio ?? '9:16',size:s.size ?? '1k',mode:s.mode ?? 'standard',style:s.style ?? '',seed:s.seed ?? ''};
+    const out={modelVersionId:presetText(s.modelVersionId),aspectRatio:s.aspectRatio ?? '9:16',size:s.size ?? '1k',mode:s.mode ?? '',style:s.style ?? '',seed:s.seed ?? ''};
     if (out.modelVersionId && !/^\d+$/.test(out.modelVersionId)) throw new Error('기본 모델 버전 ID를 숫자로 입력해 주세요.');
     if (!API_RATIOS.includes(out.aspectRatio) || !['1k','1.5k'].includes(out.size)) throw new Error('공식 API 비율·크기를 확인해 주세요.');
     if (!['','lite','standard','pro','ultra'].includes(out.mode)) throw new Error('공식 API 생성 모드를 확인해 주세요.');
@@ -2121,6 +2121,15 @@ function mountPresetEditor(parent, io) {
     let key='';
     return {set(value){const next=String(value ?? '').trim();if (!next || /[^\x21-\x7e]/.test(next)) throw new Error('API 키 형식을 확인해 주세요.');key=next;},
       clear(){key='';},has(){return !!key;},get(){if (!key) throw new Error('설정 탭에서 공식 API 키를 이 탭에 연결해 주세요.');return key;}};
+  }
+  function reconfigureQueuedApiJob(job,options,batchSize,randomSeed) {
+    if (job.state!=='queued' || job.taskId || job.saved?.length || job.mediaIds?.length || job.metadataFile) throw new Error('미제출 대기 작업의 API 옵션만 바꿀 수 있습니다. 제출된 작업은 같은 ID로 재개해 주세요.');
+    if (job.submittedAt && !/^공식 API 오류 \((400|401|403|404|422)\)\./.test(job.error || '')) throw new Error('이전 제출 결과를 확인할 수 없어 요청을 바꾸지 않습니다.');
+    const apiOptions=normalizeApiOptions(options),apiPayload=buildApiPayload(job,apiOptions,batchSize,job.apiPayload?.seed ?? randomSeed);
+    const next={...job,apiOptions,apiBatchSize:batchSize,apiPayload,expected:batchSize,error:''};
+    if (job.apiPayload) next.apiRequestHistory=[...(job.apiRequestHistory || []),{payload:JSON.parse(JSON.stringify(job.apiPayload)),submittedAt:job.submittedAt ?? null,error:job.error || ''}];
+    delete next.submittedAt;
+    return next;
   }
   function gmResponse(request, details, timeoutMs, timers={set:(fn,ms)=>setTimeout(fn,ms),clear:id=>clearTimeout(id)}) {
     return new Promise((resolve,reject)=>{
@@ -2207,7 +2216,7 @@ function mountPresetEditor(parent, io) {
   }
 
   const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
-  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,createSessionApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{API_RATIOS,API_STYLES,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,createSessionApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const KEY = 'local.pixai-web-queue.v1';
@@ -2488,6 +2497,20 @@ function mountPresetEditor(parent, io) {
       detail.append(node('summary','작업 내용 보기'),node('strong','전송 프롬프트'),node('div',job.prompt,{class:'pq-job-prompt'}),node('strong','네거티브'),node('div',job.negativePrompt || '(없음)',{class:'pq-job-prompt'}));
       if (job.configuration?.model && Array.isArray(job.configuration.loras)) detail.append(node('small',`모델 ${job.configuration.model.name || job.configuration.model.id} · 버전 ${job.configuration.model.versionId}`),...job.configuration.loras.filter(lora=>lora && typeof lora==='object').map(lora=>node('small',`LoRA ${lora.name || lora.id} · ${lora.weight}`)));
       detail.addEventListener('toggle',()=>{if (detail.open) expandedJobs.add(job.id);else expandedJobs.delete(job.id);});row.append(detail);
+      if (job.state==='queued' && !job.taskId && !job.saved?.length) {
+        const configure=button('현재 API 옵션 적용',async()=>{
+          if (running || starting || settingsBusy) throw new Error('실행 중에는 대기열 요청을 바꿀 수 없습니다.');
+          await locked(()=>{
+            const index=jobs.findIndex(item=>item.id===job.id);
+            if (index<0) throw new Error('대기 작업을 찾지 못했습니다.');
+            const next=reconfigureQueuedApiJob(jobs[index],apiOptions,Number(panel.querySelector('[data-image-count]').value) || expectedCount(),crypto.getRandomValues(new Uint32Array(1))[0]);
+            const before=jobs[index];jobs[index]=next;
+            try {persist();} catch(error) {jobs[index]=before;throw error;}
+          });
+          message='이 대기 작업에 현재 API 옵션을 적용했습니다. 이전 요청 사본은 보존했고 새 생성은 하지 않았습니다.';render();
+        });
+        configure.setAttribute('aria-label',`현재 API 옵션 적용: ${job.title}`);configure.dataset.edit='';row.append(configure);
+      }
       if (job.state === 'unknown') row.append(button('사이트 확인 후 작업 ID 연결', async () => {
         const id = window.prompt('사이트에서 해당 작업 ID를 확인하고 입력해 주세요. 새 생성은 하지 않습니다.');
         if (!id || !/^\d+$/.test(id)) return;
@@ -2550,7 +2573,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.2', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.3', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2623,7 +2646,7 @@ function mountPresetEditor(parent, io) {
     apiField('modelVersionId','통짜 대기열 기본 모델 버전 ID (프리셋 지정 시 해당 프리셋 우선)');
     apiField('aspectRatio','API 이미지 비율',API_RATIOS.map(value=>[value,value]));
     apiField('size','API 이미지 크기',[['1k','1k'],['1.5k','1.5k']]);
-    apiField('mode','츠바키 API 생성 모드',[['','다른 모델: 모드 보내지 않음'],['lite','Lite'],['standard','Standard'],['pro','Pro'],['ultra','Ultra']]);
+    apiField('mode','츠바키 API 생성 모드',[['','모델 기본값 (모드 보내지 않음)'],['lite','Lite'],['standard','Standard'],['pro','Pro'],['ultra','Ultra']]);
     apiField('style','츠바키 API 스타일',[['','스타일 보내지 않음'],...API_STYLES.map(value=>[value,value])]);
     apiField('seed','API 시드 (빈칸은 작업별 랜덤)').setAttribute('placeholder','0~4294967295');
     const costAck=node('input',null,{type:'checkbox','data-api-cost-ack':'','data-edit':''});
@@ -2705,7 +2728,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.2',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.3',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3094,7 +3117,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.2', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.3', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

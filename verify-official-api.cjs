@@ -32,6 +32,27 @@ test('explicit zero seed is preserved; non-Tsubaki mode can be omitted; unknown 
   const p=core.buildApiPayload(j,{mode:'',seed:0},1,99);assert.equal(p.seed,0);assert.equal('mode' in p,false);assert.equal('triggerWords' in p.loras[0],false);
   delete j.configuration;assert.equal(core.buildApiPayload(j,{modelVersionId:'999'},4,7).modelVersionId,'999');
 });
+
+test('model defaults omit inference mode; explicit mode stays user-controlled',()=>{
+  assert.equal(core.normalizeApiOptions().mode,'');assert.equal('mode' in core.buildApiPayload(job(),{},4,42),false);
+  assert.equal(core.buildApiPayload(job(),{mode:'standard'},4,42).mode,'standard');
+});
+
+test('confirmed rejected queued request can explicitly apply new options while preserving recipe, seed and previous request',()=>{
+  const j=job();j.apiPayload=core.buildApiPayload(j,{mode:'standard'},4,42);j.submittedAt=123;j.error='공식 API 오류 (422). API 입력값을 확인해 주세요.';
+  const before=copy(j),next=core.reconfigureQueuedApiJob(j,{mode:''},4,99);
+  assert.deepEqual(j,before);assert.equal('mode' in next.apiPayload,false);assert.equal(next.apiPayload.seed,42);assert.equal(next.apiPayload.batchSize,4);
+  assert.equal(next.prompt,j.prompt);assert.deepEqual(next.configuration,j.configuration);assert.deepEqual(next.composition,j.composition);
+  assert.deepEqual(next.apiRequestHistory,[{payload:j.apiPayload,submittedAt:123,error:j.error}]);assert.equal(next.submittedAt,undefined);assert.equal(next.error,'');
+  const second=core.reconfigureQueuedApiJob(next,{mode:'pro'},4,999);assert.equal(second.apiRequestHistory.length,2);assert.equal(second.apiPayload.seed,42);
+});
+
+test('paid, uncertain, saved and ambiguous submissions cannot replace API requests',()=>{
+  for(const extra of [{state:'unknown'},{state:'submitting'},{state:'waiting'},{state:'done'},{taskId:'900'},{saved:[{mediaId:'1'}]},{mediaIds:['1']},{metadataFile:'asset.json'},{submittedAt:123,error:'공식 API 네트워크 오류'}]) {
+    const j={...job(),...extra},before=copy(j);assert.throws(()=>core.reconfigureQueuedApiJob(j,{mode:''},4,42));assert.deepEqual(j,before);
+  }
+  const j=job(),before=copy(j);assert.throws(()=>core.reconfigureQueuedApiJob(j,{mode:''},2,42));assert.deepEqual(j,before);
+});
 test('key vault clears without storage; API backup round trip preserves settings and rejects secrets',()=>{
   const vault=core.createSessionApiKey();assert.equal(vault.has(),false);assert.throws(()=>vault.set('bad\nkey'));vault.set('private-key');assert.equal(vault.has(),true);vault.clear();assert.throws(()=>vault.get(),/키/);
   const opts={maxCredits:7800,filePrefix:'asset',repeat:1,imageCount:4,maxInFlight:3,api:core.normalizeApiOptions({seed:0,mode:'pro'})};
