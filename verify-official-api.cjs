@@ -63,6 +63,26 @@ test('confirmed input rejection preserves queued job without automatic retry',as
   await assert.rejects(core.submitJob(j,{persist(){},prepare:async()=>({apiPayload:core.buildApiPayload(j,{},4,42)}),submit:x=>f.api.create(x.apiPayload)}));
   assert.equal(j.state,'queued');assert.equal(f.calls.length,1);assert(!j.error.includes('raw secret'));
 });
+
+test('422 diagnostics identify invalid fields without echoing credentials, prompts or request inputs',async()=>{
+  const responseText=JSON.stringify({detail:[
+    {loc:['body','seed'],type:'less_than_equal',msg:'fixture-secret private prompt',input:'fixture-secret'},
+    {loc:['body','loras',0,'weight'],type:'float_type',input:{prompt:'private prompt',Authorization:'fixture-secret'}},
+    {loc:['body','fixture-secret'],type:'fixture-secret',msg:'private prompt'}]});
+  const f=transport(()=>({status:422,responseText})),j=job();
+  await assert.rejects(core.submitJob(j,{persist(){},prepare:async()=>({apiPayload:core.buildApiPayload(j,{},4,42)}),submit:x=>f.api.create(x.apiPayload)}),error=>{
+    assert.match(error.message,/body.seed · less_than_equal/);assert.match(error.message,/body.loras.0.weight · float_type/);
+    assert(!error.message.includes('fixture-secret'));assert(!error.message.includes('private prompt'));return error.notSubmitted;
+  });
+  assert.equal(j.state,'queued');assert.equal(f.calls.length,1);assert(!j.error.includes('fixture-secret'));
+});
+
+test('validation diagnostics handle JSON-pointer and nested issues, ignore arbitrary free text and non-input failures',()=>{
+  assert.equal(core.apiValidationDetails(JSON.stringify({type:'validation',property:'/loras/weight',message:'secret',found:'secret'})),'loras.weight · validation');
+  assert.equal(core.apiValidationDetails(JSON.stringify({error:{code:'VALIDATION_ERROR',issues:[{path:['modelVersionId'],code:'invalid_type',message:'secret'}]}})),'VALIDATION_ERROR; modelVersionId · invalid_type');
+  for(const raw of ['secret','null','[]','{"message":"secret","input":"secret"}']) assert.equal(core.apiValidationDetails(raw),'');
+  assert(!core.apiHttpError(500,'POST','{"type":"validation","property":"seed"}').message.includes('서버 검증'));
+});
 test('official parameterless task receipt is verified by ID/time; wrong IDs, old timestamps and mismatched explicit prompts fail',()=>{
   const j={...job(),queryBackend:'official-v1',taskId:'900',submittedAt:Date.now()},t={id:'900',createdAt:new Date().toISOString(),outputs:{mediaIds:['1','2','3','4']}};
   core.verifyTask(j,t);assert.deepEqual(core.outputIds(t,4),['1','2','3','4']);assert.throws(()=>core.verifyTask(j,{...t,id:'901'}));
