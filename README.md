@@ -2,6 +2,10 @@
 
 **0.9.9 로컬 후보.** 기존 청크·캐릭터·모델/LoRA·폴더·예약·드래그 UI를 유지하며, 공식 API로 생성·조회한 뒤 원본 이미지만 저장합니다. 이미지마다 JSON 파일을 자동 생성하지 않습니다. 실행 경로에서 사이트 생성 버튼 클릭과 내부 GraphQL 직접 호출을 제거했습니다. PixAI와 제휴하지 않은 개인 도구이며, 공식 API 사용 조건과 서비스 약관이 적용됩니다.
 
+**처음 사용하시나요?** [버튼을 따라가는 사용 설명서](GUIDE.md) · [스크립트 설치·업데이트](https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js)
+
+흐름: **설정에서 API 키·저장 위치 준비 → 라이브러리에 재료 저장 → 조합 예약 → 대기열 등록 → 첫 작업만 실행 → 저장·기록 확인**. 예약과 등록 단계에서는 생성 요청을 보내지 않습니다. API 생성에는 크레딧이 사용됩니다.
+
 ## 처음 사용
 
 [기존 설치/업데이트 주소](https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js). GitHub 반영 여부를 확인하고 업데이트합니다. 스크립트 이름·namespace는 유지했으므로 기존 항목을 업데이트하고 같은 스크립트 두 개를 동시에 켜지 않습니다. 최신 Tampermonkey의 PixAI API/이미지 도메인 접근 권한이 필요합니다.
