@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.12
+// @version      0.9.13
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -450,11 +450,21 @@
       return {id, name:presetText(item.name)};
     }, true);
     const folderIds = new Set(chunkFolders.map(item => item.id));
+    const sceneFolders = entries('sceneFolders', (item, id) => {
+      if (typeof item.name !== 'string' || !presetText(item.name)) throw new Error('씬 모음 이름을 입력해 주세요.');
+      return {id, name:presetText(item.name)};
+    }, true);
+    const sceneFolderIds = new Set(sceneFolders.map(item => item.id));
     const library = {
       version:1,
       common:{prompt:presetText(common.prompt), negativePrompt:presetText(common.negativePrompt)},
       presets:entries('presets', (item, id) => ({id, name:presetText(item.name), ...validatePresetConfiguration(item, options)})),
-      characters:entries('characters', (item, id) => ({id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)})),
+      characters:entries('characters', (item, id) => {
+        const character={id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)};
+        // Optional default model/LoRA preset; resolved (and reported) at batch expansion, never here, so a deleted preset cannot lock the library.
+        if (Object.hasOwn(item,'defaultPresetId') && presetText(item.defaultPresetId)) character.defaultPresetId=presetIdentifier(item.defaultPresetId,'기본 프리셋');
+        return character;
+      }),
       chunkFolders,
       scenes:entries('scenes', (item, id) => {
         const chunk = {id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)};
@@ -476,6 +486,7 @@
           count:presetInteger(item.count, '예약 반복 횟수', 1, 100)};
         if (Object.hasOwn(item,'triggerPosition')) reservation.triggerPosition=normalizeTriggerPosition(item.triggerPosition,sceneIds.length);
         if (Object.hasOwn(item,'imageOptions')) reservation.imageOptions=normalizeReservationImageOptions(item.imageOptions);
+        if (Object.hasOwn(item,'batch')) reservation.batch=normalizeBatchTag(item.batch);
         if (Object.hasOwn(item,'snapshot')) {
           reservation.snapshot = normalizeCombinationSnapshot(item.snapshot);
           const frozen=reservation.snapshot;
@@ -497,13 +508,95 @@
       });
       if (library.combinations.filter(item=>!item.favorite).length>50 || library.combinations.filter(item=>item.favorite).length>1000) throw new Error('최근 조합은 50개, 즐겨찾기는 1,000개까지 저장할 수 있습니다.');
     }
+    // Scene cards, casts and batch plans are optional collections (0.9.13); absent keys stay absent so older libraries round-trip unchanged.
+    if (Object.hasOwn(source,'sceneFolders')) library.sceneFolders=sceneFolders;
+    if (Object.hasOwn(source,'sceneCards')) library.sceneCards=entries('sceneCards',(item,id)=>normalizeSceneCard(item,id,sceneFolderIds));
+    if (Object.hasOwn(source,'casts')) library.casts=entries('casts',(item,id)=>normalizeCast(item,id));
+    if (Object.hasOwn(source,'batchPlans')) library.batchPlans=entries('batchPlans',(item,id)=>normalizeBatchPlan(item,id));
     if (library.reservations.reduce((sum, item) => sum + item.count, 0) > 1000) throw new Error('예약 작업은 한 번에 1,000개까지 만들 수 있습니다.');
     return library;
   }
+  function normalizeExtraText(value, label) {
+    const source=settingsBackupKeys(value,label,[],['prompt','negativePrompt']);
+    settingsBackupStrings(source,['prompt','negativePrompt'],label);
+    return {prompt:presetText(source.prompt ?? ''), negativePrompt:presetText(source.negativePrompt ?? '')};
+  }
+  function normalizeBatchTag(value) {
+    const source=settingsBackupKeys(value,'예약 묶음',['id','name'],['id','name','rowName','columnName']);
+    settingsBackupStrings(source,['name','rowName','columnName'],'예약 묶음 이름');
+    return {id:presetIdentifier(source.id,'예약 묶음'), name:presetText(source.name), rowName:presetText(source.rowName ?? ''), columnName:presetText(source.columnName ?? '')};
+  }
+  // A scene card stores what the scene is (chunk order + copies + optional ratio/trigger/extra text), never who or which model.
+  function normalizeSceneCard(item, id, folderIds=new Set()) {
+    if (!Array.isArray(item.sceneIds)) throw new Error('씬의 청크 목록 형식을 확인해 주세요.');
+    const sceneIds=item.sceneIds.map(value=>presetIdentifier(value,'씬 청크'));
+    if (new Set(sceneIds).size!==sceneIds.length) throw new Error('씬에 같은 청크를 중복 넣을 수 없습니다.');
+    if (!Array.isArray(item.chunks)) throw new Error('씬의 청크 사본 형식을 확인해 주세요.');
+    const chunks=settingsBackupLibrary({version:1,common:{prompt:'',negativePrompt:''},presets:[],characters:[],scenes:item.chunks,reservations:[]}).scenes.map(({folderId,...chunk})=>chunk);
+    if (JSON.stringify(chunks.map(chunk=>chunk.id))!==JSON.stringify(sceneIds)) throw new Error('씬 사본과 청크 순서가 다릅니다.');
+    const card={id, name:presetText(item.name), sceneIds, chunks};
+    if (Object.hasOwn(item,'extra')) card.extra=normalizeExtraText(item.extra,'씬 추가 문구');
+    if (Object.hasOwn(item,'imageOptions')) card.imageOptions=normalizeReservationImageOptions(item.imageOptions);
+    if (Object.hasOwn(item,'triggerPosition')) card.triggerPosition=normalizeTriggerPosition(item.triggerPosition,sceneIds.length);
+    if (Object.hasOwn(item,'folderId')) {
+      const folderId=presetIdentifier(item.folderId,'씬 모음');
+      if (!folderIds.has(folderId)) throw new Error(`씬 ${id}의 모음이 없습니다: ${folderId}`);
+      card.folderId=folderId;
+    }
+    return card;
+  }
+  // A cast is who + which model/LoRA preset (+ optional outfit text). Existence of the character/preset is checked at expansion.
+  function normalizeCast(item, id) {
+    const cast={id, name:presetText(item.name), characterId:presetIdentifier(item.characterId,'출연 캐릭터'), presetId:presetIdentifier(item.presetId,'출연 프리셋')};
+    if (Object.hasOwn(item,'extra')) cast.extra=normalizeExtraText(item.extra,'출연 추가 문구');
+    if (Object.hasOwn(item,'triggerPosition')) cast.triggerPosition=normalizeTriggerPosition(item.triggerPosition,1000);
+    return cast;
+  }
+  function batchRowKey(row) { return `${row.kind}:${row.id}`; }
+  function batchCellKey(rowKey, columnId) { return `${rowKey}|${columnId}`; }
+  function normalizeBatchPlan(item, id='plan') {
+    const source=settingsBackupKeys(item,'일괄 예약 구성',['rows','columns','count'],['id','name','rows','columns','count','exceptions','order','imageOptions']);
+    if (!Array.isArray(source.rows) || !Array.isArray(source.columns)) throw new Error('일괄 예약의 행·열 목록 형식을 확인해 주세요.');
+    const rows=source.rows.map(row=>{
+      const entry=settingsBackupKeys(row,'일괄 예약 행',['kind','id'],['kind','id','presetId']);
+      if (!['character','cast'].includes(entry.kind)) throw new Error('일괄 예약 행 종류는 캐릭터 또는 출연이어야 합니다.');
+      const result={kind:entry.kind, id:presetIdentifier(entry.id,'일괄 예약 행')};
+      if (Object.hasOwn(entry,'presetId') && presetText(entry.presetId)) result.presetId=presetIdentifier(entry.presetId,'행 프리셋');
+      return result;
+    });
+    if (new Set(rows.map(batchRowKey)).size!==rows.length) throw new Error('일괄 예약 행이 중복됐습니다.');
+    const columns=source.columns.map(value=>presetIdentifier(value,'일괄 예약 씬'));
+    if (new Set(columns).size!==columns.length) throw new Error('일괄 예약 씬이 중복됐습니다.');
+    const plan={id:presetIdentifier(id,'일괄 예약 구성'), name:presetText(source.name ?? ''), rows, columns, count:presetInteger(source.count,'일괄 반복 수',1,100), exceptions:{}, order:'byRow'};
+    if (Object.hasOwn(source,'order') && source.order!=null) {
+      if (!['byRow','byColumn'].includes(source.order)) throw new Error('순회 순서는 캐릭터별 또는 씬별이어야 합니다.');
+      plan.order=source.order;
+    }
+    if (Object.hasOwn(source,'exceptions') && source.exceptions!=null) {
+      const exceptions=presetObject(source.exceptions,'조합별 예외');
+      const rowKeys=new Set(rows.map(batchRowKey));
+      for (const [key,value] of Object.entries(exceptions)) {
+        const split=key.indexOf('|');
+        if (split<0) throw new Error(`조합별 예외의 대상을 확인해 주세요: ${key}`);
+        // An exception for a row/column that is no longer selected is stale, not an error: a saved plan survives unchecking.
+        if (!rowKeys.has(key.slice(0,split)) || !columns.includes(key.slice(split+1))) continue;
+        plan.exceptions[key]=presetInteger(value,'조합별 반복 수',0,100);
+      }
+    }
+    if (Object.hasOwn(source,'imageOptions') && source.imageOptions!=null) plan.imageOptions=normalizeReservationImageOptions(source.imageOptions);
+    return plan;
+  }
   function normalizeCombinationSnapshot(value) {
-    const source=settingsBackupKeys(value,'예약 사본',['common','preset','character','chunks']);
+    const source=settingsBackupKeys(value,'예약 사본',['common','preset','character','chunks'],['common','preset','character','chunks','extras']);
     const frozen=settingsBackupLibrary({version:1,common:source.common,presets:[source.preset],characters:[source.character],scenes:source.chunks,reservations:[]});
-    return {common:frozen.common,preset:frozen.presets[0],character:frozen.characters[0],chunks:frozen.scenes};
+    const snapshot={common:frozen.common,preset:frozen.presets[0],character:frozen.characters[0],chunks:frozen.scenes};
+    if (Object.hasOwn(source,'extras')) {
+      const extras=settingsBackupKeys(source.extras,'사본 추가 문구',[],['cast','scene']);
+      snapshot.extras={};
+      if (Object.hasOwn(extras,'cast')) snapshot.extras.cast=normalizeExtraText(extras.cast,'출연 추가 문구');
+      if (Object.hasOwn(extras,'scene')) snapshot.extras.scene=normalizeExtraText(extras.scene,'씬 추가 문구');
+    }
+    return snapshot;
   }
   function resolveCombination(value, combination) {
     const library=normalizePresetLibrary(value),missing=[];
@@ -520,6 +613,100 @@
     if (resolved.missing.length) throw new Error(`조합 재료가 없습니다: ${resolved.missing.join(', ')}`);
     return normalizeCombinationSnapshot({common:library.common,preset:library.presets.find(item=>item.id===resolved.presetId),character:library.characters.find(item=>item.id===resolved.characterId),
       chunks:resolved.sceneIds.map(id=>{const {folderId,...chunk}=library.scenes.find(item=>item.id===id);return chunk;})});
+  }
+  // ---- Scene cards / casts / batch plans (0.9.13 core; UI follows the 2026-10-10 design) ----
+  function makeSceneCard(value, input, options={}) {
+    const library=normalizePresetLibrary(value), source=presetObject(input,'씬');
+    if (!Array.isArray(source.sceneIds) || !source.sceneIds.length) throw new Error('씬에 넣을 청크를 하나 이상 골라 주세요.');
+    const chunks=source.sceneIds.map(id=>{
+      const found=library.scenes.find(item=>item.id===id);
+      if (!found) throw new Error(`씬에 넣을 청크가 없습니다: ${id}`);
+      const {folderId,...chunk}=found;return chunk;
+    });
+    const card={id:source.id ?? (options.idFactory ?? (()=>globalThis.crypto.randomUUID()))(), name:presetText(source.name ?? '') || chunks.map(item=>item.name || '청크').join(' · '), sceneIds:[...source.sceneIds], chunks};
+    for (const key of ['extra','imageOptions','triggerPosition','folderId']) if (Object.hasOwn(source,key) && source[key]!=null) card[key]=source[key];
+    return normalizeSceneCard(card,card.id,new Set((library.sceneFolders || []).map(item=>item.id)));
+  }
+  // Compare a card's stored chunk copies with the live library: the card itself is never changed silently.
+  function refreshSceneCard(value, cardId) {
+    const library=normalizePresetLibrary(value), card=(library.sceneCards || []).find(item=>item.id===cardId);
+    if (!card) throw new Error('갱신할 씬이 없습니다.');
+    const changes=[], missing=[];
+    const chunks=card.chunks.map(copy=>{
+      const live=library.scenes.find(item=>item.id===copy.id);
+      if (!live) {missing.push(copy.id);return copy;}
+      for (const field of ['name','prompt','negativePrompt']) if (live[field]!==copy[field]) changes.push({id:copy.id,field,before:copy[field],after:live[field]});
+      const {folderId,...chunk}=live;return chunk;
+    });
+    return {card:{...card,chunks}, changes, missing};
+  }
+  function defaultBatchName(rowCount, columnCount, now) {
+    const at=new Date(now ?? Date.now()), pad=value=>String(value).padStart(2,'0');
+    return `캐릭터 ${rowCount} × 씬 ${columnCount} · ${pad(at.getMonth()+1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  }
+  function resolveBatchRow(value, row) {
+    const library=normalizePresetLibrary(value), key=batchRowKey(row), problems=[];
+    let characterId='', presetId='', name=row.id, extra, triggerPosition;
+    if (row.kind==='cast') {
+      const cast=(library.casts || []).find(item=>item.id===row.id);
+      if (!cast) return {key,kind:'cast',id:row.id,name,characterId,presetId,problems:[`출연 ${row.id}이(가) 없습니다.`]};
+      ({characterId,presetId,extra,triggerPosition}=cast);name=cast.name || cast.id;
+    } else {
+      const character=library.characters.find(item=>item.id===row.id);
+      if (!character) return {key,kind:'character',id:row.id,name,characterId,presetId,problems:[`캐릭터 ${row.id}이(가) 없습니다.`]};
+      characterId=character.id;name=character.name || character.id;presetId=row.presetId || character.defaultPresetId || '';
+      if (!presetId) problems.push(`캐릭터 「${name}」의 모델·LoRA 프리셋이 지정되지 않았습니다.`);
+    }
+    if (presetId && !library.presets.some(item=>item.id===presetId)) problems.push(`「${name}」의 프리셋 ${presetId}이(가) 없습니다.`);
+    if (characterId && !library.characters.some(item=>item.id===characterId)) problems.push(`출연 「${name}」의 캐릭터 ${characterId}이(가) 없습니다.`);
+    return {key,kind:row.kind,id:row.id,name,characterId,presetId,...(extra ? {extra} : {}),...(triggerPosition!==undefined ? {triggerPosition} : {}),problems};
+  }
+  // Rows (characters/casts) × columns (scene cards) → ordinary reservations. Errors return no reservations at all; warnings still allow adding.
+  function expandBatchPlan(value, planInput, options={}) {
+    const library=normalizePresetLibrary(value), plan=normalizeBatchPlan(planInput, planInput?.id ?? 'plan');
+    const idFactory=options.idFactory ?? (()=>globalThis.crypto.randomUUID());
+    const batchSize=options.batchSize==null || options.batchSize===0 ? 4 : presetInteger(options.batchSize,'배치 장수',1,4);
+    const problems=[];
+    const rows=plan.rows.map(row=>resolveBatchRow(library,row));
+    for (const row of rows) for (const message of row.problems) problems.push({level:'error',rowKey:row.key,rowName:row.name,message});
+    const columns=plan.columns.map(id=>{
+      const card=(library.sceneCards || []).find(item=>item.id===id);
+      if (!card) {problems.push({level:'error',columnId:id,columnName:id,message:`씬 ${id}이(가) 없습니다.`});return null;}
+      const missing=card.sceneIds.filter(sceneId=>!library.scenes.some(item=>item.id===sceneId));
+      if (missing.length) problems.push({level:'warning',columnId:id,columnName:card.name,message:`씬 「${card.name}」의 청크 ${missing.join(', ')} 연결이 끊겨 저장된 사본을 사용합니다.`});
+      return card;
+    });
+    const sequence=plan.order==='byColumn' ? columns.flatMap(column=>rows.map(row=>[row,column])) : rows.flatMap(row=>columns.map(column=>[row,column]));
+    const pairs=[];
+    for (const [row,column] of sequence) {
+      if (!column) continue;
+      const key=batchCellKey(row.key,column.id), count=Object.hasOwn(plan.exceptions,key) ? plan.exceptions[key] : plan.count;
+      if (count>0) pairs.push({row,column,count,key});
+    }
+    const batch={id:options.batchId ?? idFactory(), name:plan.name || defaultBatchName(rows.length,columns.filter(Boolean).length,options.now)};
+    const reservations=[];
+    if (!problems.some(item=>item.level==='error')) for (const {row,column,count} of pairs) {
+      const preset=library.presets.find(item=>item.id===row.presetId), character=library.characters.find(item=>item.id===row.characterId);
+      const extras={};if (row.extra) extras.cast=row.extra;if (column.extra) extras.scene=column.extra;
+      const triggerPosition=column.triggerPosition ?? row.triggerPosition, imageOptions=column.imageOptions ?? plan.imageOptions;
+      reservations.push({id:idFactory(), presetId:row.presetId, characterId:row.characterId, sceneIds:[...column.sceneIds], count,
+        ...(triggerPosition!==undefined ? {triggerPosition:triggerPosition==='end' ? 'end' : Math.min(triggerPosition,column.sceneIds.length+2)} : {}),
+        ...(imageOptions ? {imageOptions:{...imageOptions}} : {}),
+        snapshot:normalizeCombinationSnapshot({common:library.common,preset,character,chunks:column.chunks,...(Object.keys(extras).length ? {extras} : {})}),
+        batch:{id:batch.id,name:batch.name,rowName:row.name,columnName:column.name}});
+    }
+    const jobs=pairs.reduce((sum,item)=>sum+item.count,0);
+    return {batch, plan, reservations, problems, totals:{pairs:pairs.length, jobs, images:jobs*batchSize, batchSize},
+      order:pairs.map(item=>({rowKey:item.row.key,rowName:item.row.name,columnId:item.column.id,columnName:item.column.name,count:item.count}))};
+  }
+  // All-or-nothing: returns a new library with the batch appended, or throws without touching the input.
+  function appendBatchReservations(value, expansion) {
+    if (!expansion || !Array.isArray(expansion.reservations)) throw new Error('일괄 예약 결과 형식을 확인해 주세요.');
+    const errors=(expansion.problems || []).filter(item=>item.level==='error');
+    if (errors.length) throw new Error(`해결할 조합이 있습니다: ${errors.map(item=>item.message).join(' / ')}`);
+    if (!expansion.reservations.length) throw new Error('예약할 조합이 없습니다. 반복 수와 제외 항목을 확인해 주세요.');
+    const library=normalizePresetLibrary(value);
+    return normalizePresetLibrary({...library,reservations:[...library.reservations,...expansion.reservations]});
   }
   function rememberCombination(value, combination, options={}) {
     const library=normalizePresetLibrary(value),entries=library.combinations || [];
@@ -539,7 +726,7 @@
       ...library.chunkFolders.flatMap(folder => library.scenes.filter(item => item.folderId === folder.id))];
   }
   function moveLibraryItem(value, key, id, direction) {
-    if (!['presets','characters','scenes','chunkFolders','reservations'].includes(key)) throw new Error('순서를 변경할 목록을 확인해 주세요.');
+    if (!['presets','characters','scenes','chunkFolders','reservations','sceneFolders','sceneCards','casts','batchPlans'].includes(key)) throw new Error('순서를 변경할 목록을 확인해 주세요.');
     if (direction !== -1 && direction !== 1) throw new Error('이동 방향은 위 또는 아래여야 합니다.');
     const library = normalizePresetLibrary(value);
     const items = library[key], itemId = presetIdentifier(id, '이동할 항목');
@@ -553,7 +740,7 @@
   }
 
   function placeLibraryItem(value,key,id,targetId,after=false) {
-    if (!['presets','characters','chunkFolders','reservations'].includes(key)) throw new Error('순서를 바꿀 목록을 확인해 주세요.');
+    if (!['presets','characters','chunkFolders','reservations','sceneFolders','sceneCards','casts','batchPlans'].includes(key)) throw new Error('순서를 바꿀 목록을 확인해 주세요.');
     const next=normalizePresetLibrary(value),items=next[key];
     if (!items.some(item=>item.id===id) || !items.some(item=>item.id===targetId)) throw new Error('이동할 항목을 확인해 주세요.');
     if (id===targetId) return next;
@@ -733,7 +920,7 @@
   }
   function settingsBackupLibrary(value) {
     const source = settingsBackupKeys(value, '프리셋 라이브러리', ['version','common','presets','characters','scenes','reservations'],
-      ['version','common','presets','characters','chunkFolders','scenes','reservations','combinations']);
+      ['version','common','presets','characters','chunkFolders','scenes','reservations','combinations','sceneFolders','sceneCards','casts','batchPlans']);
     settingsBackupKeys(source.common, '공통 프롬프트', ['prompt','negativePrompt']);
     settingsBackupStrings(source.common, ['prompt','negativePrompt'], '공통 프롬프트');
     const library = normalizePresetLibrary(source);
@@ -753,10 +940,14 @@
     }
     for (const key of ['characters','scenes']) for (const item of source[key]) {
       const fields = ['id','name','prompt','negativePrompt'];
-      settingsBackupKeys(item, '캐릭터·청크 프롬프트', fields, key === 'scenes' ? [...fields,'folderId'] : fields);
+      settingsBackupKeys(item, '캐릭터·청크 프롬프트', fields, key === 'scenes' ? [...fields,'folderId'] : [...fields,'defaultPresetId']);
       settingsBackupStrings(item, ['name','prompt','negativePrompt'], '캐릭터·청크 프롬프트');
     }
-    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition','imageOptions']);
+    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition','imageOptions','batch']);
+    for (const folder of source.sceneFolders || []) {settingsBackupKeys(folder, '씬 모음', ['id','name']);settingsBackupStrings(folder, ['name'], '씬 모음 이름');}
+    for (const item of source.sceneCards || []) {settingsBackupKeys(item, '씬', ['id','name','sceneIds','chunks'], ['id','name','sceneIds','chunks','extra','imageOptions','triggerPosition','folderId']);settingsBackupStrings(item, ['name'], '씬 이름');}
+    for (const item of source.casts || []) {settingsBackupKeys(item, '출연', ['id','name','characterId','presetId'], ['id','name','characterId','presetId','extra','triggerPosition']);settingsBackupStrings(item, ['name'], '출연 이름');}
+    for (const item of source.batchPlans || []) settingsBackupKeys(item, '일괄 예약 구성', ['id','rows','columns','count'], ['id','name','rows','columns','count','exceptions','order','imageOptions']);
     for (const item of source.combinations || []) settingsBackupKeys(item,'조합 기록',['id','presetId','characterId','sceneIds','count','favorite','name','at'],['id','presetId','characterId','sceneIds','count','favorite','name','at','triggerPosition','imageOptions']);
     return library;
   }
@@ -810,7 +1001,8 @@
     if (!Number.isInteger(value) || value<0 || value>chunkCount+2) throw new Error('LoRA 트리거 위치를 확인해 주세요.');
     return value;
   }
-  function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}, triggerPosition=1) {
+  function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}, triggerPosition=1, extras={}) {
+    const castExtra=extras?.cast ? normalizeExtraText(extras.cast,'출연 추가 문구') : null, sceneExtra=extras?.scene ? normalizeExtraText(extras.scene,'씬 추가 문구') : null;
     const commonPart = presetObject(common, '공통');
     const characterPart = presetObject(character, '캐릭터');
     const chunks = (Array.isArray(chunksOrLegacyScene) ? chunksOrLegacyScene : [chunksOrLegacyScene])
@@ -823,10 +1015,12 @@
       if (typeof item.triggerWords !== 'string') throw new Error('LoRA 트리거는 문자열이어야 합니다.');
       return presetText(item.triggerWords);
     });
-    const promptParts = [commonPart.prompt, characterPart.prompt, ...chunks.map(item => item.prompt)];
+    const join=(...parts)=>parts.map(presetText).filter(Boolean).join(', ');
+    const promptParts = [commonPart.prompt, join(characterPart.prompt, castExtra?.prompt), ...chunks.map(item => item.prompt)];
     const position=normalizeTriggerPosition(triggerPosition,chunks.length);
-    promptParts.splice(position==='end' ? promptParts.length : position,0,...triggers);
-    const negativeParts = [commonPart.negativePrompt, characterPart.negativePrompt, ...chunks.map(item => item.negativePrompt)];
+    if (position==='end') promptParts.push(sceneExtra?.prompt ?? '', ...triggers);
+    else {promptParts.splice(position,0,...triggers);promptParts.push(sceneExtra?.prompt ?? '');}
+    const negativeParts = [commonPart.negativePrompt, join(characterPart.negativePrompt, castExtra?.negativePrompt), ...chunks.map(item => item.negativePrompt), sceneExtra?.negativePrompt ?? ''];
     return {
       prompt:promptParts.map(presetText).filter(Boolean).join(', '),
       negativePrompt:negativeParts.map(presetText).filter(Boolean).join(', ')
@@ -852,7 +1046,7 @@
         if (!chunk) throw new Error(`예약 ${reservation.id}의 프롬프트 청크가 없습니다: ${sceneId}`);
         return chunk;
       });
-      const prompts = composePresetPrompts(common, character, chunks, preset, reservation.triggerPosition);
+      const prompts = composePresetPrompts(common, character, chunks, preset, reservation.triggerPosition, frozen?.extras);
       if (!prompts.prompt) throw new Error(`예약 ${reservation.id}의 조합 프롬프트가 비어 있습니다.`);
       for (let repeat = 1; repeat <= reservation.count; repeat++) {
         const id = presetIdentifier(idFactory(), '작업');
@@ -2356,7 +2550,7 @@ function mountPresetEditor(parent, io) {
     return action==='delete' ? jobs.filter(job=>!selected.has(job.id)) : jobs.map(job=>selected.has(job.id) ? {...job,state:'skipped',skippedFrom:job.state} : job);
   }
 
-  const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,makeSceneCard,refreshSceneCard,resolveBatchRow,expandBatchPlan,appendBatchReservations,normalizeBatchPlan,normalizeSceneCard,normalizeCast,batchRowKey,batchCellKey,defaultBatchName,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   Object.assign(core,{queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeComposeDraft,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
@@ -2771,7 +2965,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.12', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.13', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2963,7 +3157,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.12',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.13',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3365,7 +3559,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.12', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.13', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
