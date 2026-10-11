@@ -7,7 +7,8 @@ const combo=(i=0)=>({presetId:'p',characterId:'c',sceneIds:[`s${i}`],count:1});
 test('reservation image settings require supported dimensions and reject missing, unknown and secret fields',()=>{
   const valid={aspectRatio:'5:3',size:'1.5k'};
   assert.deepEqual(core.normalizeReservationImageOptions(valid),valid);
-  for(const value of [null,[],{}, {aspectRatio:'5:3'}, {aspectRatio:'7:2',size:'1k'}, {aspectRatio:'5:3',size:'4k'}, {aspectRatio:null,size:'1k'}, {...valid,apiKey:'fixture-key'}, {...valid,mode:'pro'}]) assert.throws(()=>core.normalizeReservationImageOptions(value));
+  assert.deepEqual(core.normalizeReservationImageOptions({...valid,mode:'pro',batchSize:4}),{...valid,mode:'pro',batchSize:4});
+  for(const value of [null,[],{}, {aspectRatio:'5:3'}, {aspectRatio:'7:2',size:'1k'}, {aspectRatio:'5:3',size:'4k'}, {aspectRatio:null,size:'1k'}, {...valid,apiKey:'fixture-key'}, {...valid,mode:'invalid'}, {...valid,batchSize:2}, {...valid,batchSize:'4'}]) assert.throws(()=>core.normalizeReservationImageOptions(value));
 });
 
 test('image settings distinguish recent recipes and favorites while preserving deduplication identity',()=>{
@@ -39,14 +40,14 @@ test('production queue registration merges each reservation image choice with gl
   const begin=source.indexOf('      enqueue:value=>queueEdit(()=>{'),end=source.indexOf('\n      })',begin);
   assert(begin>=0&&end>begin);const events=[];
   const context={...core,apiOptions:core.normalizeApiOptions({aspectRatio:'1:1',size:'1k',mode:'pro',style:'chibi',seed:7}),imageCount:{value:'4'},expectedCount:()=>1,budget:{value:''},title:{value:'test'},jobs:[],running:false,stopRequested:false,oneJobRun:false,
-    currentApiOptions:()=>context.apiOptions,queueEdit:async fn=>fn(),persist:()=>events.push('persist'),saveLibrary:value=>{context.savedLibrary=value;},presetEditor:{refresh(){}},render(){},message:''};
+    currentApiOptions:()=>context.apiOptions,currentApiBatchSize:()=>Number(context.imageCount.value),queueEdit:async fn=>fn(),persist:()=>events.push('persist'),saveLibrary:value=>{context.savedLibrary=value;},presetEditor:{refresh(){}},render(){},message:''};
   vm.runInNewContext(`const callback={${source.slice(begin,end+9).trim()}};this.enqueue=callback.enqueue;`,context);
   const library=seed(),recipe={presetId:'p',characterId:'c',sceneIds:['s'],count:1};
-  library.reservations=[{id:'wide',...recipe,imageOptions:{aspectRatio:'5:3',size:'1.5k'}},{id:'tall',...recipe,imageOptions:{aspectRatio:'3:5',size:'1k'}},{id:'legacy',...recipe}];
+  library.reservations=[{id:'wide',...recipe,imageOptions:{aspectRatio:'5:3',size:'1.5k',mode:'ultra',batchSize:4}},{id:'tall',...recipe,imageOptions:{aspectRatio:'3:5',size:'1k',mode:'',batchSize:1}},{id:'legacy',...recipe}];
   await context.enqueue(library);assert.equal(context.jobs.length,3);assert.equal(events.length,1);assert.equal(context.savedLibrary.reservations.length,0);
   const payloads=context.jobs.map(job=>core.buildApiPayload(job,job.apiOptions,job.apiBatchSize,999));
   assert.deepEqual(payloads.map(payload=>[payload.aspectRatio,payload.size]),[['5:3','1.5k'],['3:5','1k'],['1:1','1k']]);
-  assert(payloads.every(payload=>payload.mode==='pro'&&payload.style.key==='chibi'&&payload.seed===7&&payload.batchSize===4));
+  assert(payloads.every(payload=>payload.style.key==='chibi'&&payload.seed===7));assert.deepEqual(payloads.map(payload=>[payload.mode,payload.batchSize]),[['ultra',4],[undefined,1],['pro',4]]);
   context.apiOptions=core.normalizeApiOptions({aspectRatio:'9:16',size:'1k'});assert.equal(context.jobs[0].apiOptions.aspectRatio,'5:3');
 });
 test('recent limit preserves every favorite and deduplication keeps its identity, name and new count',()=>{

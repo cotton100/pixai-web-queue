@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.9.12
+// @version      0.9.14
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
 // @downloadURL  https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -362,7 +362,7 @@
   }
 
   function makePresetLibrary() {
-    return {version:1, common:{prompt:'', negativePrompt:''}, presets:[], characters:[], chunkFolders:[], scenes:[], reservations:[]};
+    return {version:1, common:{prompt:'', negativePrompt:''}, presets:[], characters:[], characterFolders:[], chunkFolders:[], scenes:[], reservations:[]};
   }
   function presetText(value) {
     if (value != null && typeof value !== 'string') throw new Error('프롬프트와 이름은 문자열이어야 합니다.');
@@ -418,9 +418,12 @@
     return {model:normalizedModel, loras};
   }
   function normalizeReservationImageOptions(value) {
-    const source=settingsBackupKeys(value,'예약 이미지 설정',['aspectRatio','size']);
+    const source=settingsBackupKeys(value,'예약 이미지 설정',['aspectRatio','size'],['aspectRatio','size','mode','batchSize']);
     if (!API_RATIOS.includes(source.aspectRatio) || !['1k','1.5k'].includes(source.size)) throw new Error('예약 이미지 비율·크기를 확인해 주세요.');
-    return {aspectRatio:source.aspectRatio,size:source.size};
+    const result={aspectRatio:source.aspectRatio,size:source.size};
+    if (Object.hasOwn(source,'mode')) {if (!['','lite','standard','pro','ultra'].includes(source.mode)) throw new Error('예약 생성 모드를 확인해 주세요.');result.mode=source.mode;}
+    if (Object.hasOwn(source,'batchSize')) {if (![1,4].includes(source.batchSize)) throw new Error('예약 생성당 이미지 수는 1장 또는 4장입니다.');result.batchSize=source.batchSize;}
+    return result;
   }
   function normalizeComposeDraft(value) {
     const source=settingsBackupKeys(value,'조합 편집 상태',['presetId','characterId','sceneIds','triggerPosition','count','imageOptions']);
@@ -450,11 +453,20 @@
       return {id, name:presetText(item.name)};
     }, true);
     const folderIds = new Set(chunkFolders.map(item => item.id));
+    const characterFolders=entries('characterFolders',(item,id)=>{
+      if (typeof item.name!=='string' || !presetText(item.name)) throw new Error('캐릭터 폴더 이름을 입력해 주세요.');
+      return {id,name:presetText(item.name)};
+    },true),characterFolderIds=new Set(characterFolders.map(item=>item.id));
     const library = {
       version:1,
       common:{prompt:presetText(common.prompt), negativePrompt:presetText(common.negativePrompt)},
       presets:entries('presets', (item, id) => ({id, name:presetText(item.name), ...validatePresetConfiguration(item, options)})),
-      characters:entries('characters', (item, id) => ({id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)})),
+      characters:entries('characters', (item, id) => {
+        const character={id,name:presetText(item.name),prompt:presetText(item.prompt),negativePrompt:presetText(item.negativePrompt)};
+        if (Object.hasOwn(item,'folderId')) {const folderId=presetIdentifier(item.folderId,'캐릭터 폴더');if (!characterFolderIds.has(folderId)) throw new Error(`캐릭터 ${id}의 폴더가 없습니다: ${folderId}`);character.folderId=folderId;}
+        return character;
+      }),
+      characterFolders,
       chunkFolders,
       scenes:entries('scenes', (item, id) => {
         const chunk = {id, name:presetText(item.name), prompt:presetText(item.prompt), negativePrompt:presetText(item.negativePrompt)};
@@ -518,7 +530,8 @@
   function snapshotCombination(value, combination) {
     const library=normalizePresetLibrary(value),resolved=resolveCombination(library,combination);
     if (resolved.missing.length) throw new Error(`조합 재료가 없습니다: ${resolved.missing.join(', ')}`);
-    return normalizeCombinationSnapshot({common:library.common,preset:library.presets.find(item=>item.id===resolved.presetId),character:library.characters.find(item=>item.id===resolved.characterId),
+    const {folderId,...character}=library.characters.find(item=>item.id===resolved.characterId);
+    return normalizeCombinationSnapshot({common:library.common,preset:library.presets.find(item=>item.id===resolved.presetId),character,
       chunks:resolved.sceneIds.map(id=>{const {folderId,...chunk}=library.scenes.find(item=>item.id===id);return chunk;})});
   }
   function rememberCombination(value, combination, options={}) {
@@ -533,27 +546,32 @@
     library.combinations=[entry,...entries.filter(item=>item.id!==entry.id)].filter(item=>item.favorite || ++recent<=50);
     return normalizePresetLibrary(library);
   }
-  function orderedChunks(value) {
+  function promptFolderSpec(key) {
+    if (!['scenes','characters'].includes(key)) throw new Error('프롬프트 목록을 확인해 주세요.');
+    return key==='characters' ? {folderKey:'characterFolders',label:'캐릭터'} : {folderKey:'chunkFolders',label:'청크'};
+  }
+  function orderedChunks(value,key='scenes') {
     const library = normalizePresetLibrary(value);
-    return [...library.scenes.filter(item => !item.folderId),
-      ...library.chunkFolders.flatMap(folder => library.scenes.filter(item => item.folderId === folder.id))];
+    const {folderKey}=promptFolderSpec(key);
+    return [...library[key].filter(item => !item.folderId),
+      ...library[folderKey].flatMap(folder => library[key].filter(item => item.folderId === folder.id))];
   }
   function moveLibraryItem(value, key, id, direction) {
-    if (!['presets','characters','scenes','chunkFolders','reservations'].includes(key)) throw new Error('순서를 변경할 목록을 확인해 주세요.');
+    if (!['presets','characters','scenes','chunkFolders','characterFolders','reservations'].includes(key)) throw new Error('순서를 변경할 목록을 확인해 주세요.');
     if (direction !== -1 && direction !== 1) throw new Error('이동 방향은 위 또는 아래여야 합니다.');
     const library = normalizePresetLibrary(value);
     const items = library[key], itemId = presetIdentifier(id, '이동할 항목');
     const index = items.findIndex(item => item.id === itemId);
     if (index < 0) throw new Error('순서를 변경할 항목이 없습니다.');
     const indexes = items.map((_item, itemIndex) => itemIndex)
-      .filter(itemIndex => key !== 'scenes' || items[itemIndex].folderId === items[index].folderId);
+      .filter(itemIndex => !['scenes','characters'].includes(key) || items[itemIndex].folderId === items[index].folderId);
     const target = indexes[indexes.indexOf(index) + direction];
     if (target !== undefined) [items[index], items[target]] = [items[target], items[index]];
     return library;
   }
 
   function placeLibraryItem(value,key,id,targetId,after=false) {
-    if (!['presets','characters','chunkFolders','reservations'].includes(key)) throw new Error('순서를 바꿀 목록을 확인해 주세요.');
+    if (!['presets','characters','chunkFolders','characterFolders','reservations'].includes(key)) throw new Error('순서를 바꿀 목록을 확인해 주세요.');
     const next=normalizePresetLibrary(value),items=next[key];
     if (!items.some(item=>item.id===id) || !items.some(item=>item.id===targetId)) throw new Error('이동할 항목을 확인해 주세요.');
     if (id===targetId) return next;
@@ -561,11 +579,11 @@
     items.splice(items.findIndex(item=>item.id===targetId)+(after ? 1 : 0),0,item);
     return next;
   }
-  function removeChunkFolder(value, id) {
-    const library = normalizePresetLibrary(value), folderId = presetIdentifier(id, '청크 폴더');
-    if (!library.chunkFolders.some(item => item.id === folderId)) throw new Error('삭제할 청크 폴더가 없습니다.');
-    library.chunkFolders = library.chunkFolders.filter(item => item.id !== folderId);
-    for (const chunk of library.scenes) if (chunk.folderId === folderId) delete chunk.folderId;
+  function removeChunkFolder(value, id,key='scenes') {
+    const {folderKey,label}=promptFolderSpec(key),library = normalizePresetLibrary(value), folderId = presetIdentifier(id, `${label} 폴더`);
+    if (!library[folderKey].some(item => item.id === folderId)) throw new Error(`삭제할 ${label} 폴더가 없습니다.`);
+    library[folderKey] = library[folderKey].filter(item => item.id !== folderId);
+    for (const chunk of library[key]) if (chunk.folderId === folderId) delete chunk.folderId;
     return library;
   }
   function paneRatios(value, fallback) {
@@ -654,54 +672,55 @@
     });
     io.onResize?.(()=>{if ((preferred || size) && !drag) apply(preferred || size);});
   }
-  function selectedChunks(library, ids) {
-    if (!Array.isArray(ids) || !ids.length) throw new Error('청크를 하나 이상 선택해 주세요.');
-    const selected=new Set(ids.map(id=>presetIdentifier(id,'선택한 청크')));
-    if (selected.size!==ids.length || ids.some(id=>!library.scenes.some(item=>item.id===id))) throw new Error('선택한 청크가 없거나 중복됐습니다.');
-    return orderedChunks(library).filter(item=>selected.has(item.id));
+  function selectedChunks(library, ids,key='scenes') {
+    const {label}=promptFolderSpec(key);
+    if (!Array.isArray(ids) || !ids.length) throw new Error(`${label}를 하나 이상 선택해 주세요.`);
+    const selected=new Set(ids.map(id=>presetIdentifier(id,`선택한 ${label}`)));
+    if (selected.size!==ids.length || ids.some(id=>!library[key].some(item=>item.id===id))) throw new Error(`선택한 ${label}가 없거나 중복됐습니다.`);
+    return orderedChunks(library,key).filter(item=>selected.has(item.id));
   }
-  function moveChunksTo(value, ids, folderId, targetId = null, after = false) {
-    const library=normalizePresetLibrary(value),chunks=selectedChunks(library,ids),selected=new Set(ids);
-    if (typeof folderId!=='string' || (folderId && !library.chunkFolders.some(item=>item.id===folderId))) throw new Error('이동할 청크 폴더가 없습니다.');
-    if (typeof after!=='boolean') throw new Error('청크를 놓을 위치를 확인해 주세요.');
-    const target=targetId===null ? null : library.scenes.find(item=>item.id===presetIdentifier(targetId,'대상 청크'));
-    if (targetId!==null && (!target || (target.folderId || '')!==folderId)) throw new Error('청크를 놓을 대상과 폴더를 확인해 주세요.');
+  function moveChunksTo(value, ids, folderId, targetId = null, after = false,key='scenes') {
+    const {folderKey,label}=promptFolderSpec(key),library=normalizePresetLibrary(value),chunks=selectedChunks(library,ids,key),selected=new Set(ids);
+    if (typeof folderId!=='string' || (folderId && !library[folderKey].some(item=>item.id===folderId))) throw new Error(`이동할 ${label} 폴더가 없습니다.`);
+    if (typeof after!=='boolean') throw new Error(`${label}를 놓을 위치를 확인해 주세요.`);
+    const target=targetId===null ? null : library[key].find(item=>item.id===presetIdentifier(targetId,`대상 ${label}`));
+    if (targetId!==null && (!target || (target.folderId || '')!==folderId)) throw new Error(`${label}를 놓을 대상과 폴더를 확인해 주세요.`);
     if (target && selected.has(target.id)) return library;
-    library.scenes=library.scenes.filter(item=>!selected.has(item.id));
+    library[key]=library[key].filter(item=>!selected.has(item.id));
     for (const chunk of chunks) {if (folderId) chunk.folderId=folderId;else delete chunk.folderId;}
-    let position=library.scenes.length;
-    if (target) position=library.scenes.findIndex(item=>item.id===target.id)+(after ? 1 : 0);
+    let position=library[key].length;
+    if (target) position=library[key].findIndex(item=>item.id===target.id)+(after ? 1 : 0);
     else {
-      const last=library.scenes.map((item,itemIndex)=>(item.folderId || '')===folderId ? itemIndex : -1).filter(itemIndex=>itemIndex>=0).at(-1);
+      const last=library[key].map((item,itemIndex)=>(item.folderId || '')===folderId ? itemIndex : -1).filter(itemIndex=>itemIndex>=0).at(-1);
       if (last!==undefined) position=last+1;
     }
-    library.scenes.splice(position,0,...chunks);return library;
+    library[key].splice(position,0,...chunks);return library;
   }
-  function removeChunks(value,ids) {
-    const library=normalizePresetLibrary(value);selectedChunks(library,ids);
-    const selected=new Set(ids);library.scenes=library.scenes.filter(item=>!selected.has(item.id));return library;
+  function removeChunks(value,ids,key='scenes') {
+    const library=normalizePresetLibrary(value);selectedChunks(library,ids,key);
+    const selected=new Set(ids);library[key]=library[key].filter(item=>!selected.has(item.id));return library;
   }
-  function duplicateChunks(value,ids,idFactory=()=>crypto.randomUUID()) {
-    const library=normalizePresetLibrary(value),chunks=selectedChunks(library,ids),copies=new Map();
-    const names=new Set(library.scenes.map(item=>item.name)),identities=new Set(library.scenes.map(item=>item.id));
+  function duplicateChunks(value,ids,idFactory=()=>crypto.randomUUID(),key='scenes') {
+    const {label}=promptFolderSpec(key),library=normalizePresetLibrary(value),chunks=selectedChunks(library,ids,key),copies=new Map();
+    const names=new Set(library[key].map(item=>item.name)),identities=new Set(library[key].map(item=>item.id));
     for (const chunk of chunks) {
-      const id=presetIdentifier(idFactory(),'복제 청크');
-      if (identities.has(id)) throw new Error('복제 청크 ID가 중복됐습니다.');identities.add(id);
+      const id=presetIdentifier(idFactory(),`복제 ${label}`);
+      if (identities.has(id)) throw new Error(`복제 ${label} ID가 중복됐습니다.`);identities.add(id);
       let name=`${chunk.name} (복사본)`,number=2;
       while (names.has(name)) name=`${chunk.name} (복사본 ${number++})`;
       names.add(name);copies.set(chunk.id,{...chunk,id,name});
     }
-    library.scenes=library.scenes.flatMap(chunk=>copies.has(chunk.id) ? [chunk,copies.get(chunk.id)] : [chunk]);
+    library[key]=library[key].flatMap(chunk=>copies.has(chunk.id) ? [chunk,copies.get(chunk.id)] : [chunk]);
     return library;
   }
-  function createChunkFolder(value,name,ids=[],idFactory=()=>crypto.randomUUID()) {
-    const library=normalizePresetLibrary(value),title=presetText(name).trim();
+  function createChunkFolder(value,name,ids=[],idFactory=()=>crypto.randomUUID(),key='scenes') {
+    const {folderKey,label}=promptFolderSpec(key),library=normalizePresetLibrary(value),title=presetText(name).trim();
     if (!title) throw new Error('새 폴더 이름을 입력해 주세요.');
-    if (library.chunkFolders.some(item=>item.name.toLocaleLowerCase()===title.toLocaleLowerCase())) throw new Error('같은 이름의 폴더가 있습니다. 목록에서 그 폴더를 선택해 주세요.');
-    const id=presetIdentifier(idFactory(),'새 청크 폴더');
-    if (library.chunkFolders.some(item=>item.id===id)) throw new Error('새 폴더 ID가 중복됐습니다.');
-    library.chunkFolders.push({id,name:title});
-    return ids.length ? moveChunksTo(library,ids,id) : library;
+    if (library[folderKey].some(item=>item.name.toLocaleLowerCase()===title.toLocaleLowerCase())) throw new Error('같은 이름의 폴더가 있습니다. 목록에서 그 폴더를 선택해 주세요.');
+    const id=presetIdentifier(idFactory(),`새 ${label} 폴더`);
+    if (library[folderKey].some(item=>item.id===id)) throw new Error('새 폴더 ID가 중복됐습니다.');
+    library[folderKey].push({id,name:title});
+    return ids.length ? moveChunksTo(library,ids,id,null,false,key) : library;
   }
   function settingsBackupKeys(value, label, required, allowed = required) {
     const source = presetObject(value, label);
@@ -733,13 +752,13 @@
   }
   function settingsBackupLibrary(value) {
     const source = settingsBackupKeys(value, '프리셋 라이브러리', ['version','common','presets','characters','scenes','reservations'],
-      ['version','common','presets','characters','chunkFolders','scenes','reservations','combinations']);
+      ['version','common','presets','characters','characterFolders','chunkFolders','scenes','reservations','combinations']);
     settingsBackupKeys(source.common, '공통 프롬프트', ['prompt','negativePrompt']);
     settingsBackupStrings(source.common, ['prompt','negativePrompt'], '공통 프롬프트');
     const library = normalizePresetLibrary(source);
-    for (const folder of source.chunkFolders || []) {
-      settingsBackupKeys(folder, '청크 폴더', ['id','name']);
-      settingsBackupStrings(folder, ['name'], '청크 폴더 이름');
+    for (const folder of [...(source.chunkFolders || []),...(source.characterFolders || [])]) {
+      settingsBackupKeys(folder, '프롬프트 폴더', ['id','name']);
+      settingsBackupStrings(folder, ['name'], '프롬프트 폴더 이름');
     }
     for (const item of source.presets) {
       settingsBackupKeys(item, '설정 프리셋', ['id','name','model','loras']);
@@ -753,7 +772,7 @@
     }
     for (const key of ['characters','scenes']) for (const item of source[key]) {
       const fields = ['id','name','prompt','negativePrompt'];
-      settingsBackupKeys(item, '캐릭터·청크 프롬프트', fields, key === 'scenes' ? [...fields,'folderId'] : fields);
+      settingsBackupKeys(item, '캐릭터·청크 프롬프트', fields, [...fields,'folderId']);
       settingsBackupStrings(item, ['name','prompt','negativePrompt'], '캐릭터·청크 프롬프트');
     }
     for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition','imageOptions']);
@@ -861,7 +880,7 @@
         jobs.push({id,
           title:[prefix, character.name || '캐릭터', chunks.map(item => item.name || '청크').join('+'), preset.name || '프리셋', repeat].filter(Boolean).join('_'),
           ...prompts, maxCredits, state:'queued', saved:[],
-          ...(reservation.imageOptions ? {apiOptions:copy(reservation.imageOptions)} : {}),
+          ...(reservation.imageOptions ? {apiOptions:copy(Object.fromEntries(Object.entries(reservation.imageOptions).filter(([key])=>key!=='batchSize'))),...(reservation.imageOptions.batchSize ? {apiBatchSize:reservation.imageOptions.batchSize} : {})} : {}),
           configuration:copy({model:preset.model, loras:preset.loras}),
           composition:{version:2, reservation:copy({...reservation, repeat}), common:copy(common),
             preset:copy(preset), character:copy(character), chunks:copy(chunks)}
@@ -1243,19 +1262,27 @@ function mountPresetEditor(parent, io) {
     if (focus) {view.tab.focus({preventScroll:true});view.tab.scrollIntoView?.({block:'nearest',inline:'nearest',behavior:'auto'});}
     const registration=root.querySelector('.pq-registration-bar');if (registration) registration.hidden=mainId!=='compose';
   }
-  function buttonPicker(control,{icon='folder',caption=null,empty=true,onChange=()=>{},editable=true}={}) {
+  function buttonPicker(control,{icon='folder',caption=null,empty=true,onChange=()=>{},editable=true,groups=null}={}) {
     control.wrap.hidden=true;
     const wrap=el('div',null,{class:'pq-button-picker'}),label=control.input.getAttribute('aria-label');
     const list=el('div',null,{class:'pq-choice-list','aria-label':`${label} 버튼 목록`});wrap.append(el('strong',caption || label),list);
+    const opened=new Set(['']);
     function render() {
       const focused=document.activeElement?.dataset.choiceValue;list.replaceChildren();
       const options=[...control.input.children].filter(option=>empty || option.value || control.input.children.length===1);
-      for (const option of options) {
+      function addOption(option,parent) {
         const button=el('button',option.textContent,{type:'button','aria-label':`${label}: ${option.textContent}`,'aria-pressed':String(control.input.value===option.value),'data-choice-value':option.value});
         decorateIcon(button,icon);if (editable) {button.dataset.edit='';button.disabled=!!io.isBusy?.();}if (!empty && !option.value) {button.dataset.unavailable='true';button.disabled=true;}
-        button.addEventListener('click',()=>{if (editable && io.isBusy?.()) return;control.input.value=option.value;onChange(option.value);render();[...list.children].find(item=>item.dataset.choiceValue===option.value)?.focus({preventScroll:true});});list.append(button);
+        button.addEventListener('click',()=>{if (editable && io.isBusy?.()) return;control.input.value=option.value;onChange(option.value);render();[...list.querySelectorAll('[data-choice-value]')].find(item=>item.dataset.choiceValue===option.value)?.focus({preventScroll:true});});parent.append(button);
       }
-      if (focused!==undefined && document.activeElement?.parentElement===list) [...list.children].find(item=>item.dataset.choiceValue===focused)?.focus({preventScroll:true});
+      if (groups) for (const group of groups()) {
+        const members=options.filter(option=>group.ids.includes(option.value));if (!members.length) continue;
+        const details=el('details',null,{class:'pq-folder-group','data-character-picker-folder':group.id});details.open=opened.has(group.id);
+        const selected=members.find(option=>option.value===control.input.value),summary=el('summary',`${group.name} · ${members.length}개${selected ? ` · ${selected.textContent}` : ''}`);
+        details.append(summary);details.addEventListener('toggle',()=>{if (details.open) opened.add(group.id);else opened.delete(group.id);});
+        for (const option of members) addOption(option,details);list.append(details);
+      } else for (const option of options) addOption(option,list);
+      if (focused!==undefined && list.contains(document.activeElement)) [...list.querySelectorAll('[data-choice-value]')].find(item=>item.dataset.choiceValue===focused)?.focus({preventScroll:true});
     }
     pickerRenderers.set(control.input,render);control.input.addEventListener('change',render);wrap.append(control.wrap);
     return {wrap,list,render};
@@ -1264,7 +1291,7 @@ function mountPresetEditor(parent, io) {
     const create=el('div',null,{class:'pq-quick-folder'}),name=field(`${label} 새 폴더 이름`,'input',{placeholder:'새 폴더 이름'}),form=el('div',null,{class:'pq-quick-folder-form'});form.hidden=true;
     const open=action('새 폴더',()=>{form.hidden=false;name.input.focus();});open.setAttribute('aria-label',`${label} 새 폴더`);open.dataset.headerFeedback='';
     async function saveFolder() {await onCreate(nameValue(name.input));form.hidden=true;name.input.value='';picker.render();[...picker.list.children].find(item=>item.getAttribute('aria-pressed')==='true')?.focus({preventScroll:true});}
-    const save=action(moving ? '만들고 선택 청크 이동' : '만들고 폴더 선택',saveFolder);save.dataset.headerFeedback='';
+    const save=action(moving ? (label.startsWith('캐릭터') ? '만들고 선택 캐릭터 이동' : '만들고 선택 청크 이동') : (label.startsWith('캐릭터') ? '만들고 캐릭터 폴더 선택' : '만들고 폴더 선택'),saveFolder);save.dataset.headerFeedback='';
     const cancel=action('취소',()=>{form.hidden=true;name.input.value='';open.focus();});cancel.setAttribute('aria-label',`${label} 폴더 만들기 취소`);cancel.dataset.headerFeedback='';
     name.input.addEventListener('keydown',async event=>{if (event.key!=='Enter' || event.isTrusted===false || io.isBusy?.()) return;event.preventDefault();try {await saveFolder();}catch(error){io.notify(error.message);}});
     const actions=el('div',null,{class:'pq-actions'});actions.append(save,cancel);form.append(name.wrap,actions);create.append(open,form);picker.wrap.append(create);
@@ -1355,7 +1382,7 @@ function mountPresetEditor(parent, io) {
     });
     function refresh() {
       const id=currentId(),current=library[key].find(item=>item.id===id);
-      const items=key==='scenes' ? library.scenes.filter(item=>item.folderId===current?.folderId) : library[key];
+      const items=['scenes','characters'].includes(key) ? library[key].filter(item=>item.folderId===current?.folderId) : library[key];
       const index=items.findIndex(item=>item.id===id);
       for (let i=0;i<buttons.length;i++) Object.assign(buttons[i].dataset,{orderKey:key,orderId:id || '',direction:String(i===0 ? -1 : 1)});
       available(buttons[0],index>0);available(buttons[1],index>=0&&index<items.length-1);
@@ -1524,12 +1551,17 @@ function mountPresetEditor(parent, io) {
   showPresetEditor('browse');presetBody.append(presetMode,presetLayout);
 
   function promptEditor(key, title, label, placeholder) {
+    const {folderKey}=promptFolderSpec(key);
+    const caption=text=>key==='characters' ? `캐릭터 ${text}` : text;
+    const promptGroups=()=>[{id:'',name:'미분류'},...library[folderKey]];
+    const filterPrompts=(search,filter)=>orderedChunks(library,key).filter(item=>(!filter || (filter==='unfiled' ? !item.folderId : item.folderId===filter.slice(7))) && `${item.name}\n${item.prompt}\n${item.negativePrompt}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+    function promptFilterOptions(input) {const selected=input.value;input.replaceChildren(el('option','전체 폴더',{value:''}),el('option','미분류',{value:'unfiled'}),...library[folderKey].map(item=>el('option',item.name,{value:`folder:${item.id}`})));input.value=[...input.children].some(option=>option.value===selected) ? selected : '';}
     const body = section(title);
-    const layout=el('div',null,{class:`pq-library-layout${key==='scenes' ? ' pq-with-folders' : ''}`});
+    const layout=el('div',null,{class:'pq-library-layout pq-with-folders'});
     const browse=el('div',null,{class:'pq-library-browse'}),editor=el('div',null,{class:'pq-library-editor'});
-    let editorOpen=false;
+    let editorOpen=false;const opened=new Set(['']);
     const mode=el('div',null,{class:'pq-library-mode'});
-    function setMode(value) {body.dataset.libraryMode=value;if (key==='scenes' && value==='edit') {editorOpen=true;renderManager();editor.scrollIntoView?.({block:'nearest'});}for (const control of mode.children) control.setAttribute('aria-pressed',String(control.dataset.mode===value));}
+    function setMode(value) {body.dataset.libraryMode=value;if (value==='edit') {editorOpen=true;renderManager();editor.scrollIntoView?.({block:'nearest'});}for (const control of mode.children) control.setAttribute('aria-pressed',String(control.dataset.mode===value));}
     for (const [caption,value] of [['목록 보기','browse'],['편집 보기','edit']]) {
       const control=el('button',caption,{type:'button','data-mode':value});control.addEventListener('click',()=>setMode(value));mode.append(control);
     }
@@ -1538,7 +1570,7 @@ function mountPresetEditor(parent, io) {
     const name = field(`${label} 이름`);
     const prompt = field(`${label} 프롬프트`,'textarea',{placeholder});
     const negative = field(`${label} 네거티브`,'textarea');
-    const folder = key==='scenes' ? field('청크 폴더','select') : null;
+    const folder = field(`${label} 폴더`,'select');
     const folderPicker=folder ? buttonPicker(folder,{caption:'소속 폴더'}) : null;
     let resetFolderCreate=()=>{};
     let renderManager = () => {};
@@ -1549,85 +1581,84 @@ function mountPresetEditor(parent, io) {
       name.input.value = value?.name || '';
       prompt.input.value = value?.prompt || '';
       negative.input.value = value?.negativePrompt || '';
-      if (folder) {folder.input.value=value?.folderId || '';folderPicker.render();}
+      if (folder) {if (value) opened.add(value.folderId || '');folder.input.value=value?.folderId || '';folderPicker.render();}
       renderManager();
     }
     select.input.addEventListener('change',() => {fill(library[key].find(item => item.id === select.input.value));for (const refresh of orderRefreshers) refresh();});
     if (folder) {
-      const rail=el('div',null,{class:'pq-folder-rail','aria-label':'청크 폴더 탐색'});
+      const rail=el('div',null,{class:'pq-folder-rail','aria-label':`${label} 폴더 탐색`});
       const folderButtons=el('div',null,{class:'pq-folder-buttons'});rail.append(el('strong','폴더'),folderButtons);layout.replaceChildren(rail,browse,editor);
       const folderTools=el('details');folderTools.append(el('summary','폴더 관리'));
-      const managedFolder=field('관리할 청크 폴더','select');
-      const folderName=field('청크 폴더 이름','input',{placeholder:'예: 표정, 행동, 배경'});
+      const managedFolder=field(`관리할 ${label} 폴더`,'select');
+      const folderName=field(`${label} 폴더 이름`,'input',{placeholder:key==='characters' ? '예: 주연, 조연, 작품 이름' : '예: 표정, 행동, 배경'});
       function chooseManagedFolder() {
-        folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';
+        folderName.input.value=library[folderKey].find(item=>item.id===managedFolder.input.value)?.name || '';
         for (const refresh of orderRefreshers) refresh();
       }
       managedFolder.input.addEventListener('change',chooseManagedFolder);
       const managedFolderPicker=buttonPicker(managedFolder,{onChange:chooseManagedFolder});
       const folderActions=el('div',null,{class:'pq-actions'});
-      folderActions.append(action('폴더 저장',async()=>{
+      folderActions.append(action(caption('폴더 저장'),async()=>{
         const value={id:managedFolder.input.value || crypto.randomUUID(),name:nameValue(folderName.input)};
-        const next=copy(library),index=next.chunkFolders.findIndex(item=>item.id===value.id);
-        if (index<0) next.chunkFolders.push(value);else next.chunkFolders[index]=value;
-        await commit(next,'청크 폴더를 저장했습니다.');managedFolder.input.value=value.id;
+        const next=copy(library),index=next[folderKey].findIndex(item=>item.id===value.id);
+        if (index<0) next[folderKey].push(value);else next[folderKey][index]=value;
+        await commit(next,`${label} 폴더를 저장했습니다.`);managedFolder.input.value=value.id;
         for (const refresh of orderRefreshers) refresh();
-      }),action('새 폴더',()=>{managedFolder.input.value='';folderName.input.value='';for (const refresh of orderRefreshers) refresh();}));
-      const removeFolder=action('선택 폴더 삭제',async()=>{
+      }),action(caption('새 폴더'),()=>{managedFolder.input.value='';folderName.input.value='';for (const refresh of orderRefreshers) refresh();}));
+      const removeFolder=action(caption('선택 폴더 삭제'),async()=>{
         if (!managedFolder.input.value) throw new Error('삭제할 폴더를 선택해 주세요.');
-        await commit(removeChunkFolder(library,managedFolder.input.value),'폴더를 삭제했습니다. 안의 청크는 미분류로 옮겼고 예약은 유지했습니다.');
+        await commit(removeChunkFolder(library,managedFolder.input.value,key),`폴더를 삭제했습니다. 안의 ${label}는 미분류로 옮겼고 예약은 유지했습니다.`);
         folderName.input.value='';
       });
       folderActions.append(removeFolder);
-      orderRefreshers.push(()=>available(removeFolder,library.chunkFolders.some(item=>item.id===managedFolder.input.value)));
-      folderTools.append(managedFolderPicker.wrap,folderName.wrap,folderActions,orderControls('chunkFolders',()=>managedFolder.input.value,'선택 폴더'),el('small','폴더 삭제 시 안의 청크는 미분류로 이동합니다. 청크와 예약은 지우지 않습니다.'));
-      const search=field('청크 검색','input',{type:'search',placeholder:'청크 이름·프롬프트 검색'});
-      const filter=field('청크 폴더 필터','select');
-      const count=el('small',null,{'aria-label':'청크 목록 개수','role':'status'});
-      const list=el('div',null,{class:'pq-chunk-list','aria-label':'저장한 청크 목록'});
-      const closed=new Set();
+      orderRefreshers.push(()=>available(removeFolder,library[folderKey].some(item=>item.id===managedFolder.input.value)));
+      folderTools.append(managedFolderPicker.wrap,folderName.wrap,folderActions,orderControls(folderKey,()=>managedFolder.input.value,caption('선택 폴더')),el('small','폴더 삭제 시 안의 항목은 미분류로 이동합니다. 프롬프트와 예약은 지우지 않습니다.'));
+      const search=field(`${label} 검색`,'input',{type:'search',placeholder:`${label} 이름·프롬프트 검색`});
+      const filter=field(`${label} 폴더 필터`,'select');
+      const count=el('small',null,{'aria-label':`${label} 목록 개수`,'role':'status'});
+      const list=el('div',null,{class:'pq-chunk-list','aria-label':`저장한 ${label} 목록`});
       let draggingChunkId=null,draggingChunkIds=[],managedChunkIds=new Set(),dropBusy=false;
-      const management=el('div',null,{class:'pq-chunk-management','aria-label':'선택 청크 관리',title:'체크한 청크에 이동·복제·삭제를 함께 적용합니다.'});
-      const selectionSummary=el('small',null,{role:'status','aria-label':'관리 선택 청크 요약'});
-      const moveFolder=field('이동할 청크 폴더','select');
+      const management=el('div',null,{class:'pq-chunk-management','aria-label':`선택 ${label} 관리`,title:`체크한 ${label}에 이동·복제·삭제를 함께 적용합니다.`});
+      const selectionSummary=el('small',null,{role:'status','aria-label':`관리 선택 ${label} 요약`});
+      const moveFolder=field(`이동할 ${label} 폴더`,'select');
       const movePicker=buttonPicker(moveFolder,{caption:'이동할 폴더'});movePicker.wrap.className+=' pq-move-destination';
-      const resetMoveCreate=quickFolder(movePicker,'이동 대상',async name=>{
-        const editedId=select.input.value,oldFolder=library.scenes.find(item=>item.id===editedId)?.folderId || '',updateDraft=managedChunkIds.has(editedId)&&folder.input.value===oldFolder;
-        const next=createChunkFolder(library,name,[...managedChunkIds]),id=next.chunkFolders.at(-1).id;
-        await commit(next,`${name} 폴더를 만들고 청크 ${managedChunkIds.size}개를 이동했습니다.`);
+      const resetMoveCreate=quickFolder(movePicker,caption('이동 대상'),async name=>{
+        const editedId=select.input.value,oldFolder=library[key].find(item=>item.id===editedId)?.folderId || '',updateDraft=managedChunkIds.has(editedId)&&folder.input.value===oldFolder;
+        const next=createChunkFolder(library,name,[...managedChunkIds],undefined,key),id=next[folderKey].at(-1).id;
+        await commit(next,`${name} 폴더를 만들고 ${label} ${managedChunkIds.size}개를 이동했습니다.`);
         if (updateDraft && select.input.value===editedId && folder.input.value===oldFolder) {folder.input.value=id;folderPicker.render();}
-        moveFolder.input.value=id;filter.input.value=`folder:${id}`;renderManager();
+        moveFolder.input.value=id;filter.input.value=`folder:${id}`;opened.add(id);renderManager();
       },true);
-      resetFolderCreate=quickFolder(folderPicker,'청크 소속',async name=>{
-        const next=createChunkFolder(library,name),id=next.chunkFolders.at(-1).id;
-        await commit(next,`${name} 폴더를 만들었습니다. 청크 저장을 누르면 새 폴더에 저장됩니다.`);
+      resetFolderCreate=quickFolder(folderPicker,`${label} 소속`,async name=>{
+        const next=createChunkFolder(library,name,[],undefined,key),id=next[folderKey].at(-1).id;
+        await commit(next,`${name} 폴더를 만들었습니다. ${label} 저장을 누르면 새 폴더에 저장됩니다.`);
         folder.input.value=id;folderPicker.render();
       });
       const bulkActions=el('div',null,{class:'pq-actions'});
-      const duplicate=action('선택 복제',async()=>{
-        const before=new Set(library.scenes.map(item=>item.id)),next=duplicateChunks(library,[...managedChunkIds]);
-        await commit(next,`청크 ${managedChunkIds.size}개를 복제했습니다. 복사본을 선택했습니다.`);
-        managedChunkIds=new Set(library.scenes.filter(item=>!before.has(item.id)).map(item=>item.id));renderManager();
+      const duplicate=action(caption('선택 복제'),async()=>{
+        const before=new Set(library[key].map(item=>item.id)),next=duplicateChunks(library,[...managedChunkIds],undefined,key);
+        await commit(next,`${label} ${managedChunkIds.size}개를 복제했습니다. 복사본을 선택했습니다.`);
+        managedChunkIds=new Set(library[key].filter(item=>!before.has(item.id)).map(item=>item.id));renderManager();
       });
-      const removeSelected=action('선택 삭제',async()=>{
+      const removeSelected=action(caption('선택 삭제'),async()=>{
         const count=managedChunkIds.size,editedRemoved=managedChunkIds.has(select.input.value);
-        await commit(removeChunks(library,[...managedChunkIds]),`선택한 청크 ${count}개를 삭제했습니다. 삭제된 청크를 참조하는 예약은 다시 구성해 주세요.`);
+        await commit(removeChunks(library,[...managedChunkIds],key),`선택한 ${label} ${count}개를 삭제했습니다. 삭제된 ${label}를 참조하는 예약은 다시 구성해 주세요.`);
         if (editedRemoved) fill(null);
       });
-      const clearSelection=action('체크 해제',()=>{managedChunkIds.clear();renderManager();});
+      const clearSelection=action(caption('체크 해제'),()=>{managedChunkIds.clear();renderManager();});
       bulkActions.append(duplicate,removeSelected,clearSelection);
       const moveRow=el('div',null,{class:'pq-bulk-move'});
-      const moveSelected=action('선택 이동',()=>moveChunks([...managedChunkIds],{folderId:moveFolder.input.value}));
+      const moveSelected=action(caption('선택 이동'),()=>moveChunks([...managedChunkIds],{folderId:moveFolder.input.value}));
       for (const control of [duplicate,removeSelected,clearSelection,moveSelected]) control.dataset.headerFeedback='';
       moveRow.append(movePicker.wrap,moveSelected);management.append(selectionSummary,bulkActions,moveRow);management.hidden=true;
-      const dragType='application/x-pixai-queue-chunk';
+      const dragType=key==='scenes' ? 'application/x-pixai-queue-chunk' : 'application/x-pixai-queue-character';
       function clearDropFeedback() {
         for (const element of root.querySelectorAll('[data-drop-position]')) element.dataset.dropPosition='';
         for (const element of root.querySelectorAll('[data-drop-active]')) element.dataset.dropActive='false';
       }
       function endDrag() {draggingChunkId=null;draggingChunkIds=[];clearDropFeedback();for (const element of root.querySelectorAll('[data-chunk-dragging]')) element.dataset.chunkDragging='false';}
       function updateSelectionSummary() {
-        const visible=new Set(filterChunks(search.input.value,filter.input.value).filter(item=>!closed.has(item.folderId || '')).map(item=>item.id));
+        const visible=new Set(filterPrompts(search.input.value,filter.input.value).filter(item=>opened.has(item.folderId || '')).map(item=>item.id));
         const hidden=[...managedChunkIds].filter(id=>!visible.has(id)).length;
         selectionSummary.textContent=`${managedChunkIds.size}개 체크${hidden ? ` · 목록 밖 ${hidden}개 포함` : ''}`;
       }
@@ -1640,18 +1671,18 @@ function mountPresetEditor(parent, io) {
         if (dropBusy || io.isBusy?.()) return;
         dropBusy=true;
         try {
-          const edited=library.scenes.find(item=>item.id===select.input.value),oldFolder=edited?.folderId || '';
-          const originals=selectedChunks(library,ids),next=moveChunksTo(library,ids,destination.folderId,destination.targetId ?? null,!!destination.after);
-          if (library.scenes.every((item,index)=>item.id===next.scenes[index]?.id && item.folderId===next.scenes[index]?.folderId)) return;
+          const edited=library[key].find(item=>item.id===select.input.value),oldFolder=edited?.folderId || '';
+          const originals=selectedChunks(library,ids,key),next=moveChunksTo(library,ids,destination.folderId,destination.targetId ?? null,!!destination.after,key);
+          if (library[key].every((item,index)=>item.id===next[key][index]?.id && item.folderId===next[key][index]?.folderId)) return;
           const editedId=select.input.value,updateFolder=ids.includes(editedId) && folder.input.value===oldFolder;
-          const folderName=library.chunkFolders.find(item=>item.id===destination.folderId)?.name || '미분류';
-          await commit(next,`${originals.length===1 ? originals[0].name : `청크 ${originals.length}개`} → ${folderName} · 위치를 저장했습니다. 기존 예약 순서는 유지됩니다.`);
+          const folderName=library[folderKey].find(item=>item.id===destination.folderId)?.name || '미분류';
+          await commit(next,`${originals.length===1 ? originals[0].name : `${label} ${originals.length}개`} → ${folderName} · 위치를 저장했습니다. 기존 예약 순서는 유지됩니다.`);
           if (updateFolder && select.input.value===editedId && folder.input.value===oldFolder) {folder.input.value=destination.folderId;folderPicker.render();}
-          focusChunk(focusId,destination.folderId);
-        } catch(error) {io.notify(`청크 이동 실패: ${error.message}`);}
+          opened.add(destination.folderId);renderManager();focusChunk(focusId,destination.folderId);
+        } catch(error) {io.notify(`${label} 이동 실패: ${error.message}`);}
         finally {dropBusy=false;clearDropFeedback();}
       }
-      function acceptsDrag(event) {return event.isTrusted!==false && !dropBusy && !io.isBusy?.() && draggingChunkId && draggingChunkIds.every(id=>library.scenes.some(item=>item.id===id));}
+      function acceptsDrag(event) {return event.isTrusted!==false && !dropBusy && !io.isBusy?.() && draggingChunkId && draggingChunkIds.every(id=>library[key].some(item=>item.id===id));}
       function dropTarget(element,destination) {
         element.addEventListener('dragover',event=>{
           if (!acceptsDrag(event)) return;
@@ -1673,47 +1704,47 @@ function mountPresetEditor(parent, io) {
           try {
             if (event.dataTransfer?.getData(dragType)!==JSON.stringify(ids)) return;
             endDrag();await moveChunks(ids,target,id);
-          } catch(error) {io.notify(`청크 이동 실패: ${error.message}`);}
+          } catch(error) {io.notify(`${label} 이동 실패: ${error.message}`);}
           finally {endDrag();}
         });
       }
       renderManager=()=>{
-        managedChunkIds=new Set(library.scenes.filter(item=>managedChunkIds.has(item.id)).map(item=>item.id));
+        managedChunkIds=new Set(library[key].filter(item=>managedChunkIds.has(item.id)).map(item=>item.id));
         folderButtons.replaceChildren();
-        const folders=[{id:'',name:'전체',count:library.scenes.length},{id:'unfiled',name:'미분류',count:library.scenes.filter(item=>!item.folderId).length},...library.chunkFolders.map(item=>({id:`folder:${item.id}`,name:item.name,count:library.scenes.filter(chunk=>chunk.folderId===item.id).length}))];
+        const folders=[{id:'',name:'전체',count:library[key].length},{id:'unfiled',name:'미분류',count:library[key].filter(item=>!item.folderId).length},...library[folderKey].map(item=>({id:`folder:${item.id}`,name:item.name,count:library[key].filter(chunk=>chunk.folderId===item.id).length}))];
         for (const item of folders) {
           const control=el('button',null,{type:'button','aria-label':`폴더 보기: ${item.name}`,'aria-pressed':String(filter.input.value===item.id),title:`${item.name} · ${item.count}개`});control.append(el('span',item.name,{class:'pq-folder-label'}),el('small',` · ${item.count}`,{class:'pq-folder-count'}));
           decorateIcon(control,item.id ? 'folder' : 'view_module');
           if (item.id) {control.dataset.dropFolder=item.id==='unfiled' ? '' : item.id.slice(7);dropTarget(control,()=>({folderId:control.dataset.dropFolder}));}
           control.addEventListener('click',()=>{filter.input.value=item.id;renderManager();});folderButtons.append(control);
         }
-        const visible=filterChunks(search.input.value,filter.input.value);editor.remove();list.replaceChildren();
+        const visible=filterPrompts(search.input.value,filter.input.value);editor.remove();list.replaceChildren();
         updateSelectionSummary();
         management.hidden=!managedChunkIds.size;
-        selectOptions(moveFolder.input,library.chunkFolders,'미분류',moveFolder.input.value);
+        selectOptions(moveFolder.input,library[folderKey],'미분류',moveFolder.input.value);
         for (const control of [duplicate,removeSelected,clearSelection,moveSelected]) available(control,managedChunkIds.size>0);
-        count.textContent=`검색 결과 ${visible.length} / 전체 ${library.scenes.length}개 · ⠿ 이동`;count.title='청크 옆 ⠿ 손잡이를 드래그해 순서를 바꾸거나 폴더로 옮깁니다.';
-        if (!visible.length) list.append(el('small',library.scenes.length ? '검색에 맞는 청크가 없습니다. 검색어나 폴더 필터를 바꿔 주세요.' : '아래 이름과 프롬프트를 입력해 첫 청크를 저장하세요.',{class:'pq-empty'}));
-        for (const group of chunkGroups()) {
+        count.textContent=`검색 결과 ${visible.length} / 전체 ${library[key].length}개 · ⠿ 이동`;count.title=`${label} 옆 ⠿ 손잡이를 드래그해 순서를 바꾸거나 폴더로 옮깁니다.`;
+        if (!visible.length) list.append(el('small',library[key].length ? `검색에 맞는 ${label}가 없습니다. 검색어나 폴더 필터를 바꿔 주세요.` : `아래 이름과 프롬프트를 입력해 첫 ${label}를 저장하세요.`,{class:'pq-empty'}));
+        for (const group of promptGroups()) {
           const chunks=visible.filter(item=>(item.folderId || '')===group.id);
           if (!chunks.length && (search.input.value.trim() || (filter.input.value && filter.input.value!==`folder:${group.id}` && !(filter.input.value==='unfiled' && !group.id)))) continue;
-          const details=el('details',null,{class:'pq-folder-group','data-chunk-folder':group.id});details.open=!closed.has(group.id);
-          const summary=el('summary');summary.append(el('span',`${group.name} · ${chunks.length} / ${library.scenes.filter(item=>(item.folderId || '')===group.id).length}개`,{class:'pq-folder-title'}));
-          if (group.id) {const title=summary.children[0];title.remove();summary.append(libraryOrderHandle(summary,'chunkFolders',group,'폴더'),title);}
-          if (group.id) {const menu=el('button','⋮',{type:'button','aria-label':`폴더 관리: ${group.name}`});menu.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();managedFolder.input.value=group.id;chooseManagedFolder();managedFolderPicker.render();folderTools.open=true;folderTools.scrollIntoView?.({block:'nearest'});});summary.append(menu);}
+          const details=el('details',null,{class:'pq-folder-group',[key==='characters' ? 'data-character-folder' : 'data-chunk-folder']:group.id});details.open=opened.has(group.id);
+          const summary=el('summary');summary.append(el('span',`${group.name} · ${chunks.length} / ${library[key].filter(item=>(item.folderId || '')===group.id).length}개`,{class:'pq-folder-title'}));
+          if (group.id) {const title=summary.children[0];title.remove();summary.append(libraryOrderHandle(summary,folderKey,group,caption('폴더')),title);}
+          if (group.id) {const menu=el('button','⋮',{type:'button','aria-label':`${caption('폴더 관리')}: ${group.name}`});menu.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();managedFolder.input.value=group.id;chooseManagedFolder();managedFolderPicker.render();folderTools.open=true;folderTools.scrollIntoView?.({block:'nearest'});});summary.append(menu);}
           summary.dataset.dropFolder=group.id;dropTarget(summary,()=>({folderId:group.id}));details.append(summary);
-          details.addEventListener('toggle',()=>{if (details.open) closed.delete(group.id);else closed.add(group.id);updateSelectionSummary();});
+          details.addEventListener('toggle',()=>{if (details.open) opened.add(group.id);else opened.delete(group.id);updateSelectionSummary();});
           for (const chunk of chunks) {
             const row=el('div',null,{class:'pq-manager-row','data-selected':String(select.input.value===chunk.id),'data-managed':String(managedChunkIds.has(chunk.id)),'data-chunk-id':chunk.id});
-            const checkbox=el('input',null,{type:'checkbox','data-edit':'','aria-label':`청크 관리 선택: ${chunk.name}`});checkbox.checked=managedChunkIds.has(chunk.id);checkbox.disabled=!!io.isBusy?.();
-            checkbox.addEventListener('change',()=>{if (io.isBusy?.() || dropBusy) {checkbox.checked=managedChunkIds.has(chunk.id);return;}if (checkbox.checked) managedChunkIds.add(chunk.id);else managedChunkIds.delete(chunk.id);renderManager();const current=[...list.querySelectorAll('input')].find(element=>element.getAttribute('aria-label')===`청크 관리 선택: ${chunk.name}`);current?.focus({preventScroll:true});current?.closest?.('.pq-manager-row')?.scrollIntoView?.({block:'nearest',inline:'nearest'});});
-            const handle=el('button','⠿',{type:'button',class:'pq-drag-handle',draggable:'true','data-edit':'','data-drag-chunk':chunk.id,'aria-label':`청크 이동: ${chunk.name}`,title:'드래그해서 순서·폴더 이동 · 키보드 ↑↓로 순서 변경'});
+            const checkbox=el('input',null,{type:'checkbox','data-edit':'','aria-label':`${label} 관리 선택: ${chunk.name}`});checkbox.checked=managedChunkIds.has(chunk.id);checkbox.disabled=!!io.isBusy?.();
+            checkbox.addEventListener('change',()=>{if (io.isBusy?.() || dropBusy) {checkbox.checked=managedChunkIds.has(chunk.id);return;}if (checkbox.checked) managedChunkIds.add(chunk.id);else managedChunkIds.delete(chunk.id);renderManager();const current=[...list.querySelectorAll('input')].find(element=>element.getAttribute('aria-label')===`${label} 관리 선택: ${chunk.name}`);current?.focus({preventScroll:true});current?.closest?.('.pq-manager-row')?.scrollIntoView?.({block:'nearest',inline:'nearest'});});
+            const handle=el('button','⠿',{type:'button',class:'pq-drag-handle',draggable:'true','data-edit':'','data-drag-chunk':chunk.id,'aria-label':`${label} 이동: ${chunk.name}`,title:'드래그해서 순서·폴더 이동 · 키보드 ↑↓로 순서 변경'});
             handle.textContent='';decorateIcon(handle,'drag_indicator');
             handle.disabled=!!io.isBusy?.();
             handle.addEventListener('dragstart',event=>{
               if (event.isTrusted===false || dropBusy || io.isBusy?.() || !event.dataTransfer) {event.preventDefault();return;}
               try {
-                const ids=managedChunkIds.has(chunk.id) ? selectedChunks(library,[...managedChunkIds]).map(item=>item.id) : [chunk.id];
+                const ids=managedChunkIds.has(chunk.id) ? selectedChunks(library,[...managedChunkIds],key).map(item=>item.id) : [chunk.id];
                 event.dataTransfer.setData(dragType,JSON.stringify(ids));event.dataTransfer.effectAllowed='move';
                 event.dataTransfer.setDragImage?.(row,12,12);draggingChunkId=chunk.id;draggingChunkIds=ids;row.dataset.chunkDragging='true';
               } catch {event.preventDefault();endDrag();}
@@ -1722,13 +1753,13 @@ function mountPresetEditor(parent, io) {
             handle.addEventListener('keydown',async event=>{
               if (event.isTrusted===false || !['ArrowUp','ArrowDown'].includes(event.key) || dropBusy || io.isBusy?.()) return;
               event.preventDefault();
-              const items=library.scenes.filter(item=>item.folderId===chunk.folderId),index=items.findIndex(item=>item.id===chunk.id),after=event.key==='ArrowDown',target=items[index+(after ? 1 : -1)];
+              const items=library[key].filter(item=>item.folderId===chunk.folderId),index=items.findIndex(item=>item.id===chunk.id),after=event.key==='ArrowDown',target=items[index+(after ? 1 : -1)];
               if (target) await moveChunks([chunk.id],{folderId:chunk.folderId || '',targetId:target.id,after});
             });
             dropTarget(row,event=>({folderId:chunk.folderId || '',targetId:chunk.id,after:event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2}));
             const edit=action(chunk.name,()=>{if (select.input.value===chunk.id) {editorOpen=!editorOpen;renderManager();} else {select.input.value=chunk.id;fill(chunk);}if (editorOpen) {editor.parentElement?.scrollIntoView?.({block:'start'});name.input.focus({preventScroll:true});}for (const refresh of orderRefreshers) refresh();});edit.className='pq-name-button';edit.dataset.viewOnly='';edit.setAttribute('aria-expanded',String(select.input.value===chunk.id && editorOpen));
-            edit.setAttribute('aria-label',`청크 편집: ${chunk.name}`);
-            const header=el('div',null,{class:'pq-chunk-row-head'});header.append(checkbox,handle,edit,orderControls('scenes',()=>chunk.id,`청크 ${chunk.name}`,false,true));
+            edit.setAttribute('aria-label',`${label} 편집: ${chunk.name}`);
+            const header=el('div',null,{class:'pq-chunk-row-head'});header.append(checkbox,handle,edit,orderControls(key,()=>chunk.id,`${label} ${chunk.name}`,false,true));
             row.append(header,el('small',chunk.prompt || `네거티브: ${chunk.negativePrompt}`));if (select.input.value===chunk.id && editorOpen) row.append(editor);details.append(row);
           }
           list.append(details);
@@ -1737,27 +1768,13 @@ function mountPresetEditor(parent, io) {
       };
       search.input.addEventListener('input',renderManager);filter.input.addEventListener('change',renderManager);
       refreshFolders=()=>{
-        selectOptions(folder.input,library.chunkFolders,'미분류',folder.input.value);
-        selectOptions(managedFolder.input,library.chunkFolders,'새 폴더',managedFolder.input.value);
-        folderFilterOptions(filter.input);renderManager();
+        selectOptions(folder.input,library[folderKey],'미분류',folder.input.value);
+        selectOptions(managedFolder.input,library[folderKey],'새 폴더',managedFolder.input.value);
+        promptFilterOptions(filter.input);renderManager();
       };
-      resetView=()=>{endDrag();managedChunkIds.clear();resetFolderCreate();resetMoveCreate();search.input.value='';filter.input.value='';closed.clear();folderName.input.value=library.chunkFolders.find(item=>item.id===managedFolder.input.value)?.name || '';};
+      resetView=()=>{endDrag();managedChunkIds.clear();resetFolderCreate();resetMoveCreate();search.input.value='';filter.input.value='';opened.clear();opened.add('');folderName.input.value=library[folderKey].find(item=>item.id===managedFolder.input.value)?.name || '';};
       filter.wrap.hidden=true;rail.append(filter.wrap);rail.hidden=true;
       browse.append(search.wrap,folderTools,count,list);body.append(management);layout.className='pq-inline-library';layout.replaceChildren(browse,rail);
-    } else {
-      const search=field('캐릭터 검색','input',{type:'search',placeholder:'이름·프롬프트 검색'}),list=el('div',null,{class:'pq-saved-list','aria-label':'저장한 캐릭터 목록'});
-      renderManager=()=>{
-        list.replaceChildren();const query=search.input.value.trim().toLocaleLowerCase();
-        const items=library[key].filter(item=>`${item.name}\n${item.prompt}\n${item.negativePrompt}`.toLocaleLowerCase().includes(query));
-        if (!items.length) list.append(el('small','표시할 캐릭터가 없습니다. 새 캐릭터를 만들어 주세요.',{class:'pq-empty'}));
-        for (const item of items) {
-          const control=action(item.name,()=>{select.input.value=item.id;fill(item);setMode('edit');name.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();});control.dataset.viewOnly='';
-          control.className='pq-saved-card';control.setAttribute('aria-label',`캐릭터 편집: ${item.name}`);control.setAttribute('aria-pressed',String(select.input.value===item.id));control.append(el('small',item.prompt || item.negativePrompt));
-          const row=el('div',null,{class:'pq-library-order-row'});row.append(libraryOrderHandle(row,key,item,'캐릭터'),control);list.append(row);
-        }
-      };
-      search.input.addEventListener('input',renderManager);refreshFolders=renderManager;resetView=()=>{search.input.value='';};browse.append(search.wrap,list);
-      resizable(layout,[browse,editor],'캐릭터',[.32,.68],[190,220]);
     }
     const controls=el('div',null,{class:'pq-actions'});
     controls.append(action(`${label} 저장`,async () => {
@@ -1765,7 +1782,7 @@ function mountPresetEditor(parent, io) {
       if (!value.prompt && !value.negativePrompt) throw new Error(`${label} 프롬프트나 네거티브를 입력해 주세요.`);
       const next = copy(library); const index = next[key].findIndex(item => item.id === value.id);
       if (index < 0) next[key].push(value); else next[key][index] = value;
-      await commit(next,`${label} 프롬프트를 저장했습니다.`); select.input.value = value.id;renderManager();for (const refresh of orderRefreshers) refresh();
+      await commit(next,`${label} 프롬프트를 저장했습니다.`); select.input.value = value.id;opened.add(value.folderId || '');renderManager();for (const refresh of orderRefreshers) refresh();
     }),action(`새 ${label}`,() => {select.input.value = '';fill(null);setMode('edit');name.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();}));
     const remove=action(`선택 ${label} 삭제`,async () => {
       const id = select.input.value;
@@ -1775,10 +1792,10 @@ function mountPresetEditor(parent, io) {
     });
     controls.append(remove);orderRefreshers.push(()=>available(remove,library[key].some(item=>item.id===select.input.value)));
     controls.append(...orderControls(key,()=>select.input.value,`선택 ${label}`).children);
-    if (key==='scenes') controls.append(action('청크 편집 닫기',()=>{editorOpen=false;renderManager();}));
+    controls.append(action(`${label} 편집 닫기`,()=>{editorOpen=false;renderManager();}));
     select.wrap.hidden=true;editor.append(el('strong',`${label} 편집`),select.wrap,name.wrap,...(folder ? [folderPicker.wrap] : []),prompt.wrap,negative.wrap,controls);
     const create=action(`새 ${label} 만들기`,()=>{select.input.value='';fill(null);setMode('edit');name.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();});browse.append(create);
-    return {key,select:select.input,label,fill,resetView,refresh:()=>{selectOptions(select.input,key==='scenes' ? orderedChunks(library) : library[key],`새 ${label}`,select.input.value);refreshFolders();}};
+    return {key,select:select.input,label,fill,resetView,refresh:()=>{selectOptions(select.input,orderedChunks(library,key),`새 ${label}`,select.input.value);refreshFolders();}};
   }
   const characterEditor = promptEditor('characters','③ 캐릭터 프롬프트','캐릭터','외모, 의상, 캐릭터 고유 특징');
   const chunkEditor = promptEditor('scenes','④ 프롬프트 청크','청크','표정, 행동, 구도, 배경 등 함께 쓸 프롬프트 조각');
@@ -1786,46 +1803,51 @@ function mountPresetEditor(parent, io) {
   const reservePreset = field('예약 프리셋','select');
   const reserveCharacter = field('예약 캐릭터','select');
   const reservePresetPicker=buttonPicker(reservePreset,{icon:'tune',caption:'프리셋',empty:false,onChange:preview});
-  const reserveCharacterPicker=buttonPicker(reserveCharacter,{icon:'person',caption:'캐릭터',empty:false,onChange:preview});
+  const reserveCharacterPicker=buttonPicker(reserveCharacter,{icon:'person',caption:'캐릭터',empty:false,onChange:preview,groups:()=>[{id:'',name:'미분류'},...library.characterFolders].map(group=>({...group,ids:library.characters.filter(item=>(item.folderId || '')===group.id).map(item=>item.id)}))});
   const chunkList = el('div',null,{class:'pq-chunk-list','aria-label':'예약 청크 목록'});
   const chunkSearch = field('예약 청크 검색','input',{type:'search',placeholder:'함께 쓸 청크 이름·프롬프트 검색'});
   const chunkFilter = field('예약 청크 폴더 필터','select');
   const chunkFilterPicker=buttonPicker(chunkFilter,{caption:'청크 폴더',editable:false,onChange:()=>{renderChunkChoices();preview();}});
   const chunkCount = el('div',null,{class:'pq-selected-chunks','aria-label':'선택한 청크 요약','role':'status'});
-  const pickerClosed = new Set();
+  const pickerOpened = new Set(['']);
   let groupSummaries = new Map();
   let selectedChunkIds = new Set();
   let missingMaterials=[],loadedCombination=false,recipeDrag=null,triggerPosition=1,draftReady=false,lastDraftText='',draftSaveError='';
   const reserveCount = field('이 조합의 생성 횟수','input',{type:'number',min:'1',max:'100',value:'1'});
-  const reserveRatio=field('조합 이미지 비율','select'),reserveSize=field('조합 이미지 크기','select');
+  const reserveRatio=field('조합 이미지 비율','select'),reserveSize=field('조합 이미지 크기','select'),reserveBatch=field('생성당 이미지 수','select'),reserveMode=field('조합 생성 모드','select');
   for (const ratio of API_RATIOS) {
     const [width,height]=ratio.split(':').map(Number);
     reserveRatio.input.append(el('option',`${ratio} · ${width>height ? '가로' : width<height ? '세로' : '정사각'}`,{value:ratio}));
   }
   for (const size of ['1k','1.5k']) reserveSize.input.append(el('option',size,{value:size}));
+  for (const [value,name] of [[1,'1장'],[4,'4장 배치']]) reserveBatch.input.append(el('option',name,{value:String(value)}));
+  for (const [value,name] of [['','모델 기본값'],['lite','Lite'],['standard','Standard'],['pro','Pro'],['ultra','Ultra']]) reserveMode.input.append(el('option',name,{value}));
   const reserveRatioPicker=buttonPicker(reserveRatio,{caption:'이미지 비율',icon:'image',empty:false,onChange:chooseRecipeImages});
   const reserveSizePicker=buttonPicker(reserveSize,{caption:'이미지 크기',icon:'image',empty:false,onChange:chooseRecipeImages});
-  const imageSettingsNote=el('small',null,{'aria-label':'현재 조합 이미지 설정',role:'status',title:'비율은 가로:세로입니다. 새 예약마다 선택한 비율과 크기를 보관합니다.'});
+  const reserveBatchPicker=buttonPicker(reserveBatch,{caption:'생성당 이미지 수',icon:'image',empty:false,onChange:chooseRecipeImages});
+  const reserveModePicker=buttonPicker(reserveMode,{caption:'생성 모드',icon:'tune',onChange:chooseRecipeImages});
+  reserveModePicker.wrap.className+=' pq-mode-picker';
+  const imageSettingsNote=el('small',null,{'aria-label':'현재 조합 이미지 설정',role:'status',title:'비율은 가로:세로입니다. 새 예약마다 비율·크기·생성 모드·배치 수를 보관합니다.'});
   const imageSettings=el('div',null,{class:'pq-reservation-image'}),imagePickers=el('div',null,{class:'pq-inline'});
-  root.append(el('style','#local-pixai-queue .pq-reservation-image{flex:none;min-width:0;margin:4px 0 8px;padding:0}#local-pixai-queue .pq-reservation-image>.pq-inline{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px}#local-pixai-queue .pq-reservation-image .pq-choice-list{height:78px}'));
-  imagePickers.append(reserveRatioPicker.wrap,reserveSizePicker.wrap);imageSettings.append(imagePickers,imageSettingsNote);
-  const defaultRecipeImages=()=>{const options=normalizeApiOptions(io.getImageOptions?.() || {});return {aspectRatio:options.aspectRatio,size:options.size};};
+  root.append(el('style','#local-pixai-queue .pq-reservation-image{flex:none;min-width:0;margin:4px 0 8px;padding:0}#local-pixai-queue .pq-reservation-image>.pq-inline{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px}#local-pixai-queue .pq-reservation-image .pq-choice-list{height:78px}#local-pixai-queue .pq-reservation-image .pq-mode-picker .pq-choice-list{height:auto;min-height:0;max-height:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start}#local-pixai-queue .pq-mode-picker .pq-choice-list>button:first-child{grid-column:1/-1}#local-pixai-queue .pq-mode-picker .pq-choice-list>button{min-width:0;padding-left:6px;padding-right:6px}#local-pixai-queue .pq-choice-list>.pq-folder-group{flex:none;width:100%}'));
+  imagePickers.append(reserveRatioPicker.wrap,reserveSizePicker.wrap,reserveModePicker.wrap,reserveBatchPicker.wrap);imageSettings.append(imagePickers,imageSettingsNote);
+  const defaultRecipeImages=()=>{const options=normalizeApiOptions(io.getImageOptions?.() || {});return {aspectRatio:options.aspectRatio,size:options.size,mode:options.mode,batchSize:io.getBatchSize?.() || 4};};
   let recipeImages=defaultRecipeImages();
   function setRecipeImages(value) {
-    recipeImages=value ? normalizeReservationImageOptions(value) : defaultRecipeImages();
-    reserveRatio.input.value=recipeImages.aspectRatio;reserveSize.input.value=recipeImages.size;
-    reserveRatioPicker.render();reserveSizePicker.render();
+    recipeImages=normalizeReservationImageOptions({...defaultRecipeImages(),...(value ? normalizeReservationImageOptions(value) : {})});
+    reserveRatio.input.value=recipeImages.aspectRatio;reserveSize.input.value=recipeImages.size;reserveMode.input.value=recipeImages.mode;reserveBatch.input.value=String(recipeImages.batchSize);
+    reserveRatioPicker.render();reserveSizePicker.render();reserveModePicker.render();reserveBatchPicker.render();
   }
   function chooseRecipeImages() {
     try {
-      if (io.isBusy?.()) throw new Error('설정 처리가 끝난 뒤 이미지 비율·크기를 골라 주세요.');
-      const images=normalizeReservationImageOptions({aspectRatio:reserveRatio.input.value,size:reserveSize.input.value});
+      if (io.isBusy?.()) throw new Error('설정 처리가 끝난 뒤 조합 이미지 설정을 골라 주세요.');
+      const images=normalizeReservationImageOptions({aspectRatio:reserveRatio.input.value,size:reserveSize.input.value,mode:reserveMode.input.value,batchSize:Number(reserveBatch.input.value)});
       io.saveImageOptions?.(images);recipeImages=images;
     } catch(error) {setRecipeImages(recipeImages);io.notify(`이미지 설정 저장 실패: ${error.message}`);}
     preview();io.imageOptionsChanged?.();
   }
   setRecipeImages();
-  for (const control of [reserveRatio.input,reserveSize.input]) control.addEventListener('change',chooseRecipeImages);
+  for (const control of [reserveRatio.input,reserveSize.input,reserveMode.input,reserveBatch.input]) control.addEventListener('change',chooseRecipeImages);
   const combined = el('div',null,{class:'pq-preview','aria-label':'저장한 프롬프트 조합 미리보기'});
   const sequenceList=el('div',null,{class:'pq-sequence-list','aria-label':'합쳐지는 순서'});
   const missingNotice=el('div',null,{class:'pq-missing-notice',role:'status'});
@@ -1908,15 +1930,16 @@ function mountPresetEditor(parent, io) {
     for (const label of chunkList.querySelectorAll('[data-selection-id]')) {const index=[...selectedChunkIds].indexOf(label.dataset.selectionId);label.textContent=index<0 ? '' : String(index+1);}
   }
   const reservations = el('div',null,{class:'pq-reservation-list'});
-  const visibleChunks = () => filterChunks(chunkSearch.input.value,chunkFilter.input.value).filter(chunk=>!pickerClosed.has(chunk.folderId || ''));
+  const visibleChunks = () => filterChunks(chunkSearch.input.value,chunkFilter.input.value).filter(chunk=>pickerOpened.has(chunk.folderId || ''));
   const selectVisible = action('보이는 청크 모두 선택',()=>{for (const chunk of visibleChunks()) selectedChunkIds.add(chunk.id);renderChunkChoices();preview();});
   const clearSelected = action('청크 선택 전부 해제',()=>{selectedChunkIds.clear();renderChunkChoices();preview();});
   selectVisible.setAttribute('aria-label','보이는 청크 모두 선택');selectVisible.textContent='모두 선택';decorateIcon(selectVisible,'playlist_add');
   clearSelected.setAttribute('aria-label','청크 선택 전부 해제');clearSelected.textContent='선택 해제';decorateIcon(clearSelected,'close');
   const choiceActions=el('div',null,{class:'pq-actions'});choiceActions.append(selectVisible,clearSelected);
   function renderRecipeImages() {
-    imageSettingsNote.textContent=`${recipeImages.aspectRatio} · ${recipeImages.size} · 예약별로 저장`;
+    imageSettingsNote.textContent=`${recipeImages.aspectRatio} · ${recipeImages.size} · ${recipeImages.mode || '모델 기본값'} · ${recipeImages.batchSize}장 · 예약별 저장`;
   }
+  function recipeImageSummary(options) {return `${options.aspectRatio} · ${options.size}${Object.hasOwn(options,'mode') ? ` · ${options.mode || '모델 기본값'}` : ''}${options.batchSize ? ` · ${options.batchSize}장` : ''}`;}
   function preview() {
     renderRecipeImages();
     const preset = library.presets.find(item => item.id === reservePreset.input.value);
@@ -1953,9 +1976,9 @@ function mountPresetEditor(parent, io) {
     for (const group of chunkGroups()) {
       const chunks=visible.filter(chunk=>(chunk.folderId || '')===group.id);
       if (!chunks.length) continue;
-      const details=el('details',null,{class:'pq-folder-group','data-picker-folder':group.id});details.open=!pickerClosed.has(group.id);
+      const details=el('details',null,{class:'pq-folder-group','data-picker-folder':group.id});details.open=pickerOpened.has(group.id);
       const summary=el('summary');groupSummaries.set(group.id,summary);details.append(summary);
-      details.addEventListener('toggle',()=>{if (details.open) pickerClosed.delete(group.id);else pickerClosed.add(group.id);preview();});
+      details.addEventListener('toggle',()=>{if (details.open) pickerOpened.add(group.id);else pickerOpened.delete(group.id);preview();});
       for (const chunk of chunks) {
         const checkbox = el('input',null,{type:'checkbox','data-edit':'','aria-label':`청크 선택: ${chunk.name}`});
         checkbox.disabled=!!io.isBusy?.();
@@ -1990,7 +2013,7 @@ function mountPresetEditor(parent, io) {
       const character = reservation.snapshot?.character || library.characters.find(item => item.id === reservation.characterId);
       const chunkNames = reservation.snapshot ? reservation.snapshot.chunks.map(chunk=>chunk.name) : reservation.sceneIds.map(id=>library.scenes.find(item=>item.id===id)?.name || '(삭제된 청크)');
       row.append(el('strong',`${character?.name || '(삭제된 캐릭터)'} · ${chunkNames.join(' + ') || '청크 없음'}`),
-        el('small',`${preset?.name || '(삭제된 프리셋)'} · ${reservation.count}회 · ${reservation.imageOptions ? `${reservation.imageOptions.aspectRatio} · ${reservation.imageOptions.size}` : '이미지 기본 설정 사용'}${reservation.snapshot ? ' · 추가 시점의 설정 보관' : ''}`),action('이 예약 제외',async () => {
+        el('small',`${preset?.name || '(삭제된 프리셋)'} · ${reservation.count}회 · ${reservation.imageOptions ? recipeImageSummary(reservation.imageOptions) : '이미지 기본 설정 사용'}${reservation.snapshot ? ' · 추가 시점의 설정 보관' : ''}`),action('이 예약 제외',async () => {
           const next = copy(library); next.reservations = next.reservations.filter(item => item.id !== reservation.id);
           await commit(next,'선택한 예약을 제외했습니다. 이미 등록한 대기열은 유지됩니다.');
         }),orderControls('reservations',()=>reservation.id,`예약 ${character?.name || '삭제된 캐릭터'} ${chunkNames.join(' + ') || '청크 없음'}`,false,true));
@@ -2026,7 +2049,7 @@ function mountPresetEditor(parent, io) {
       for (const entry of entries) {
         const row=el('div',null,{class:'pq-history-card','data-combination-id':entry.id});
         const preset=library.presets.find(item=>item.id===entry.presetId),character=library.characters.find(item=>item.id===entry.characterId),chunks=entry.sceneIds.map(id=>library.scenes.find(item=>item.id===id)?.name || '(삭제된 청크)');
-        row.append(el('strong',entry.name || `${character?.name || '(삭제된 캐릭터)'} · ${chunks.join(' + ') || '청크 없음'}`),el('small',`${preset?.name || '(삭제된 프리셋)'} · ${entry.count}회 · ${entry.imageOptions ? `${entry.imageOptions.aspectRatio} · ${entry.imageOptions.size}` : '이미지 기본 설정 사용'}`));
+        row.append(el('strong',entry.name || `${character?.name || '(삭제된 캐릭터)'} · ${chunks.join(' + ') || '청크 없음'}`),el('small',`${preset?.name || '(삭제된 프리셋)'} · ${entry.count}회 · ${entry.imageOptions ? recipeImageSummary(entry.imageOptions) : '이미지 기본 설정 사용'}`));
         const controls=el('div',null,{class:'pq-actions'});
         const load=action('불러오기',()=>loadCombination(entry));load.setAttribute('aria-label',`조합 불러오기: ${entry.id}`);
         const star=action(entry.favorite ? '★' : '☆',()=>toggleFavorite(entry));star.setAttribute('aria-label',`조합 즐겨찾기: ${entry.id}`);star.setAttribute('aria-pressed',String(entry.favorite));
@@ -2101,7 +2124,7 @@ function mountPresetEditor(parent, io) {
       library=next;selectedChunkIds=new Set();missingMaterials=[];loadedCombination=false;triggerPosition=1;
       setRecipeImages();
       presetSearch.input.value='';
-      chunkSearch.input.value='';chunkFilter.input.value='';pickerClosed.clear();
+      chunkSearch.input.value='';chunkFilter.input.value='';pickerOpened.clear();pickerOpened.add('');
       for (const editor of [characterEditor,chunkEditor]) editor.resetView();
       refreshLists();
       commonPrompt.input.value=library.common.prompt;commonNegative.input.value=library.common.negativePrompt;
@@ -2387,7 +2410,8 @@ function mountPresetEditor(parent, io) {
   const apiKey=createSessionApiKey();
   const rememberedKey=createRememberedApiKey(apiKey,typeof GM_getValue==='function' && typeof GM_setValue==='function' && typeof GM_deleteValue==='function' ? {get:GM_getValue,set:GM_setValue,remove:GM_deleteValue} : null);
   let apiOptions=normalizeApiOptions();
-  function currentApiOptions() {return normalizeApiOptions({...apiOptions,...presetEditor?.getImageOptions?.()});}
+  function currentApiOptions() {const {batchSize,...images}=presetEditor?.getImageOptions?.() || {};return normalizeApiOptions({...apiOptions,...images});}
+  function currentApiBatchSize() {return presetEditor?.getImageOptions?.().batchSize || Number(panel.querySelector('[data-image-count]')?.value) || 1;}
   const api=createOfficialApiClient(typeof GM_xmlhttpRequest==='function' ? GM_xmlhttpRequest : null,()=>apiKey.get());
   window.addEventListener('pagehide',()=>apiKey.clear());
   let choosingFolder = false;
@@ -2561,7 +2585,7 @@ function mountPresetEditor(parent, io) {
         }
       }
       if (storage.mode === 'download') resetDownloadProgress(jobs);
-      const selectedCount=Number(panel.querySelector('[data-image-count]').value);
+      const selectedCount=currentApiBatchSize();
       runImageCount=selectedCount || (newJobs.length ? expectedCount() : 1);
       const payloads=newJobs.filter(item=>!item.apiPayload).map(job=>[job,buildApiPayload(job,job.apiOptions || currentApiOptions(),job.apiBatchSize || runImageCount,crypto.getRandomValues(new Uint32Array(1))[0])]);
       for (const [job,payload] of payloads) job.apiPayload=payload;
@@ -2701,7 +2725,7 @@ function mountPresetEditor(parent, io) {
           await locked(()=>{
             const index=jobs.findIndex(item=>item.id===job.id);
             if (index<0) throw new Error('대기 작업을 찾지 못했습니다.');
-            const next=reconfigureQueuedApiJob(jobs[index],currentApiOptions(),Number(panel.querySelector('[data-image-count]').value) || expectedCount(),crypto.getRandomValues(new Uint32Array(1))[0]);
+            const next=reconfigureQueuedApiJob(jobs[index],currentApiOptions(),currentApiBatchSize(),crypto.getRandomValues(new Uint32Array(1))[0]);
             const before=jobs[index];jobs[index]=next;
             try {persist();} catch(error) {jobs[index]=before;throw error;}
           });
@@ -2771,7 +2795,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.9.12', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.9.14', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
     style.textContent += '#local-pixai-queue [data-header]{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;height:32px;margin-bottom:8px;background:#222529}#local-pixai-queue [data-collapse]{width:32px;height:32px;flex:none;margin:0;padding:6px;line-height:0}#local-pixai-queue [data-message]{position:sticky;top:40px;z-index:1;max-height:100px;overflow:auto;padding:7px 9px;border:1px solid #505862;border-radius:7px;background:#222529}#local-pixai-queue [data-action-message]{white-space:pre-wrap;margin:4px 0 10px;padding:7px 9px;border-left:3px solid #94bedf;background:#29343d;color:#edf1f5}';
@@ -2817,9 +2841,9 @@ function mountPresetEditor(parent, io) {
     const budget = node('input',null,{type:'number',min:'1',value:'7800','data-edit':'','aria-label':'생성 1회 크레딧 상한'});
     const budgetLabel=node('small','생성 1회 크레딧 상한 (빈칸은 제한 없음)');panel.append(budgetLabel,budget);
     const imageCountLabel=node('label','생성당 이미지 수');
-    const imageCount=node('select',null,{'data-edit':'','data-image-count':'','aria-label':'생성당 이미지 수'});
+    const imageCount=node('select',null,{'data-edit':'','data-image-count':'','aria-label':'기본 생성당 이미지 수'});
     for (const [value,name] of [[4,'4장 배치'],[1,'1장'],[0,'사이트 선택 유지']]) imageCount.append(node('option',name,{value:String(value)}));
-    imageCount.value='4';imageCountLabel.append(imageCount);
+    imageCount.value='4';imageCountLabel.append(imageCount);imageCountLabel.hidden=true;
     const inFlightLabel=node('label','미리 등록할 작업 수 (1~10)');
     const maxInFlight=node('input',null,{type:'number',min:'1',max:'10',value:'3','data-edit':'','data-max-in-flight':'','aria-label':'미리 등록할 작업 수'});
     inFlightLabel.append(maxInFlight);
@@ -2866,7 +2890,6 @@ function mountPresetEditor(parent, io) {
       message=`미제출 대기 작업 ${count}건에 ${options.aspectRatio} (가로:세로) · ${options.size} 적용 완료. 새 생성은 하지 않았습니다.`;render();
     });applyImageOptions.dataset.edit='';applyImageOptions.dataset.siteIo='';
     const imageActions=node('details');imageActions.append(node('summary','기존 대기 작업의 비율·크기 변경'),note('이미 등록한 작업은 기존 비율·크기를 유지합니다.','아래 버튼은 미제출 작업에만 현재 선택값을 적용합니다. 예약별로 다른 비율을 유지하려면 적용 대상을 확인하세요.'),applyImageOptions);
-    apiField('mode','츠바키 API 생성 모드',[['','모델 기본값 (모드 보내지 않음)'],['lite','Lite'],['standard','Standard'],['pro','Pro'],['ultra','Ultra']]);
     apiField('style','츠바키 API 스타일',[['','스타일 보내지 않음'],...API_STYLES.map(value=>[value,value])]);
     apiField('seed','API 시드 (빈칸은 작업별 랜덤)').setAttribute('placeholder','0~4294967295');
     const costAck=node('input',null,{type:'checkbox','data-api-cost-ack':'','data-edit':''});
@@ -2878,7 +2901,7 @@ function mountPresetEditor(parent, io) {
       catch(error) {costAck.checked=savedCostAck;message=`과금 안내 체크 저장 실패: ${error.message}`;render();}
     });
     const costAckLabel=node('label',null,{class:'pq-check-label'});costAckLabel.append(costAck,node('span','시작은 크레딧을 사용하는 공식 API 생성 요청이며, 기존 사이트 비용 상한을 이 API 실행에 적용할 수 없음을 확인했습니다.'));
-    apiContent.append(note('이미지 비율·크기는 조합 예약에서 고릅니다 · 자세히','모델·LoRA는 프리셋에서, 생성 모드·스타일·시드는 여기서 정합니다. 사이트의 해상도·스타일·참조 설정은 자동 복사하지 않습니다. LoRA 수치는 0~1, 최대 5개입니다.'),costAckLabel);
+    apiContent.append(note('비율·크기·생성 모드·배치 수는 조합 예약에서 고릅니다 · 자세히','모델·LoRA는 프리셋에서, 스타일·시드는 여기서 정합니다. 사이트의 해상도·스타일·참조 설정은 자동 복사하지 않습니다. LoRA 수치는 0~1, 최대 5개입니다.'),costAckLabel);
     function readApiFields() {return normalizeApiOptions({...apiOptions,...Object.fromEntries(Object.entries(apiFields).map(([key,input])=>[key,input.value]))});}
     function readOptions() {
       return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value),imageCount:Number(imageCount.value),maxInFlight:Number(maxInFlight.value),api:readApiFields()});
@@ -2908,7 +2931,7 @@ function mountPresetEditor(parent, io) {
       if (jobs.length + parts.length * count > 1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
       const added = [];
       for (let index=0; index<parts.length; index++) for (let n=0; n<count; n++) added.push({
-        id:crypto.randomUUID(), title:`${title.value.trim() || 'PixAI'}_${index+1}_${n+1}`, prompt:parts[index], maxCredits, state:'queued', saved:[],apiOptions:currentApiOptions(),apiBatchSize:Number(imageCount.value) || expectedCount()
+        id:crypto.randomUUID(), title:`${title.value.trim() || 'PixAI'}_${index+1}_${n+1}`, prompt:parts[index], maxCredits, state:'queued', saved:[],apiOptions:currentApiOptions(),apiBatchSize:currentApiBatchSize()
       });
       jobs.push(...added); persist(); prompts.value=''; message=`${added.length}개 작업을 추가했습니다.`; render();
     }));
@@ -2924,10 +2947,12 @@ function mountPresetEditor(parent, io) {
       isCompact:()=>(panel.getBoundingClientRect().width || document.documentElement?.clientWidth || window.innerWidth)<=760,
       loadLayout:key=>JSON.parse(localStorage.getItem(`local.pixai-web-queue.layout.v1.${key}`) || 'null'),
       saveLayout:(key,value)=>localStorage.setItem(`local.pixai-web-queue.layout.v1.${key}`,JSON.stringify(value)),
-      notify:notifyAction,getImageOptions:()=>apiOptions,
-      saveImageOptions:images=>{
-        const options=normalizeSettingsOptions({...savedOptions,api:{...apiOptions,...normalizeReservationImageOptions(images)}});
+      notify:notifyAction,getImageOptions:()=>apiOptions,getBatchSize:()=>Number(imageCount.value) || 1,
+      saveImageOptions:value=>{
+        const {batchSize,...images}=normalizeReservationImageOptions(value);
+        const options=normalizeSettingsOptions({...savedOptions,imageCount:batchSize ?? savedOptions.imageCount,api:{...apiOptions,...images}});
         localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));savedOptions=options;apiOptions=normalizeApiOptions(options.api);
+        imageCount.value=String(options.imageCount);
       },imageOptionsChanged:render,
       loadDraft:()=>JSON.parse(localStorage.getItem(COMPOSE_DRAFT_KEY) || 'null'),
       saveDraft:draft=>localStorage.setItem(COMPOSE_DRAFT_KEY,JSON.stringify(normalizeComposeDraft(draft))),
@@ -2935,7 +2960,7 @@ function mountPresetEditor(parent, io) {
       applySettings:value=>settingsAction(()=>settings.apply(value)),
       enqueue:value=>queueEdit(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
-        for (const job of added) {job.apiOptions=normalizeApiOptions({...currentApiOptions(),...job.apiOptions});job.apiBatchSize=Number(imageCount.value) || expectedCount();}
+        for (const job of added) {job.apiOptions=normalizeApiOptions({...currentApiOptions(),...job.apiOptions});job.apiBatchSize=job.apiBatchSize || currentApiBatchSize();}
         if (jobs.length+added.length>1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
         if (value.reservations.some(res=>jobs.some(job=>job.composition?.reservation?.id===res.id))) throw new Error('이미 등록된 예약이 있습니다. 해당 예약을 제외하고 새로 예약해 주세요.');
         jobs.push(...added);persist();
@@ -2963,7 +2988,7 @@ function mountPresetEditor(parent, io) {
     }
     function backupButton(label,run) {const control=button(label,()=>{idleSettings();return run();});control.dataset.edit='';return control;}
     const saveSettings=backupButton('설정 내보내기',async()=>{
-      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.12',exportedAt:new Date().toISOString()});
+      const data=makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.9.14',exportedAt:new Date().toISOString()});
       const text=JSON.stringify(data,null,2);parseSettingsBackup(text);
       const name=`PixAI_설정_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
       const blob=new Blob([text],{type:'application/json'});
@@ -3012,7 +3037,7 @@ function mountPresetEditor(parent, io) {
           if (stopRequested) throw new Error('설정 파일 읽기가 중지됐습니다.');
           pendingSettings={data,libraryBefore:localStorage.getItem(LIBRARY_KEY),optionsBefore:localStorage.getItem(OPTIONS_KEY)};
           const library=data.library;
-          preview.append(node('strong',file.name),node('p',`프리셋 ${library.presets.length}개 · 캐릭터 ${library.characters.length}개 · 청크 ${library.scenes.length}개 · 폴더 ${library.chunkFolders.length}개 · 예약 ${library.reservations.length}개 · 조합 기록 ${(library.combinations || []).length}개 · 즐겨찾기 ${(library.combinations || []).filter(item=>item.favorite).length}개`),
+          preview.append(node('strong',file.name),node('p',`프리셋 ${library.presets.length}개 · 캐릭터 ${library.characters.length}개 · 청크 ${library.scenes.length}개 · 청크 폴더 ${library.chunkFolders.length}개 · 캐릭터 폴더 ${library.characterFolders.length}개 · 예약 ${library.reservations.length}개 · 조합 기록 ${(library.combinations || []).length}개 · 즐겨찾기 ${(library.combinations || []).filter(item=>item.favorite).length}개`),
             node('small','적용하면 현재 저장한 항목과 편집 중인 내용이 교체됩니다. 적용 전 설정은 이 브라우저에 보관합니다. 생성 작업·저장 폴더 권한은 가져오지 않습니다.'),
             node('small',data.options ? `크레딧 상한 ${data.options.maxCredits ?? '제한 없음'} · 반복 ${data.options.repeat}회` : '이전 백업 형식: 현재 크레딧 상한·파일 이름·반복 횟수를 유지합니다.'),applyImport,
             backupButton('불러오기 취소',()=>{clearImport();message='설정 불러오기를 취소했습니다.';render();}));
@@ -3298,8 +3323,6 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue [data-compose-mode="choices"] .pq-compose-review,#local-pixai-queue [data-compose-mode="choices"] .pq-compose-schedule,#local-pixai-queue [data-compose-mode="review"] .pq-compose-choices,#local-pixai-queue [data-compose-mode="review"] .pq-compose-schedule,#local-pixai-queue [data-compose-mode="schedule"] .pq-compose-choices,#local-pixai-queue [data-compose-mode="schedule"] .pq-compose-review{display:none!important}
 #local-pixai-queue .pq-resizable-layout:not(.pq-compose-layout){display:flex;flex-direction:column}
 #local-pixai-queue .pq-resizable-layout:not(.pq-compose-layout)>.pq-pane-handle{display:none}
-#local-pixai-queue [data-page="characters"] .pq-library-mode{display:flex;gap:5px;padding:5px 10px}
-#local-pixai-queue [data-page="characters"][data-library-mode="browse"] .pq-library-editor,#local-pixai-queue [data-page="characters"][data-library-mode="edit"] .pq-library-browse{display:none}
 #local-pixai-queue [data-page="characters"] .pq-resizable-layout>div:not(.pq-pane-handle){flex:1!important;width:100%}
 #local-pixai-queue .pq-presets .pq-inline-library .pq-library-editor{display:block}#local-pixai-queue .pq-presets [data-page="chunks"] .pq-library-editor{display:grid}
 #local-pixai-queue .pq-inline-library>.pq-library-browse{display:flex!important;padding:8px}
@@ -3365,7 +3388,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.12', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.9.14', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

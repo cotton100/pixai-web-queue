@@ -20,7 +20,7 @@ function fixture() {
       {id:'p2',name:'Other',model:{id:'102',versionId:'202',name:'Other model'},loras:[]}],
     characters:[{id:'c1',name:'Character',prompt:'(character:1.1)',negativePrompt:'other'},
       {id:'c2',name:'Second',prompt:'1boy',negativePrompt:''}],
-    chunkFolders:[{id:'fB',name:'행동'},{id:'fA',name:'표정'}],
+    characterFolders:[],chunkFolders:[{id:'fB',name:'행동'},{id:'fA',name:'표정'}],
     scenes:[{id:'a1',name:'Smile',prompt:'smile, common',negativePrompt:'sad',folderId:'fA'},
       {id:'u1',name:'Outside',prompt:'outdoor\n(wind:1.2)',negativePrompt:''},
       {id:'b1',name:'Running',prompt:'running',negativePrompt:'still',folderId:'fB'},
@@ -31,6 +31,23 @@ function fixture() {
       {id:'r2',presetId:'p2',characterId:'c2',sceneIds:[],count:1}]};
 }
 function expand(library) {let n=0;return expandPresetReservations(library,{idFactory:()=>`job-${++n}`});}
+
+test('character folders normalize independently and round-trip membership while old libraries remain compatible',()=>{
+  const old=fixture();delete old.characterFolders;const migrated=normalizePresetLibrary(old);assert.deepEqual(plain(migrated.characterFolders),[]);
+  const lib=createChunkFolder(old,'주연',['c1'],()=> 'cast','characters');assert.equal(lib.characters.find(item=>item.id==='c1').folderId,'cast');assert.equal(lib.chunkFolders.length,2);
+  const backup=makeSettingsBackup(lib,{maxCredits:null,filePrefix:'',repeat:1},{appVersion:'0.9.14',exportedAt:'2026-10-11T00:00:00.000Z'});assert.deepEqual(plain(parseSettingsBackup(JSON.stringify(backup)).library),plain(lib));
+  const bad=copy(lib);bad.characters.find(item=>item.id==='c2').folderId='missing';assert.throws(()=>normalizePresetLibrary(bad),/폴더/);
+  for (const folders of [null,{},[{id:'cast',name:'A'},{id:'cast',name:'B'}]]) {const invalid=copy(lib);invalid.characterFolders=folders;assert.throws(()=>normalizePresetLibrary(invalid));}
+  const extra=copy(backup);extra.library.characterFolders[0].apiKey='fixture';assert.throws(()=>parseSettingsBackup(JSON.stringify(extra)));
+});
+
+test('character folder moves and copies preserve exact prompts, frozen reservations and input data',()=>{
+  const original=frozen(fixture()),before=plain(original);let lib=createChunkFolder(original,'주연',['c1'],()=> 'cast','characters');
+  lib=moveChunksTo(lib,['c2'],'cast','c1',false,'characters');assert.deepEqual(ids(orderedChunks(lib,'characters')),['c2','c1']);assert.equal(lib.characters[0].prompt,'1boy');
+  lib=duplicateChunks(lib,['c1'],()=> 'copy','characters');assert.equal(lib.characters.find(item=>item.id==='copy').folderId,'cast');assert.equal(lib.characters.find(item=>item.id==='copy').prompt,'(character:1.1)');
+  lib=removeChunks(lib,['copy'],'characters');lib=removeChunkFolder(lib,'cast','characters');assert(lib.characters.every(item=>!item.folderId));assert.deepEqual(plain(lib.reservations),before.reservations);assert.deepEqual(plain(original),before);
+  assert.throws(()=>moveChunksTo(lib,['c1'],'missing',null,false,'characters'),/폴더/);assert.throws(()=>moveChunksTo(lib,['c1'],'',null,false,'presets'),/목록/);
+});
 function parse(library) {return parseSettingsBackup(JSON.stringify(library));}
 const options={maxCredits:7800,filePrefix:'assets',repeat:1};
 const meta={appVersion:'0.4.0',exportedAt:'2026-10-07T02:03:04.000Z'};

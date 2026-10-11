@@ -11,10 +11,10 @@ test('visible compose image controls preserve different reservation choices with
   await f.press('이 조합 예약 추가');const first=copy(f.library().reservations[0]);
   f.setImageOptions({aspectRatio:'3:5',size:'1k'});assert.match(f.field('현재 조합 이미지 설정').textContent,/5:3.*1.5k/);
   await f.select('조합 이미지 비율','3:5');await f.select('조합 이미지 크기','1k');await f.press('이 조합 예약 추가');
-  assert.deepEqual(f.library().reservations[0],first);assert.deepEqual(first.imageOptions,{aspectRatio:'5:3',size:'1.5k'});assert.deepEqual(f.library().reservations[1].imageOptions,{aspectRatio:'3:5',size:'1k'});
+  assert.deepEqual(f.library().reservations[0],first);assert.deepEqual(first.imageOptions,{aspectRatio:'5:3',size:'1.5k',mode:'',batchSize:4});assert.deepEqual(f.library().reservations[1].imageOptions,{aspectRatio:'3:5',size:'1k',mode:'',batchSize:4});
   const images=f.field('현재 조합 이미지 설정').parentElement,choices=images.parentElement;assert.match(choices.className,/pq-compose-choices/);assert.equal(choices.children[1].className,'pq-inline pq-reserve-selectors');assert.equal(choices.children[2],images);assert.equal(images.hidden,undefined);assert.equal(f.fields('조합 이미지 설정').length,0);
   assert.match(f.ui.root.querySelectorAll('.pq-reservation')[0].textContent,/5:3.*1.5k/);assert.match(f.ui.root.querySelectorAll('.pq-reservation')[1].textContent,/3:5.*1k/);
-  await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs[0].apiOptions,first.imageOptions);assert.deepEqual(f.jobs[1].apiOptions,{aspectRatio:'3:5',size:'1k'});
+  await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs[0].apiOptions,{aspectRatio:'5:3',size:'1.5k',mode:''});assert.deepEqual(f.jobs[1].apiOptions,{aspectRatio:'3:5',size:'1k',mode:''});assert.equal(f.jobs[0].apiBatchSize,4);
 });
 
 test('custom recipe images reload from favorites and backups while old records reset custom draft dimensions',async t=>{
@@ -30,7 +30,7 @@ test('reservation image choice is atomic on library storage failure and button l
   const f=fixture(t);
   const ratio=f.field('조합 이미지 비율: 5:3 · 가로');await ratio.emit('click');const size=f.field('조합 이미지 크기: 1.5k');await size.emit('click');
   const before=f.library();f.setSaveFailure('disk full');await f.press('이 조합 예약 추가');assert.deepEqual(f.library(),before);assert.equal(f.field('조합 이미지 비율').value,'5:3');assert.match(f.messages.at(-1),/disk full/);
-  f.setSaveFailure(null);await f.press('이 조합 예약 추가');assert.deepEqual(f.library().reservations[0].imageOptions,{aspectRatio:'5:3',size:'1.5k'});
+  f.setSaveFailure(null);await f.press('이 조합 예약 추가');assert.deepEqual(f.library().reservations[0].imageOptions,{aspectRatio:'5:3',size:'1.5k',mode:'',batchSize:4});
   assert.match(f.field('현재 조합 이미지 설정').textContent,/5:3.*1.5k/);
 });
 
@@ -175,8 +175,8 @@ function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOpt
   t.after(()=>{if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument;});
   const ui=core.mountPresetEditor(parent,{
     load:()=>copy(loadResult===undefined?library:loadResult),save:value=>{if(saveFailure)throw new Error(saveFailure);library=core.normalizePresetLibrary(copy(value));saves.push(copy(library));},
-    isBusy:()=>busy,getImageOptions:()=>preferences.imageOptions,
-    saveImageOptions:value=>{if(imageSaveFailure)throw new Error(imageSaveFailure);preferences.imageOptions=core.normalizeApiOptions(value);},
+    isBusy:()=>busy,getImageOptions:()=>preferences.imageOptions,getBatchSize:()=>preferences.batchSize || 4,
+    saveImageOptions:value=>{if(imageSaveFailure)throw new Error(imageSaveFailure);const {batchSize,...images}=value;preferences.imageOptions=core.normalizeApiOptions(images);preferences.batchSize=batchSize;},
     loadDraft:()=>copy(preferences.draft),saveDraft:value=>{preferences.draft=copy(value);},
     captureSettings:async()=>copy(captured),applySettings:async()=>{},notify:message=>messages.push(message),
     enqueue:async value=>{jobs.push(...core.expandPresetReservations(value,{idFactory:()=>`job-${++sequence}`,maxCredits:7800}));},
@@ -197,6 +197,56 @@ function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOpt
     setBusy:value=>{busy=value;for(const element of all().filter(item=>Object.hasOwn(item.dataset,'edit')))element.disabled=busy||element.dataset.unavailable==='true';}};
 }
 
+test('compose batch and mode freeze per reservation and reach different API payloads',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.select('조합 생성 모드','pro');await f.select('생성당 이미지 수','4');await f.press('이 조합 예약 추가');
+  const first=copy(f.library().reservations[0]);await f.select('조합 생성 모드','ultra');await f.select('생성당 이미지 수','1');await f.press('이 조합 예약 추가');
+  assert.deepEqual(f.library().reservations[0],first);assert.equal(f.library().combinations.length,2);await f.press('예약 전부를 대기열에 등록');
+  const payloads=f.jobs.map(job=>core.buildApiPayload(job,job.apiOptions,job.apiBatchSize,7));
+  assert.deepEqual(payloads.map(item=>[item.mode,item.batchSize]),[['pro',4],['ultra',1]]);assert.equal(first.imageOptions.mode,'pro');assert.equal(first.imageOptions.batchSize,4);
+  assert.equal(f.field('생성당 이미지 수').parentElement.hidden,true);assert.equal(f.field('조합 생성 모드').parentElement.hidden,true);
+  assert.match(f.field('현재 조합 이미지 설정').textContent,/ultra.*1장/);
+});
+
+test('batch and mode restore through draft, favorite and settings backup without requests',async t=>{
+  const f=fixture(t);await f.select('조합 생성 모드','ultra');await f.select('생성당 이미지 수','1');await f.press('현재 조합 즐겨찾기');
+  const id=f.library().combinations[0].id,fresh=fixture(t,f.library(),f.preferences);assert.equal(fresh.field('조합 생성 모드').value,'ultra');assert.equal(fresh.field('생성당 이미지 수').value,'1');
+  const backup=core.makeSettingsBackup(f.library(),{maxCredits:null,filePrefix:'',repeat:1},{appVersion:'0.9.14',exportedAt:'2026-10-11T00:00:00.000Z'});const restored=fixture(t,core.parseSettingsBackup(JSON.stringify(backup)).library);
+  await restored.press(`조합 불러오기: ${id}`);assert.equal(restored.field('조합 생성 모드').value,'ultra');assert.equal(restored.field('생성당 이미지 수').value,'1');assert.equal(restored.jobs.length,0);
+  await restored.press('이 조합 예약 추가');assert.equal(restored.library().reservations[0].imageOptions.batchSize,1);
+});
+
+test('mode and batch storage failures restore actual controls and retain the last valid draft',async t=>{
+  const f=fixture(t);await f.select('조합 생성 모드','pro');const before=copy(f.preferences.draft);f.setImageSaveFailure('disk full');
+  await f.select('조합 생성 모드','ultra');await f.select('생성당 이미지 수','1');assert.equal(f.field('조합 생성 모드').value,'pro');assert.equal(f.field('생성당 이미지 수').value,'4');assert.deepEqual(f.preferences.draft,before);
+  assert.match(f.messages.at(-1),/이미지 설정 저장 실패.*disk full/);f.setImageSaveFailure(null);await f.select('생성당 이미지 수','1');assert.equal(f.preferences.draft.imageOptions.batchSize,1);
+});
+
+test('named folders start folded in both libraries and composition and keep manual expansion during refresh',async t=>{
+  const initial=folderSeed();initial.characterFolders=[{id:'cast',name:'주연'}];initial.characters[0].folderId='cast';initial.characters.push({id:'c2',name:'Bob',prompt:'boy',negativePrompt:''});const f=fixture(t,initial);
+  const manager=f.ui.root.querySelectorAll('[data-chunk-folder]').find(item=>item.dataset.chunkFolder==='f1'),characters=f.ui.root.querySelectorAll('[data-character-folder]').find(item=>item.dataset.characterFolder==='cast');
+  const picker=f.ui.root.querySelectorAll('[data-character-picker-folder]').find(item=>item.dataset.characterPickerFolder==='cast');assert.equal(manager.open,false);assert.equal(characters.open,false);assert.equal(picker.open,false);assert.equal(pickerGroup(f,'f1').open,false);
+  assert.equal(f.button('캐릭터 Alice 위로').disabled,true);assert.equal(f.button('캐릭터 Alice 아래로').disabled,true);assert.equal(f.button('캐릭터 Bob 위로').disabled,true);assert.equal(f.button('캐릭터 Bob 아래로').disabled,true);
+  pickerGroup(f,'f1').open=true;await pickerGroup(f,'f1').emit('toggle');characters.open=true;await characters.emit('toggle');f.ui.refresh();assert.equal(pickerGroup(f,'f1').open,true);assert.equal(f.ui.root.querySelectorAll('[data-character-folder]').find(item=>item.dataset.characterFolder==='cast').open,true);
+  const fresh=fixture(t,f.library(),f.preferences);assert.equal(pickerGroup(fresh,'f1').open,false);assert.equal(fresh.ui.root.querySelectorAll('[data-character-picker-folder]').find(item=>item.dataset.characterPickerFolder==='cast').open,false);
+});
+
+test('character quick folder assignment, movement, duplication and deletion retain drafts and frozen reservations',async t=>{
+  const f=fixture(t);await f.press('이 조합 예약 추가');const reservation=copy(f.library().reservations[0]);await f.select('저장한 캐릭터','c1');f.field('캐릭터 프롬프트').value='unsaved character';
+  await f.press('캐릭터 소속 새 폴더');f.field('캐릭터 소속 새 폴더 이름').value='주연';await f.press('만들고 캐릭터 폴더 선택');const id=f.library().characterFolders[0].id;
+  assert.equal(f.field('캐릭터 폴더').value,id);assert.equal(f.library().characters[0].folderId,undefined);assert.equal(f.field('캐릭터 프롬프트').value,'unsaved character');await f.press('캐릭터 저장');
+  assert.equal(f.library().characters[0].folderId,id);const check=f.field('캐릭터 관리 선택: Alice');check.checked=true;await check.emit('change');await f.press('캐릭터 선택 복제');
+  assert.equal(f.library().characters.length,2);assert.equal(f.library().characters[1].folderId,id);assert.equal(f.library().characters[1].prompt,'unsaved character');await f.press('캐릭터 선택 삭제');assert.equal(f.library().characters.length,1);
+  await f.select('관리할 캐릭터 폴더',id);await f.press('캐릭터 선택 폴더 삭제');assert.equal(f.library().characterFolders.length,0);assert.equal(f.library().characters[0].folderId,undefined);assert.deepEqual(f.library().reservations[0],reservation);
+  await f.press('예약 전부를 대기열에 등록');assert.match(f.jobs[0].prompt,/character tags/);assert(!f.jobs[0].prompt.includes('unsaved character'));
+});
+
+test('character movement to a newly created destination is atomic and preserves an unsaved editor',async t=>{
+  const f=fixture(t);await f.select('저장한 캐릭터','c1');f.field('캐릭터 프롬프트').value='unsaved';const check=f.field('캐릭터 관리 선택: Alice');check.checked=true;await check.emit('change');
+  await f.press('캐릭터 이동 대상 새 폴더');f.field('캐릭터 이동 대상 새 폴더 이름').value='이동';f.setSaveFailure('disk full');const before=f.library();await f.press('만들고 선택 캐릭터 이동');assert.deepEqual(f.library(),before);assert.equal(f.field('캐릭터 프롬프트').value,'unsaved');
+  f.setSaveFailure(null);await f.press('만들고 선택 캐릭터 이동');const id=f.library().characterFolders[0].id;assert.equal(f.library().characters[0].folderId,id);assert.equal(f.field('캐릭터 폴더').value,id);assert.equal(f.field('캐릭터 프롬프트').value,'unsaved');
+  assert.equal(f.field('캐릭터 관리 선택: Alice').checked,true);
+});
+
 test('library folders, characters and presets drag directly before/after targets while keeping drafts and reservations',async t=>{
   const initial=folderSeed();initial.presets.push({...copy(initial.presets[0]),id:'p2',name:'Other'});initial.characters.push({id:'c2',name:'Bob',prompt:'boy',negativePrompt:''});
   const f=fixture(t,initial);await f.choose('표정');await f.press('이 조합 예약 추가');const reservation=copy(f.library().reservations[0]);
@@ -209,9 +259,17 @@ test('library folders, characters and presets drag directly before/after targets
     await target.emit('drop',{dataTransfer,clientY:after?160:110});
   };
   await drag('폴더 이동: 행동 폴더','f2','f1');assert.deepEqual(f.library().chunkFolders.map(i=>i.id),['f2','f1']);
-  await drag('캐릭터 이동: Bob','c2','c1');assert.deepEqual(f.library().characters.map(i=>i.id),['c2','c1']);
+  const characterTransfer=transfer(),characterHandle=f.field('캐릭터 이동: Bob');await characterHandle.emit('dragstart',{dataTransfer:characterTransfer});const characterTarget=managedRow(f,'c1');await characterTarget.emit('drop',{dataTransfer:characterTransfer,clientY:104});assert.deepEqual(f.library().characters.map(i=>i.id),['c2','c1']);
   await drag('프리셋 이동: Asset','p1','p2',true);assert.deepEqual(f.library().presets.map(i=>i.id),['p2','p1']);
   assert.equal(f.field('청크 프롬프트').value,'unsaved draft');assert.deepEqual(f.library().reservations[0],reservation);assert.equal(f.jobs.length,0);
+});
+
+test('character drag compares character changes even when imported chunk IDs overlap, and skips real no-op saves',async t=>{
+  const initial=seed();initial.characters.push({id:'c2',name:'Bob',prompt:'boy',negativePrompt:''});
+  initial.scenes.forEach((item,index)=>item.id=`c${index+1}`);const f=fixture(t,initial),chunks=copy(f.library().scenes);
+  const drop=async()=>{const dataTransfer=transfer(),handle=f.field('캐릭터 이동: Bob');await handle.emit('dragstart',{dataTransfer});let row=f.field('캐릭터 이동: Alice');while (!row.dataset.chunkId) row=row.parentElement;await row.emit('drop',{dataTransfer,clientY:104});};
+  await drop();assert.deepEqual(f.library().characters.map(item=>item.id),['c2','c1']);assert.deepEqual(f.library().scenes,chunks);
+  const writes=f.saves.length;await drop();assert.equal(f.saves.length,writes);assert.equal(f.jobs.length,0);
 });
 
 test('library reordering rejects busy/synthetic/foreign drags and preserves the original on storage failure',async t=>{
@@ -569,6 +627,7 @@ test('manager search matches prompt text, keeps hidden edited IDs and drafts, an
 test('picker filtering and folding retain hidden selections; select-all adds only visible unfolded matches and clear removes every selection',async t=>{
   const f=fixture(t,folderSeed());await f.choose('표정');
   await type(f,'예약 청크 검색','waving');assert.equal(f.fields('청크 선택: 표정').length,0);
+  pickerGroup(f,'f2').open=true;await pickerGroup(f,'f2').emit('toggle');
   assert.match(f.field('선택한 청크 요약').textContent,/표정/);assert.match(f.field('선택한 청크 요약').textContent,/목록 밖에 선택 1개/);
   await f.press('보이는 청크 모두 선택');assert.equal(f.field('청크 선택: 행동').checked,true);assert.match(f.preview(),/smiling, waving/);
   await type(f,'예약 청크 검색','');const group=pickerGroup(f,'f1');group.open=false;await group.emit('toggle');
@@ -636,7 +695,7 @@ test('import reload resets folder views and selection drafts while filling impor
   f.setLibrary(imported);f.ui.reload();
   assert.equal(f.field('청크 검색').value,'');assert.equal(f.field('예약 청크 검색').value,'');assert.equal(f.field('청크 폴더 필터').value,'');assert.equal(f.field('예약 청크 폴더 필터').value,'');
   assert.equal(f.field('청크 폴더 이름').value,'Imported folder');assert.equal(f.field('청크 폴더').value,'f2');assert.equal(f.field('청크 프롬프트').value,'imported smile');
-  assert.equal(f.field('청크 선택: 행동').checked,false);assert.equal(pickerGroup(f,'f2').open,true);
+  assert.equal(f.field('청크 선택: 행동').checked,false);assert.equal(pickerGroup(f,'f2').open,false);
   assert.match(f.field('선택한 청크 요약').textContent,/선택한 청크 없음/);
 });
 

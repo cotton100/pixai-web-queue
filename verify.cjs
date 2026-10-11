@@ -388,14 +388,15 @@ function panelFixture(nativePicker, gm={}) {
 
 const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1',draft:'local.pixai-web-queue.compose.v1',ack:'local.pixai-web-queue.api-cost-ack.v1'};
 
-test('ratio and size appear once at compose top and persist through fresh mount and unrelated setting changes',()=>{
+test('ratio, size, mode and batch appear once in compose and persist through fresh mount and unrelated setting changes',()=>{
   const f=panelFixture(null),ratio=f.panel.querySelector('[aria-label="조합 이미지 비율"]'),size=f.panel.querySelector('[aria-label="조합 이미지 크기"]');
   assert.equal(ratio.closest('[data-page]').getAttribute('data-page'),'compose');assert.equal(f.panel.querySelectorAll('[aria-label="조합 이미지 비율"]').length,1);
   assert.equal(f.panel.querySelector('[aria-label="API 이미지 비율"]'),null);assert.equal(f.panel.querySelector('[aria-label="API 이미지 크기"]'),null);
   ratio.value='5:3';ratio.fire('change');size.value='1.5k';size.fire('change');
-  const mode=f.panel.querySelector('[aria-label="츠바키 API 생성 모드"]');mode.value='pro';mode.fire('change');
+  const mode=f.panel.querySelector('[aria-label="조합 생성 모드"]');mode.value='pro';mode.fire('change');const batch=f.panel.querySelector('[aria-label="생성당 이미지 수"]');batch.value='1';batch.fire('change');
+  assert.equal(mode.closest('[data-page]').getAttribute('data-page'),'compose');assert.equal(batch.closest('[data-page]').getAttribute('data-page'),'compose');assert.equal(f.panel.querySelector('[aria-label="츠바키 API 생성 모드"]'),null);
   const options=JSON.parse(f.records.get(runtimeSettingsKeys.options));assert.equal(options.api.aspectRatio,'5:3');assert.equal(options.api.size,'1.5k');assert.equal(options.api.mode,'pro');
-  const fresh=panelFixture(null,{records:new Map(f.records)});assert.equal(fresh.panel.querySelector('[aria-label="조합 이미지 비율"]').value,'5:3');assert.equal(fresh.panel.querySelector('[aria-label="조합 이미지 크기"]').value,'1.5k');
+  const fresh=panelFixture(null,{records:new Map(f.records)});assert.equal(fresh.panel.querySelector('[aria-label="조합 이미지 비율"]').value,'5:3');assert.equal(fresh.panel.querySelector('[aria-label="조합 이미지 크기"]').value,'1.5k');assert.equal(fresh.panel.querySelector('[aria-label="조합 생성 모드"]').value,'pro');assert.equal(fresh.panel.querySelector('[aria-label="생성당 이미지 수"]').value,'1');assert.equal(options.imageCount,1);
   assert.equal(fresh.networkCalls,0);assert.equal(fresh.generateCalls,0);assert.equal(fresh.storageMutations.length,0);
 });
 
@@ -1761,6 +1762,7 @@ function startFixture(options = {}) {
     let initialModel=null,runImageCount=null,baselineSettings=null,baselineNegative=null,message='';
     const apiKey={get:()=> 'fixture-key'},apiOptions={modelVersionId:''},crypto={getRandomValues:array=>array.fill(42)};
     const currentApiOptions=()=>apiOptions;
+    const currentApiBatchSize=()=>Number(options.imageCount ?? 4) || 1;
     const panel={querySelector:selector=>({checked:true,value:selector==='[data-image-count]' ? String(options.imageCount ?? 4) : String(options.maxInFlight ?? 3)})};
     const expectedCount=()=>options.siteImageCount ?? 1;
     let jobs=loadStored(),currentModel='/ko/model/11/111';
