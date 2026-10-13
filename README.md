@@ -4,6 +4,8 @@
 
 **처음 사용하시나요?** [버튼을 따라가는 사용 설명서](GUIDE.md) · [스크립트 설치·업데이트](https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js)
 
+브랜치는 **[main](https://github.com/cotton100/pixai-web-queue/tree/main) = 배포용 안정판**, **[develop](https://github.com/cotton100/pixai-web-queue/tree/develop) = 개발용**으로 나눕니다. 설치·자동 업데이트는 main을 사용합니다. develop은 코드 작업용이며 별도의 자동 업데이트 채널은 제공하지 않습니다. 개발·배포 흐름은 [배포 안내](RELEASE.md)를 참고하세요.
+
 흐름: **설정에서 API 키·저장 위치 준비 → 라이브러리에 재료 저장 → 조합 예약 → 대기열 등록 → 첫 작업만 실행 → 저장·기록 확인**. 예약과 등록 단계에서는 생성 요청을 보내지 않습니다. API 생성에는 크레딧이 사용됩니다.
 
 ## 처음 사용
