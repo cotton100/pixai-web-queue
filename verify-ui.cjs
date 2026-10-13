@@ -12,9 +12,35 @@ test('visible compose image controls preserve different reservation choices with
   f.setImageOptions({aspectRatio:'3:5',size:'1k'});assert.match(f.field('현재 조합 이미지 설정').textContent,/5:3.*1.5k/);
   await f.select('조합 이미지 비율','3:5');await f.select('조합 이미지 크기','1k');await f.press('이 조합 예약 추가');
   assert.deepEqual(f.library().reservations[0],first);assert.deepEqual(first.imageOptions,{aspectRatio:'5:3',size:'1.5k',mode:'',batchSize:4});assert.deepEqual(f.library().reservations[1].imageOptions,{aspectRatio:'3:5',size:'1k',mode:'',batchSize:4});
-  const images=f.field('현재 조합 이미지 설정').parentElement,choices=images.parentElement;assert.match(choices.className,/pq-compose-choices/);assert.equal(choices.children[1].className,'pq-inline pq-reserve-selectors');assert.equal(choices.children[2],images);assert.equal(images.hidden,undefined);assert.equal(f.fields('조합 이미지 설정').length,0);
+  const images=f.field('현재 조합 이미지 설정').parentElement,imageGroup=images.parentElement.parentElement,choices=imageGroup.parentElement;assert.match(choices.className,/pq-compose-choices/);assert.equal(imageGroup.dataset.composeGroup,'images');assert.equal(choices.children[1],imageGroup);assert.equal(choices.children[0].querySelector('.pq-reserve-selectors').className,'pq-inline pq-reserve-selectors');assert.equal(images.hidden,undefined);assert.equal(f.fields('조합 이미지 설정').length,0);
   assert.match(f.ui.root.querySelectorAll('.pq-reservation')[0].textContent,/5:3.*1.5k/);assert.match(f.ui.root.querySelectorAll('.pq-reservation')[1].textContent,/3:5.*1k/);
   await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs[0].apiOptions,{aspectRatio:'5:3',size:'1.5k',mode:''});assert.deepEqual(f.jobs[1].apiOptions,{aspectRatio:'3:5',size:'1k',mode:''});assert.equal(f.jobs[0].apiBatchSize,4);
+});
+
+test('folded compose headers follow chosen materials, image options, order and loaded combinations',async t=>{
+  const initial=seed();initial.presets.push({...copy(initial.presets[0]),id:'p2',name:'Other preset'});initial.characters.push({id:'c2',name:'Bob',prompt:'bob',negativePrompt:''});const f=fixture(t,initial),groups=f.ui.root.querySelectorAll('[data-compose-group]');
+  assert.deepEqual(groups.map(group=>group.open),[true,false,true]);assert.match(f.field('프리셋·캐릭터 현재 선택').textContent,/Asset.*Alice/);assert.match(f.field('이미지 설정 현재 선택').textContent,/9:16 세로.*1k.*모델 기본값.*4장/);assert.equal(f.field('청크 선택 현재 선택').textContent,'선택한 청크 없음');
+  for(const group of groups){group.open=false;await group.emit('toggle');}assert.equal(f.saves.length,0);assert.equal(f.jobs.length,0);
+  await f.select('예약 프리셋','p2');await f.select('예약 캐릭터','c2');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');await f.select('조합 생성 모드','ultra');await f.select('생성당 이미지 수','1');await f.choose('표정');await f.choose('행동');await f.press('조합 행동 위로');
+  assert.match(f.field('프리셋·캐릭터 현재 선택').textContent,/Other preset.*Bob/);assert.match(f.field('이미지 설정 현재 선택').textContent,/5:3 가로.*1.5k.*Ultra.*1장/);assert.equal(f.field('청크 선택 현재 선택').textContent,'2개 선택 · 행동 → 표정');assert.equal(f.field('청크 선택 현재 선택').title,f.field('청크 선택 현재 선택').textContent);assert.equal(groups[2].children[0].getAttribute('aria-label'),'청크 선택 · 2개 선택 · 행동 → 표정');
+  await f.press('현재 조합 즐겨찾기');const id=f.library().combinations[0].id;await f.select('예약 프리셋','p1');await f.select('예약 캐릭터','c1');await f.press('청크 선택 전부 해제');await f.select('조합 이미지 비율','1:1');await f.press(`조합 불러오기: ${id}`);
+  assert.match(f.field('프리셋·캐릭터 현재 선택').textContent,/Other preset.*Bob/);assert.match(f.field('이미지 설정 현재 선택').textContent,/5:3 가로.*Ultra.*1장/);assert.equal(f.field('청크 선택 현재 선택').textContent,'2개 선택 · 행동 → 표정');assert.deepEqual(groups.map(group=>group.open),[false,false,false]);assert.equal(f.jobs.length,0);
+  const fresh=fixture(t,f.library(),f.preferences);assert.deepEqual(fresh.ui.root.querySelectorAll('[data-compose-group]').map(group=>group.open),[false,false,false]);assert.equal(fresh.field('청크 선택 현재 선택').textContent,'2개 선택 · 행동 → 표정');assert.equal(fresh.composeGroupSaves.length,0);
+});
+
+test('compose folding remembers all-closed state and storage errors preserve recipes and existing preferences',async t=>{
+  const preferences={imageOptions:core.normalizeApiOptions(),draft:null,composeGroups:{materials:false,images:false,chunks:false}},f=fixture(t,seed(),preferences),groups=f.ui.root.querySelectorAll('[data-compose-group]');await f.choose('행동');await f.press('이 조합 예약 추가');const before=f.library(),draft=copy(preferences.draft);
+  for(const group of groups)await group.emit('toggle');assert.equal(f.composeGroupSaves.length,0);assert.deepEqual(groups.map(group=>group.open),[false,false,false]);
+  preferences.composeGroupSaveFailure='quota';groups[1].open=true;await groups[1].emit('toggle');assert.equal(groups[1].open,true);assert.match(f.messages.at(-1),/접기 상태 저장 실패/);assert.deepEqual(preferences.composeGroups,{materials:false,images:false,chunks:false});assert.deepEqual(f.library(),before);assert.deepEqual(preferences.draft,draft);
+  delete preferences.composeGroupSaveFailure;groups[1].open=false;await groups[1].emit('toggle');groups[1].open=true;await groups[1].emit('toggle');assert.deepEqual(preferences.composeGroups,{materials:false,images:true,chunks:false});
+  const invalid=fixture(t,seed(),{imageOptions:core.normalizeApiOptions(),draft:null,composeGroups:{materials:'false',images:true,chunks:null}});assert.deepEqual(invalid.ui.root.querySelectorAll('[data-compose-group]').map(group=>group.open),[true,true,true]);assert.equal(invalid.composeGroupSaves.length,0);
+  const unreadable=fixture(t,seed(),{imageOptions:core.normalizeApiOptions(),draft:null,composeGroupReadFailure:'invalid JSON'});assert.deepEqual(unreadable.ui.root.querySelectorAll('[data-compose-group]').map(group=>group.open),[true,false,true]);assert.match(unreadable.messages[0],/접기 상태를 읽지 못해/);assert.equal(unreadable.saves.length,0);assert.equal(unreadable.jobs.length,0);
+});
+
+test('folding while busy keeps editing controls locked and chosen image options unchanged',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.select('조합 이미지 비율','5:3');const draft=copy(f.preferences.draft),before=f.library();f.setBusy(true);
+  for(const group of f.ui.root.querySelectorAll('[data-compose-group]')){group.open=!group.open;await group.emit('toggle');}
+  assert.equal(f.field('예약 프리셋').disabled,true);assert.equal(f.field('청크 선택: 표정').disabled,true);assert.equal(f.button('이 조합 예약 추가').disabled,true);await f.select('조합 이미지 비율','3:5');assert.equal(f.field('조합 이미지 비율').value,'5:3');assert.match(f.field('이미지 설정 현재 선택').textContent,/5:3 가로/);assert.deepEqual(f.preferences.draft,draft);assert.deepEqual(f.library(),before);assert.equal(f.jobs.length,0);
 });
 
 test('custom recipe images reload from favorites and backups while old records reset custom draft dimensions',async t=>{
@@ -171,7 +197,7 @@ function seed() {
 function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOptions(),draft:null}) {
   let library=core.normalizePresetLibrary(copy(initial)),captured=copy({model:library.presets[0].model,loras:library.presets[0].loras});
   let loadResult,saveFailure,imageSaveFailure,busy=false;
-  const messages=[],jobs=[],saves=[];let sequence=0;
+  const messages=[],jobs=[],saves=[],composeGroupSaves=[];let sequence=0;
   const parent=new Element('aside');const previousDocument=globalThis.document;
   globalThis.document={createElement:tag=>new Element(tag),createElementNS:(_namespace,tag)=>new Element(tag)};
   t.after(()=>{if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument;});
@@ -180,6 +206,7 @@ function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOpt
     isBusy:()=>busy,getImageOptions:()=>preferences.imageOptions,getBatchSize:()=>preferences.batchSize || 4,
     saveImageOptions:value=>{if(imageSaveFailure)throw new Error(imageSaveFailure);const {batchSize,...images}=value;preferences.imageOptions=core.normalizeApiOptions(images);preferences.batchSize=batchSize;},
     loadDraft:()=>copy(preferences.draft),saveDraft:value=>{preferences.draft=copy(value);},loadStudioDraft:()=>copy(preferences.studio??null),saveStudioDraft:value=>{if(preferences.studioFailure)throw Error(preferences.studioFailure);preferences.studio=copy(value);},
+    loadComposeGroups:()=>{if(preferences.composeGroupReadFailure)throw Error(preferences.composeGroupReadFailure);return copy(preferences.composeGroups??null);},saveComposeGroups:value=>{if(preferences.composeGroupSaveFailure)throw Error(preferences.composeGroupSaveFailure);preferences.composeGroups=copy(value);composeGroupSaves.push(copy(value));},
     captureSettings:async()=>copy(captured),applySettings:async()=>{},notify:message=>messages.push(message),
     enqueue:async value=>{jobs.push(...core.expandPresetReservations(value,{idFactory:()=>`job-${++sequence}`,maxCredits:7800}));},
     button:(text,action)=>{const element=new Element('button');element.textContent=text;element.press=async()=>{if(element.disabled)return;try{await action();}catch(error){messages.push(error.message);}};return element;}
@@ -191,7 +218,7 @@ function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOpt
   const press=async name=>{const element=button(name);assert(Object.hasOwn(element.dataset,'edit'),`${name} must participate in running-state disable`);await element.press();};
   const select=async(name,value)=>{field(name).value=value;await field(name).emit('change');};
   const choose=async(name,checked=true)=>{const element=field(`청크 선택: ${name}`);assert.equal(element.type,'checkbox');element.checked=checked;await element.emit('change');};
-  return {ui,parent,all,field,fields,button,press,select,choose,messages,jobs,saves,preferences,
+  return {ui,parent,all,field,fields,button,press,select,choose,messages,jobs,saves,composeGroupSaves,preferences,
     preview:()=>field('저장한 프롬프트 조합 미리보기').textContent,
     library:()=>copy(library),setLibrary:value=>{library=core.normalizePresetLibrary(copy(value));},
     setLoadResult:value=>{loadResult=value===undefined?undefined:copy(value);},setImageOptions:value=>{preferences.imageOptions=core.normalizeApiOptions(value);ui.refreshImageOptions();},setImageSaveFailure:value=>{imageSaveFailure=value;},
