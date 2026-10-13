@@ -296,7 +296,7 @@ function folderDatabase(store) {
   }};
 }
 function panelFixture(nativePicker, gm={}) {
-  let networkCalls=0,generateCalls=0,pickerCalls=0,lockRequests=0;const siteQueries=[],storageMutations=[],documentListeners={},windowListeners={};
+  let networkCalls=0,generateCalls=0,pickerCalls=0,lockRequests=0;const lockNames=[],siteQueries=[],storageMutations=[],documentListeners={},windowListeners={};
   function matchesPart(element,part) {
     if(part.startsWith('#'))return element.getAttribute('id')===part.slice(1);
     const tag=part.match(/^[a-z][\w-]*/i)?.[0];
@@ -364,7 +364,7 @@ function panelFixture(nativePicker, gm={}) {
   if(nativePicker)window.showDirectoryPicker=(...args)=>{pickerCalls++;return nativePicker(...args)};
   const context={window,document,location:{hostname:'pixai.art',pathname:'/ko/generator/image'},
     localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.queueStorageFailure&&key==='local.pixai-web-queue.v1')throw new Error('Queue storage unavailable');if(gm.storageFailureKey===key)throw new Error('Settings storage unavailable');if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
-    navigator:{locks:{request:async(name,options,callback)=>{lockRequests++;return callback(gm.lockUnavailable?null:{});}}},
+    navigator:{locks:{request:async(name,options,callback)=>{lockRequests++;lockNames.push(name);return callback(gm.lockUnavailable?null:{});}}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
     fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id',getRandomValues:array=>array.fill(42)},
     GM_xmlhttpRequest:gm.request || (()=>{networkCalls++;throw Error('No network in UI fixture');}),Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info,
@@ -372,7 +372,7 @@ function panelFixture(nativePicker, gm={}) {
   if(gm.folderStore)context.indexedDB=folderDatabase(gm.folderStore);
   vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
-  return {panel,document,siteQueries,records,storageMutations,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},get lockRequests(){return lockRequests},
+  return {panel,document,siteQueries,records,storageMutations,lockNames,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},get lockRequests(){return lockRequests},
     press(button){
       if(button.getAttribute('data-start')!=null || button.textContent==='첫 작업만 실행') {
         const key=panel.querySelector('[aria-label="공식 API 키"]');key.value='fixture-key';
@@ -387,6 +387,16 @@ function panelFixture(nativePicker, gm={}) {
 }
 
 const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1',draft:'local.pixai-web-queue.compose.v1',ack:'local.pixai-web-queue.api-cost-ack.v1'};
+
+test('optional PNG recording survives a fresh mount and rejects another tab runner lock without changing stored flags',async()=>{
+  const f=panelFixture(null),checkbox=f.panel.querySelector('[aria-label="PNG에 생성 요청 정보 기록 (선택)"]');assert.equal(checkbox.checked,false);checkbox.checked=true;checkbox.fire('change');await runtimeFlush();assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.options)).embedMetadata,true);const fresh=panelFixture(null,{records:new Map(f.records)});assert.equal(fresh.panel.querySelector('[aria-label="PNG에 생성 요청 정보 기록 (선택)"]').checked,true);assert.equal(fresh.networkCalls,0);
+  const denied=panelFixture(null,{records:new Map(f.records),lockUnavailable:true}),other=denied.panel.querySelector('[aria-label="PNG에 생성 요청 정보 기록 (선택)"]');other.checked=false;other.fire('change');await runtimeFlush();assert.equal(other.checked,true);assert.equal(JSON.parse(denied.records.get(runtimeSettingsKeys.options)).embedMetadata,true);assert.match(denied.message(),/다른.*탭/);
+});
+
+test('compatible export previews conversions before requesting a download and completed rows retain metadata warnings',async()=>{
+  const downloads=[],f=panelFixture(null,{download:details=>{downloads.push(details);details.onload();return {};},info:{downloadMode:'browser'},queue:[{id:'done',title:'Saved',prompt:'fixture',state:'done',taskId:'901',expected:4,saved:[{mediaId:'902'}],metadataWarnings:{'902':'원본 그대로 저장했습니다.'},composition:{reservation:{batch:{id:'batch',name:'Group',rowName:'C',columnName:'S'}}}}]});runtimePress(f,'앱 0.1.11 호환 내보내기');await runtimeFlush();assert.equal(downloads.length,0);assert.equal(f.panel.querySelector('[data-compatibility-preview]').hidden,false);runtimePress(f,'변환 내용 확인 후 파일 저장');await runtimeFlush();assert.equal(downloads.length,1);assert.match(downloads[0].name,/앱_0.1.11_호환/);assert.equal(f.networkCalls,0);
+  const history=f.panel.querySelectorAll('[data-queue-view]').find(v=>v.dataset.queueView==='history');f.press(history);await runtimeFlush();const row=f.panel.querySelector('[data-queue-job="done"]');assert(row);const text=element=>element.textContent+element.children.map(text).join(' ');assert.match(text(row),/PNG 기록 경고.*원본 그대로/);assert.match(text(f.panel.querySelector('[data-jobs]')),/Group/);
+});
 
 test('ratio, size, mode and batch appear once in compose and persist through fresh mount and unrelated setting changes',()=>{
   const f=panelFixture(null),ratio=f.panel.querySelector('[aria-label="조합 이미지 비율"]'),size=f.panel.querySelector('[aria-label="조합 이미지 크기"]');
@@ -1052,7 +1062,7 @@ test('while this tab runs a job, library/compose editing and registration stay o
   const locksBefore=f.lockRequests,queueBefore=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
   assert.equal(queueBefore.length,1);
   f.press(register);await tick();
-  assert.equal(f.lockRequests,locksBefore);
+  assert.equal(f.lockRequests,locksBefore+1);assert.equal(f.lockNames.at(-1),runtimeSettingsKeys.library+'.edit');
   const stored=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
   assert.equal(stored.length,2);assert.equal(stored[0].id,'fixture');assert.equal(stored[1].state,'queued');assert.equal(stored[1].composition.reservation.id,'reservation');
   assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.library)).reservations.length,0);
@@ -2032,7 +2042,7 @@ function uiButton(action) {
   assert.ok(begin>=0&&end>begin,'runtime button factory not found');
   const doc=new Element('document'),panel=new Element('aside'),status=new Element('div',{'data-message':''}),toast=new Element('div',{'data-toast':''});toast.hidden=true;doc.append(panel);panel.append(status,toast);
   status.getBoundingClientRect=()=>({top:-260,bottom:-210,left:0,right:300});
-  const ctx={bindFolderActivation:core.bindFolderActivation,panel,node:(tag,text,attrs)=>new Element(tag,attrs,text),setTimeout:()=>0,clearTimeout(){}};
+  const ctx={KEY:'fixture-queue',readGroupView:()=>({}),localStorage:{getItem:()=>null},bindFolderActivation:core.bindFolderActivation,panel,node:(tag,text,attrs)=>new Element(tag,attrs,text),setTimeout:()=>0,clearTimeout(){}};
   vm.runInNewContext(`let message='';function render(){panel.querySelector('[data-message]').textContent=message;const feedback=panel.querySelector('[data-action-message]');if(feedback)feedback.textContent=message;}\n${mainSource.slice(begin,end)}\nthis.make=button;`,ctx);
   const button=ctx.make('사이트의 현재 설정 읽기',action);
   panel.append(button);

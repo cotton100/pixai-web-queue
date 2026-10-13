@@ -69,7 +69,7 @@ test('unsupported format/version, wrong roots, and unrelated JSON are refused',(
   for(const value of [null,[],42,'not a backup',{answer:1},{version:1,jobs:[]},{version:1,library:library()},
     {version:1,jobs:{},library:library()},{version:2,jobs:[],library:library()}])assert.throws(()=>parse(value));
   for(const format of ['other-app',null,1]){const payload=backup();payload.format=format;assert.throws(()=>parse(payload),/형식 또는 버전/);}
-  for(const version of [0,2,'1',null]){const payload=backup();payload.version=version;assert.throws(()=>parse(payload),/형식 또는 버전/);}
+  for(const version of [0,3,'1',null]){const payload=backup();payload.version=version;assert.throws(()=>parse(payload),/형식 또는 버전/);}
   const payload=backup();payload.jobs=[];assert.throws(()=>parse(payload),/필수 항목|형식/);
   assert.throws(()=>parse({...library(),unrelated:'ignored field'}),/필수 항목|형식/);
   assert.throws(()=>parse({version:1,jobs:[],library:library(),unrelated:'ignored field'}),/필수 항목|형식/);

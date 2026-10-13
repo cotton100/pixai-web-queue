@@ -5,6 +5,15 @@ const fs=require('node:fs');
 const core=require('./pixai-web-queue.user.js');
 const config=()=>({model:{id:'10',versionId:'101',name:'Tsubaki.3'},loras:[{id:'20',versionId:'201',name:'Character',weight:0.7,triggerWords:'hero'}]});
 const job=()=>({id:'job',title:'asset',prompt:'1girl, smile, hero',negativePrompt:'lowres',configuration:config(),composition:{triggerPosition:4},state:'queued',saved:[]});
+
+test('image-imported seed and style synchronize visible fields and survive unrelated settings edits and backup',async()=>{
+ const fs=require('node:fs'),vm=require('node:vm'),source=fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),begin=source.indexOf('      applyImageComposition:(result,expected)=>'),end=source.indexOf('\n',begin);assert(begin>=0&&end>begin);
+ const library=core.normalizePresetLibrary({...core.makePresetLibrary(),presets:[{id:'p',name:'fixture',...config()}],characters:[{id:'c',name:'fixture',prompt:'',negativePrompt:''}]}),records=new Map(),control=value=>({value:String(value)});
+ const context={...core,LIBRARY_KEY:'library',OPTIONS_KEY:'options',COMPOSE_DRAFT_KEY:'draft',savedOptions:core.normalizeSettingsOptions({maxCredits:null,filePrefix:'before',repeat:1,api:{seed:1,style:''}}),apiOptions:core.normalizeApiOptions({seed:1,style:''}),apiFields:{seed:control(1),style:control('')},embedMetadata:{checked:false},budget:control(''),title:control('before'),repeat:control(1),imageCount:control(4),maxInFlight:control(3),settingsAction:run=>run(),readLibrary:()=>library,localStorage:{getItem:key=>records.get(key)??null,setItem:(key,value)=>records.set(key,value),removeItem:key=>records.delete(key)}};
+ const readStart=source.indexOf('    function readApiFields()'),readEnd=source.indexOf('    let savedOptions=',readStart),fillStart=source.indexOf('    function fillOptions(value)'),fillEnd=source.indexOf('    function loadOptions()',fillStart);
+ vm.runInNewContext(`${source.slice(readStart,readEnd)}\n${source.slice(fillStart,fillEnd)}\nconst io={${source.slice(begin,end).trim()}};this.apply=io.applyImageComposition;this.readCurrent=readOptions;`,context);
+ await context.apply({library,recipe:{presetId:'p',characterId:'c',sceneIds:[],count:1,triggerPosition:1,imageOptions:{aspectRatio:'1:1',size:'1k',batchSize:4}},api:{seed:77,style:'chibi'}},library);assert.equal(context.apiFields.seed.value,'77');assert.equal(context.apiFields.style.value,'chibi');context.title.value='after';const edited=context.readCurrent(),backup=core.makeSettingsBackup(library,edited,{appVersion:'0.10.0',exportedAt:'2026-10-13T00:00:00.000Z'});assert.equal(edited.api.seed,77);assert.equal(edited.api.style,'chibi');assert.equal(edited.filePrefix,'after');assert.equal(backup.options.api.seed,77);assert.equal(backup.options.api.style,'chibi');
+});
 const copy=x=>JSON.parse(JSON.stringify(x));
 function transport(answer) {
   const calls=[];
@@ -194,6 +203,12 @@ test('image download never sends API authentication and rejects unrelated hosts'
   const blob=new Blob(['img'],{type:'image/webp'}),f=transport(()=>({response:blob}));
   assert.equal(await f.api.image('https://images.pixai.art/images/orig/test.webp'),blob);assert.equal(f.calls[0].headers,undefined);
   await assert.rejects(f.api.image('https://attacker.example/image'));assert.equal(f.calls.length,1);
+});
+
+test('two four-image batches retain metadata fallback warnings across partial saves and restart without new paid submissions',async()=>{
+ const images=require('./test-fixtures/generated-images.cjs'),data=images.png(core,[images.text(core,'Comment','{"prompt":"file"}')]);data[data.length-1]^=1;const original=new Blob([data],{type:'image/png'}),jobs=[{...job(),id:'one',embedMetadata:true},{...job(),id:'two',embedMetadata:true}];let posts=0,fail=true,checkpoint;
+ const io={persist(){checkpoint=JSON.stringify(jobs);},prepare:async j=>({expected:4,queryBackend:'official-v1',apiPayload:core.buildApiPayload(j,{},4,42)}),submit:async()=>String(++posts+900),waitTask:async j=>({id:j.taskId,status:'completed',createdAt:new Date().toISOString(),outputs:{mediaIds:Array.from({length:4},(_,i)=>j.taskId+String(i))}}),saveImage:async(j,id)=>{const blob=await core.prepareImageForSave(original,j,id,io.persist);assert.equal(blob,original);if(fail&&id.endsWith('1')){fail=false;throw Error('disk-full');}const cache=core.createSceneThumbnailCache({load:()=>'{bad',save(){throw Error('quota');}});assert.equal(await cache.remember('scene',blob),false);return id+'.png';}};
+ await assert.rejects(core.runQueue(jobs,io,{limit:2}),/disk-full/);assert.equal(posts,2);assert.equal(jobs[0].saved.length,1);const restored=JSON.parse(checkpoint);core.recover(restored);await core.runQueue(restored,io,{limit:2});assert.equal(posts,2);assert(restored.every(j=>j.state==='done'&&j.saved.length===4));assert(restored[0].metadataWarnings['9010']);assert(restored[0].metadataWarnings['9011']);
 });
 test('officially observed image CDN is exact-host only and never receives authentication',async()=>{
   const blob=new Blob(['img'],{type:'image/webp'}),f=transport(()=>({response:blob}));

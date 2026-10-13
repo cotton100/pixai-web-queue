@@ -1,5 +1,7 @@
 # NAIS3 참고·개조 조건
 
+2026-10-13 추가: 0.10.0 로컬 후보에서는 PixaiClackHelper 0.1.11의 데이터/조합 함수와 이미지 정보 계약을 브라우저용으로 이식했습니다. 아래의 ‘스크립트에 복사하지 않았다’는 10-08 당시 기록입니다. 현재 파생 스크립트에는 GPLv3 전문을 포함하고 원저작자·출처·변경 날짜를 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록했습니다. 앱 제품 코드 자체는 이번 이식에서 변경하지 않았습니다.
+
 2026-10-08 확인. 대상은 `sunanakgo/NAIS3`와 로컬 PixAIS 원본 `C:\owo\00AI_works\00_common\00_shared\git\PixAIS`의 HEAD `35d41e7`입니다. README·package.json·LICENSE는 GPL-3.0입니다. 이번 작업에서 PixAIS 제품 코드는 수정하지 않았습니다.
 
 근거: [NAIS3 LICENSE](https://github.com/sunanakgo/NAIS3/blob/main/LICENSE), [원문](https://raw.githubusercontent.com/sunanakgo/NAIS3/main/LICENSE)의 GPLv3 2·4·5·6절.

@@ -37,18 +37,22 @@ test('per-reservation images survive settings and queue backups and repeat expan
 
 test('production queue registration merges each reservation image choice with global API options without submitting',async()=>{
   const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),source=fs.readFileSync(path.join(__dirname,'pixai-web-queue.user.js'),'utf8');
-  const begin=source.indexOf('      enqueue:value=>queueEdit(()=>{'),end=source.indexOf('\n      })',begin);
-  assert(begin>=0&&end>begin);const events=[];
+  const begin=source.indexOf('      enqueue:(value,{fresh=false}={})=>queueEdit(()=>withLibraryLock(()=>{'),end=source.indexOf('\n      }))',begin);
+  assert(begin>=0&&end>begin);const events=[],records=new Map();
   const context={...core,apiOptions:core.normalizeApiOptions({aspectRatio:'1:1',size:'1k',mode:'pro',style:'chibi',seed:7}),imageCount:{value:'4'},expectedCount:()=>1,budget:{value:''},title:{value:'test'},jobs:[],running:false,stopRequested:false,oneJobRun:false,
+    KEY:'queue',LIBRARY_KEY:'library',savedOptions:{embedMetadata:true},localStorage:{getItem:key=>records.get(key)??null,setItem:(key,value)=>{records.set(key,value);if(key==='queue')events.push('queue');},removeItem:key=>records.delete(key)},readLibrary:()=>core.normalizePresetLibrary(JSON.parse(records.get('library'))),withLibraryLock:run=>run(),
     currentApiOptions:()=>context.apiOptions,currentApiBatchSize:()=>Number(context.imageCount.value),queueEdit:async fn=>fn(),persist:()=>events.push('persist'),saveLibrary:value=>{context.savedLibrary=value;},presetEditor:{refresh(){}},render(){},message:''};
-  vm.runInNewContext(`const callback={${source.slice(begin,end+9).trim()}};this.enqueue=callback.enqueue;`,context);
+  vm.runInNewContext(`const callback={${source.slice(begin,end+10).trim()}};this.enqueue=callback.enqueue;`,context);
   const library=seed(),recipe={presetId:'p',characterId:'c',sceneIds:['s'],count:1};
   library.reservations=[{id:'wide',...recipe,imageOptions:{aspectRatio:'5:3',size:'1.5k',mode:'ultra',batchSize:4}},{id:'tall',...recipe,imageOptions:{aspectRatio:'3:5',size:'1k',mode:'',batchSize:1}},{id:'legacy',...recipe}];
-  await context.enqueue(library);assert.equal(context.jobs.length,3);assert.equal(events.length,1);assert.equal(context.savedLibrary.reservations.length,0);
+  records.set('library',JSON.stringify(library));await context.enqueue(library);assert.equal(context.jobs.length,3);assert.equal(events.length,1);assert.equal(JSON.parse(records.get('library')).reservations.length,0);assert(context.jobs.every(job=>job.embedMetadata===true));
   const payloads=context.jobs.map(job=>core.buildApiPayload(job,job.apiOptions,job.apiBatchSize,999));
   assert.deepEqual(payloads.map(payload=>[payload.aspectRatio,payload.size]),[['5:3','1.5k'],['3:5','1k'],['1:1','1k']]);
   assert(payloads.every(payload=>payload.style.key==='chibi'&&payload.seed===7));assert.deepEqual(payloads.map(payload=>[payload.mode,payload.batchSize]),[['ultra',4],[undefined,1],['pro',4]]);
   context.apiOptions=core.normalizeApiOptions({aspectRatio:'9:16',size:'1k'});assert.equal(context.jobs[0].apiOptions.aspectRatio,'5:3');
+  const pending=core.normalizePresetLibrary({...library,reservations:[{id:'keep-pending',...recipe}]}),fresh=core.normalizePresetLibrary({...pending,reservations:[{id:'fresh',...recipe,imageOptions:{aspectRatio:'5:3',size:'1k',batchSize:4}}]});records.set('library',JSON.stringify(pending));const beforeQueue=records.get('queue'),set=context.localStorage.setItem;let fail=true;context.localStorage.setItem=(key,value)=>{if(key==='library'&&fail){fail=false;throw Error('quota');}set(key,value);};
+  await assert.rejects(context.enqueue(fresh,{fresh:true}),/저장 실패/);assert.equal(context.jobs.length,3);assert.equal(records.get('queue'),beforeQueue);assert.deepEqual(JSON.parse(records.get('library')).reservations,pending.reservations);
+  context.savedOptions.embedMetadata=false;await context.enqueue(fresh,{fresh:true});assert.equal(context.jobs.length,4);assert.equal(context.jobs[3].embedMetadata,false);assert.equal(context.jobs[0].embedMetadata,true);assert.deepEqual(JSON.parse(records.get('library')).reservations,pending.reservations);
 });
 test('recent limit preserves every favorite and deduplication keeps its identity, name and new count',()=>{
   let library=seed(),seq=0;const options={idFactory:()=>`entry-${++seq}`,now:0};

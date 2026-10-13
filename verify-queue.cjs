@@ -59,6 +59,10 @@ test('library placement moves before/after a target and rejects stale IDs withou
 });
 
 const {queueHistory,queueJobRemovable,changeQueueRecords}=require('./pixai-web-queue.user.js');
+test('queue state and batch filters use stable identity, exclude hidden groups and retain unfinished submitted records',()=>{
+  const {filterQueueJobs}=require('./pixai-web-queue.user.js'),group=(id,state,batch,taskId)=>({id,state,taskId,saved:[],composition:{reservation:{batch:{id:batch,name:'same label'}}}}),jobs=[group('a','queued','one'),group('b','waiting','one','99'),group('c','done','two','100'),group('d','queued','two'),{id:'old',state:'done'}];
+  const visible=filterQueueJobs(jobs,{batch:'one'});assert.deepEqual(visible.map(v=>v.id),['a','b']);const next=changeQueueRecords(jobs,visible.filter(queueJobRemovable).map(v=>v.id),'delete');assert.deepEqual(next.map(v=>v.id),['b','c','d','old']);assert.equal(next[0].taskId,'99');assert.deepEqual(filterQueueJobs(jobs,{batch:'two',state:'queued'}).map(v=>v.id),['d']);assert.deepEqual(filterQueueJobs(jobs,{view:'history',batch:'ungrouped'}).map(v=>v.id),['old']);
+});
 test('queue management protects every unfinished submission and does not mutate input',()=>{
   const queued={id:'q',state:'queued',saved:[],prompt:'exact'},done={id:'d',state:'done',taskId:'9',saved:[{mediaId:'7'}]};
   for(const extra of [{state:'unknown'},{state:'submitting'},{taskId:'9'},{submittedAt:123},{saved:[{}]},{mediaIds:['7']},{metadataFile:'old.json'},{state:'skipped',skippedFrom:'unknown'},{state:'skipped',taskId:'9'}]) {

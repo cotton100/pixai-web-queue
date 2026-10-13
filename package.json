@@ -1,9 +1,10 @@
 {
   "name": "pixai-web-queue",
-  "version": "0.9.14",
+  "version": "0.10.0",
   "private": true,
   "description": "PixAI 웹 프롬프트 대기열 유저스크립트",
   "scripts": {
-    "test": "node --check pixai-web-queue.user.js && node --test verify.cjs verify-ui.cjs verify-trigger.cjs verify-backup.cjs verify-backup-storage.cjs verify-drag.cjs verify-folders.cjs verify-layout.cjs verify-combinations.cjs verify-query.cjs verify-queue.cjs verify-official-api.cjs verify-api-probe.cjs"
+    "build": "node tools/build-userscript.cjs",
+    "test": "node tools/build-userscript.cjs --check && node --check pixai-web-queue.user.js && node --test verify.cjs verify-ui.cjs verify-trigger.cjs verify-backup.cjs verify-backup-storage.cjs verify-drag.cjs verify-folders.cjs verify-layout.cjs verify-combinations.cjs verify-query.cjs verify-queue.cjs verify-official-api.cjs verify-api-probe.cjs verify-parity.cjs verify-image-info.cjs"
   }
 }

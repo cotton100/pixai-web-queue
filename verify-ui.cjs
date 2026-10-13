@@ -128,6 +128,7 @@ test('library keyboard navigation follows displayed subtab order and retains the
   f.ui.showPage('compose');f.ui.showPage('library');assert.equal(tabs[3].getAttribute('aria-selected'),'true');assert.equal(f.all().find(item=>item.dataset.page==='common').hidden,false);
 });
 class Element {
+  removeAttribute(name){delete this.attrs[name];}
   constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.attrs={};this.dataset={};this.listeners={};this.parentElement=null;this.style={};this.disabled=false;this.readOnly=false;this.checked=false;this._value='';this._text='';}
   set textContent(value){this._text=String(value??'');this.replaceChildren();}
   get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
@@ -138,6 +139,7 @@ class Element {
   setAttribute(name,value){this.attrs[name]=String(value);if(name==='value')this.value=value;if(name==='type')this.type=String(value);if(name==='checked')this.checked=true;if(name.startsWith('data-'))this.dataset[name.slice(5).replace(/-([a-z])/g,(_,char)=>char.toUpperCase())]=String(value);}
   getAttribute(name){return this.attrs[name]??null;}
   append(...children){for(let child of children){if(typeof child==='string'){const text=new Element('#text');text.textContent=child;child=text;}child.remove();child.parentElement=this;this.children.push(child);}}
+  prepend(...children){for(const child of [...children].reverse()){child.remove();child.parentElement=this;this.children.unshift(child);}}
   replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(child=>child!==this);this.parentElement=null;}
   contains(target){return this===target||this.children.some(child=>child.contains(target));}
@@ -177,7 +179,7 @@ function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOpt
     load:()=>copy(loadResult===undefined?library:loadResult),save:value=>{if(saveFailure)throw new Error(saveFailure);library=core.normalizePresetLibrary(copy(value));saves.push(copy(library));},
     isBusy:()=>busy,getImageOptions:()=>preferences.imageOptions,getBatchSize:()=>preferences.batchSize || 4,
     saveImageOptions:value=>{if(imageSaveFailure)throw new Error(imageSaveFailure);const {batchSize,...images}=value;preferences.imageOptions=core.normalizeApiOptions(images);preferences.batchSize=batchSize;},
-    loadDraft:()=>copy(preferences.draft),saveDraft:value=>{preferences.draft=copy(value);},
+    loadDraft:()=>copy(preferences.draft),saveDraft:value=>{preferences.draft=copy(value);},loadStudioDraft:()=>copy(preferences.studio??null),saveStudioDraft:value=>{if(preferences.studioFailure)throw Error(preferences.studioFailure);preferences.studio=copy(value);},
     captureSettings:async()=>copy(captured),applySettings:async()=>{},notify:message=>messages.push(message),
     enqueue:async value=>{jobs.push(...core.expandPresetReservations(value,{idFactory:()=>`job-${++sequence}`,maxCredits:7800}));},
     button:(text,action)=>{const element=new Element('button');element.textContent=text;element.press=async()=>{if(element.disabled)return;try{await action();}catch(error){messages.push(error.message);}};return element;}
@@ -196,6 +198,61 @@ function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOpt
     setCapture:value=>{captured=copy(value);},setSaveFailure:value=>{saveFailure=value;},
     setBusy:value=>{busy=value;for(const element of all().filter(item=>Object.hasOwn(item.dataset,'edit')))element.disabled=busy||element.dataset.unavailable==='true';}};
 }
+
+test('common set editor confirms unsaved navigation and blocks resurrection after a concurrent import',async t=>{
+  const initial=seed();initial.commonPresets=[{id:'set',name:'Quality',prompt:'set-quality',negativePrompt:'set-bad'}];initial.presets[0].commonPresetId='set';initial.presets[0].prompt='own';const f=fixture(t,initial);
+  await f.press('공통문 세트 편집: Quality');f.field('세트 포지').value='draft';await f.field('세트 포지').emit('input');f.ui.showPage('studio');assert.equal(f.field('편집 내용 확인').hidden,false);
+  f.setSaveFailure('quota');await f.press('저장하고 이동');assert.match(f.messages.at(-1),/quota/);assert.equal(f.field('세트 포지').value,'draft');assert.equal(f.field('편집 내용 확인').hidden,false);
+  f.setSaveFailure(null);const imported=f.library();imported.commonPresets=[];delete imported.presets[0].commonPresetId;f.setLibrary(imported);f.ui.refresh();assert.equal(f.field('세트 포지').value,'draft');assert.equal(f.button('공통문 세트 저장').disabled,true);await f.press('공통문 세트 저장');assert.equal(f.library().commonPresets.length,0);
+  await f.press('버리고 이동');assert.equal(f.field('편집 내용 확인').hidden,true);assert.equal(f.field('세트 포지').value,'');
+});
+
+test('compose common sequence block shows connected common text and preset text instead of the replaced global text',async t=>{
+ const initial=seed();initial.commonPresets=[{id:'set',name:'Shared',prompt:'connected-quality',negativePrompt:''}];initial.presets[0].commonPresetId='set';initial.presets[0].prompt='preset-style';const f=fixture(t,initial),row=f.ui.root.querySelector('[data-recipe-material="common"]');assert.match(row.textContent,/connected-quality, preset-style/);assert(!row.textContent.includes('quality tags'));assert.match(f.preview(),/connected-quality, preset-style/);
+});
+
+test('image info UI starts unchecked, resets when changing sources, rejects incomplete models and explicitly applies an empty negative',async t=>{
+  const f=fixture(t),images=require('./test-fixtures/generated-images.cjs');await f.choose('표정');await f.press('이 조합 예약 추가');const reservations=f.library().reservations,before=f.library();
+  const data=images.png(core,[images.text(core,'first',JSON.stringify({prompt:'final-positive',negativePrompt:'',modelId:'101',modelVersionId:'201'})),images.text(core,'second',JSON.stringify({prompt:'other',modelVersionId:'999',loras:[{versionId:'401',weight:.5}]}))]);
+  const input=f.field('이미지 한 장 선택');input.files=[new Blob([data],{type:'image/png'})];await input.emit('change');assert.equal(f.jobs.length,0);assert.deepEqual(f.library(),before);assert.equal(f.field('포지 적용').checked,false);assert.equal(f.button('선택한 정보로 조합 열기').disabled,true);assert.equal(f.field('모델·LoRA 적용').disabled,false);
+  const positive=f.field('포지 적용');positive.checked=true;await positive.emit('change');await f.press('PNG second');assert.equal(f.field('포지 적용').checked,false);assert.equal(f.field('모델·LoRA 적용').disabled,true);assert.equal(f.button('이미지 프리셋으로 저장').disabled,true);
+  await f.press('PNG first');for(const label of ['포지 적용','네거 적용 (빈 값도 명시적으로 적용)']){const check=f.field(label);check.checked=true;await check.emit('change');}await f.press('선택한 정보로 조합 열기');assert.deepEqual(f.library(),before);await f.press('확인');assert.match(f.preview(),/final-positive/);const lib=f.library(),recipe=core.normalizeComposeDraft(f.preferences.draft),preset=lib.presets.find(v=>v.id===recipe.presetId),character=lib.characters.find(v=>v.id===recipe.characterId),chunks=recipe.sceneIds.map(id=>lib.scenes.find(v=>v.id===id));const final=core.composePresetPrompts(core.resolvePresetCommon(lib,preset),character,chunks,preset,recipe.triggerPosition);assert.equal(final.prompt,'final-positive');assert.equal(final.negativePrompt,'');assert.deepEqual(lib.reservations,reservations);assert.equal(f.jobs.length,0);
+});
+
+test('scene drag rejects foreign payloads and busy drops, supports reorder and keeps chosen batch order independent',async t=>{
+  const initial=seed();initial.sceneCards=[1,2].map(n=>core.makeSceneCard(initial,{id:'card'+n,name:'Scene'+n,sceneIds:['s1']}));const f=fixture(t,initial),row=()=>f.all().find(v=>v.dataset.studioScene==='card1');let data=transfer();await f.field('씬 목록 이동: card2').emit('dragstart',{dataTransfer:data});await row().emit('drop',{dataTransfer:transfer(),clientY:104});assert.deepEqual(f.library().sceneCards.map(v=>v.id),['card1','card2']);
+  f.setBusy(true);await row().emit('drop',{dataTransfer:data,clientY:104});assert.deepEqual(f.library().sceneCards.map(v=>v.id),['card1','card2']);f.setBusy(false);await row().emit('drop',{dataTransfer:data,clientY:104});await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(f.library().sceneCards.map(v=>v.id),['card2','card1']);
+});
+
+test('scene inline copies, explicit refresh, missing originals and unsaved scene navigation preserve source and reservations',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('현재 조합으로 씬 만들기');const card=f.library().sceneCards[0],original=f.library().scenes;
+  f.field('씬 사본 포지: 표정').value='edited-copy';await f.field('씬 사본 포지: 표정').emit('input');f.ui.showPage('compose');assert.equal(f.field('편집 내용 확인').hidden,false);await f.press('저장하고 이동');assert.equal(f.library().sceneCards[0].chunks[0].prompt,'edited-copy');assert.deepEqual(f.library().scenes,original);
+  const changed=f.library();changed.scenes[0].prompt='updated-original';changed.scenes=changed.scenes.filter(v=>v.id!=='s2');f.setLibrary(changed);f.ui.refresh();assert.equal(f.field('씬 사본 포지: 표정').value,'edited-copy');
+  await f.press('최신 청크로 갱신');assert.match(f.field('편집 내용 확인').textContent,/원본 삭제 1/);assert.equal(f.library().sceneCards[0].chunks[0].prompt,'edited-copy');await f.press('확인');await f.press('씬 저장');assert.equal(f.library().sceneCards[0].chunks[0].prompt,'updated-original');assert.equal(f.library().sceneCards[0].chunks[1].prompt,'waving');assert.equal(f.library().sceneCards[0].id,card.id);
+});
+
+test('studio selections expand 3 by 3 with two repeats, restore without enqueuing and fail cleanly on UI quota',async t=>{
+  const initial=seed();initial.characters.push({...initial.characters[0],id:'c2',name:'Bob'},{...initial.characters[0],id:'c3',name:'Cara'});for(const c of initial.characters)c.defaultPresetId='p1';initial.sceneCards=[1,2,3].map(n=>core.makeSceneCard(initial,{id:'card'+n,name:'Scene'+n,sceneIds:['s1']}));
+  const preferences={imageOptions:core.normalizeApiOptions(),batchSize:4,draft:null},f=fixture(t,initial,preferences);
+  for(const name of ['Alice','Bob','Cara']){const checkbox=f.field('일괄 행 선택: '+name);checkbox.checked=true;await checkbox.emit('change');}for(const name of ['Scene1','Scene2','Scene3']){const checkbox=f.field('일괄 씬 선택: '+name);checkbox.checked=true;await checkbox.emit('change');}
+  await f.select('일괄 반복 수','2');assert.match(f.field('일괄 예약 수량').textContent,/9조합 · 18작업 · 72장/);const previous=f.library();f.setSaveFailure('quota');await f.press('선택 조합 전부 예약');assert.deepEqual(f.library(),previous);f.setSaveFailure(null);await f.press('선택 조합 전부 예약');assert.equal(f.library().reservations.length,9);assert.equal(core.expandPresetReservations(f.library()).length,18);assert.equal(f.jobs.length,0);
+  const fresh=fixture(t,f.library(),preferences);assert.match(fresh.field('일괄 예약 수량').textContent,/18작업 · 72장/);assert.equal(fresh.jobs.length,0);assert.equal(fresh.saves.length,0);
+  preferences.studioFailure='quota-ui';const checkbox=fresh.field('일괄 행 선택: Bob');checkbox.checked=false;await checkbox.emit('change');assert.equal(fresh.field('일괄 행 선택: Bob').checked,true);assert.match(fresh.field('일괄 예약 수량').textContent,/18작업/);
+});
+
+test('scene bulk new group movement, duplicate and delete preserve unrelated scenes, frozen reservations and editor drafts',async t=>{
+  const initial=seed();initial.sceneCards=[1,2].map(n=>core.makeSceneCard(initial,{id:'card'+n,name:'Scene'+n,sceneIds:['s1']}));const f=fixture(t,initial),checkbox=f.field('씬 관리 선택: Scene1');checkbox.checked=true;await checkbox.emit('change');f.field('새 씬 그룹 이름').value='Faces';await f.press('새 그룹으로 선택 이동');assert(f.library().sceneFolders,f.messages.join(' / '));const folder=f.library().sceneFolders[0];assert.equal(f.library().sceneCards[0].folderId,folder.id);assert.equal(f.library().sceneCards[1].folderId,undefined);await f.press('선택 씬 복제');assert.equal(f.library().sceneCards.length,3);const cloned=f.library().sceneCards[1];assert.notEqual(cloned.id,'card1');await f.press('선택 씬 삭제');await f.press('확인');assert.equal(f.library().sceneCards.length,2);assert(f.library().sceneCards.some(v=>v.id==='card2'));
+});
+
+test('cast defaults and variants use guarded inline editing and multi copy/delete without modifying original characters',async t=>{
+  const f=fixture(t);await f.press('출연 원본 캐릭터: Alice');await f.press('출연·기본 프리셋: Asset');await f.press('캐릭터 기본 프리셋 저장');f.field('출연 이름').value='Alice winter';f.field('출연 추가 포지').value='coat';await f.press('출연 저장');const original=f.library().characters[0],cast=f.library().casts[0];assert.equal(original.defaultPresetId,'p1');assert.equal(cast.extra.prompt,'coat');
+  const checkbox=f.field('출연 관리 선택: Alice winter');checkbox.checked=true;await checkbox.emit('change');await f.press('선택 출연 복제');assert.equal(f.library().casts.length,2);await f.press('선택 출연 삭제');await f.press('확인');assert.equal(f.library().casts.length,1);assert.deepEqual(f.library().characters[0],original);
+  await f.press('출연 편집: Alice winter (복사본)');f.field('출연 추가 포지').value='draft-coat';await f.field('출연 추가 포지').emit('input');f.ui.showPage('compose');assert.equal(f.field('편집 내용 확인').hidden,false);await f.press('편집 계속');const changed=f.library();changed.casts=[];f.setLibrary(changed);f.ui.refresh();await f.press('출연 저장');assert.match(f.messages.at(-1),/변경·삭제/);assert.equal(f.library().casts.length,0);
+});
+
+test('imported casts without optional extra text start clean and retain their trigger placement through name editing',async t=>{
+ const initial=seed();initial.casts=[{id:'cast',name:'Imported',characterId:'c1',presetId:'p1',triggerPosition:'end'}];const f=fixture(t,initial);await f.press('출연 편집: Imported');f.ui.showPage('compose');assert.equal(f.field('편집 내용 확인').hidden,true);f.field('출연 이름').value='Renamed';await f.field('출연 이름').emit('input');await f.press('출연 저장');assert.equal(f.library().casts[0].triggerPosition,'end');f.ui.showPage('studio');assert.equal(f.field('편집 내용 확인').hidden,true);
+});
 
 test('compose batch and mode freeze per reservation and reach different API payloads',async t=>{
   const f=fixture(t);await f.choose('표정');await f.select('조합 생성 모드','pro');await f.select('생성당 이미지 수','4');await f.press('이 조합 예약 추가');
@@ -394,7 +451,7 @@ test('bulk storage failure and import refresh never discard originals or retain 
 
 test('workbench tabs keep one visible screen and retain every unsaved draft and checked chunk',async t=>{
   const f=fixture(t),tabs=f.all().filter(item=>item.getAttribute('role')==='tab');
-  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','라이브러리','청크','캐릭터','모델·LoRA','공통문']);
+  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','라이브러리','씬·일괄 예약','이미지 정보','청크','캐릭터','모델·LoRA','공통문']);
   assert.equal(tabs[0].getAttribute('aria-selected'),'true');
   await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='unsaved chunk';
   await f.select('저장한 캐릭터','c1');f.field('캐릭터 프롬프트').value='unsaved character';
@@ -415,7 +472,7 @@ test('workbench tabs keep one visible screen and retain every unsaved draft and 
 test('tab arrows wrap, Home and End move focus, and view navigation remains available during generation',async t=>{
   const f=fixture(t);f.ui.addPage('queue','대기열');f.ui.addPage('settings','설정');f.setBusy(true);
   const tabs=f.field('PixAI 작업 화면').children;
-  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','라이브러리','대기열','설정']);
+  assert.deepEqual(tabs.map(item=>item.textContent),['조합 예약','라이브러리','씬·일괄 예약','이미지 정보','대기열','설정']);
   await tabs[0].emit('keydown',{key:'ArrowLeft'});assert.equal(document.activeElement,tabs.at(-1));
   assert.equal(tabs.at(-1).getAttribute('aria-selected'),'true');assert.equal(tabs.at(-1).disabled,false);
   await tabs.at(-1).emit('keydown',{key:'ArrowRight'});assert.equal(document.activeElement,tabs[0]);
