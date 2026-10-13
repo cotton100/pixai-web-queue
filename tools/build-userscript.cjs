@@ -14,3 +14,4 @@ for(const [marker,name] of [['PARITY CORE','parity-core.js'],['IMAGE INFO','imag
 }
 if(process.argv.includes('--check')) {if(text!==original)throw new Error('Bundled userscript is stale: run node tools/build-userscript.cjs');}
 else fs.writeFileSync(file,text);
+require('./build-development-userscript.cjs').buildDevelopmentUserscript({directory:root,check:process.argv.includes('--check')});

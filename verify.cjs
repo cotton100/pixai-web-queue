@@ -212,6 +212,16 @@ test('release metadata preserves install identity and pins both update URLs to t
   assert.equal(field('version'),version);assert.ok(source.includes(`PixAI 대기열 · ${version}`));
 });
 
+test('update channel info separates the running build from manager overrides and never accepts an unknown install URL',()=>{
+  const core=sandbox.module.exports,version=JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'package.json'),'utf8')).version;
+  assert.deepEqual(JSON.parse(JSON.stringify(core.updateChannelInfo())),{installed:'stable',version,automatic:null,enabled:null});
+  assert.equal(core.updateChannelInfo({script:{updateURL:core.UPDATE_URLS.stable}}).automatic,'stable');
+  const overridden=core.updateChannelInfo({scriptUpdateURL:core.UPDATE_URLS.development,scriptWillUpdate:false,script:{updateURL:core.UPDATE_URLS.stable}});assert.equal(overridden.installed,'stable');assert.equal(overridden.automatic,'development');assert.equal(overridden.enabled,false);
+  assert.equal(core.updateChannelInfo({scriptUpdateURL:'https://example.test/custom.user.js?private=fixture'}).automatic,null);
+  assert.equal(core.updateChannelInfo({scriptUpdateURL:'',script:{downloadURL:core.UPDATE_URLS.stable}}).automatic,null);
+  assert.equal(core.updateChannelUrl('development'),core.UPDATE_URLS.development);assert.throws(()=>core.updateChannelUrl('https://example.test/script'),/채널/);assert.throws(()=>core.updateChannelUrl('__proto__'),/채널/);
+});
+
 function activationFixture() {
   const listeners={},target={};let calls=0;const errors=[];
   const button={disabled:false,contains:element=>element===target};
@@ -317,6 +327,7 @@ function panelFixture(nativePicker, gm={}) {
     constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={};this.attrs={};this.events={};this.disabled=false;this.value='';this.textContent='';this.scrollTop=0;}
     setAttribute(key,value){this.attrs[key]=value;if(key.startsWith('data-'))this.dataset[key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;if(key==='value')this.value=value;}
     getAttribute(key){if(key.startsWith('data-')){const data=key.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase());if(data in this.dataset)return this.dataset[data];}return this.attrs[key]??null;}
+    removeAttribute(key){delete this.attrs[key];}
     append(...children){for(const child of children){child.remove();child.parentElement=this;this.children.push(child);}}
     get id(){return this.getAttribute('id')||'';}
     prepend(...children){for(const child of children)child.parentElement=this;this.children.unshift(...children);}
@@ -370,7 +381,7 @@ function panelFixture(nativePicker, gm={}) {
     GM_xmlhttpRequest:gm.request || (()=>{networkCalls++;throw Error('No network in UI fixture');}),Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info,
     GM_getValue:gm.keyStorage?.get,GM_setValue:gm.keyStorage?.set,GM_deleteValue:gm.keyStorage?.remove};
   if(gm.folderStore)context.indexedDB=folderDatabase(gm.folderStore);
-  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),context);
+  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,gm.sourceFile || 'pixai-web-queue.user.js'),'utf8'),context);
   const panel=body.querySelector('#local-pixai-queue');
   return {panel,document,siteQueries,records,storageMutations,lockNames,get networkCalls(){return networkCalls},get generateCalls(){return generateCalls},get pickerCalls(){return pickerCalls},get lockRequests(){return lockRequests},
     press(button){
@@ -387,6 +398,33 @@ function panelFixture(nativePicker, gm={}) {
 }
 
 const runtimeSettingsKeys={library:'local.pixai-web-queue.presets.v1',options:'local.pixai-web-queue.options.v1',queue:'local.pixai-web-queue.v1',previous:'local.pixai-web-queue.before-import.v1',draft:'local.pixai-web-queue.compose.v1',ack:'local.pixai-web-queue.api-cost-ack.v1'};
+
+test('update choice changes only its fixed install link and never claims a channel switch before installation',async()=>{
+  const f=panelFixture(null,{records:runtimeSettingsRecords(),queue:[job()],info:{scriptUpdateURL:sandbox.module.exports.UPDATE_URLS.stable,scriptWillUpdate:true}}),link=f.panel.querySelector('[data-update-install]'),status=f.panel.querySelector('[data-update-status]'),before=new Map(f.records);
+  assert.match(status.textContent,/현재 설치: 안정판/);assert.equal(link.getAttribute('href'),sandbox.module.exports.UPDATE_URLS.stable);assert.equal(link.getAttribute('rel'),'noopener noreferrer');
+  f.press(f.panel.querySelector('[aria-label="업데이트 채널: 개발판"]'));await runtimeFlush();assert.equal(link.getAttribute('href'),sandbox.module.exports.UPDATE_URLS.development);assert.match(status.textContent,/현재 설치: 안정판/);assert.equal(f.panel.querySelector('[aria-label="업데이트 채널: 개발판"]').getAttribute('aria-pressed'),'true');
+  link.fire('click');assert.match(f.panel.querySelector('[data-update-feedback]').textContent,/설치 화면에서.*확인/);assert(!f.panel.querySelector('[data-update-feedback]').textContent.includes('전환 완료'));assert.deepEqual(f.records,before);assert.equal(f.storageMutations.length,0);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+  let prevented=false;link.fire('click',{isTrusted:false,preventDefault(){prevented=true;}});assert(prevented);
+  const fresh=panelFixture(null,{records:new Map(f.records)});assert.equal(fresh.panel.querySelector('[data-update-install]').getAttribute('href'),sandbox.module.exports.UPDATE_URLS.stable);assert.match(fresh.panel.querySelector('[data-update-status]').textContent,/현재 설치: 안정판/);
+});
+
+test('generated development runtime reports its build and points a stable switch at main without rewriting data',async()=>{
+  const records=runtimeSettingsRecords(),f=panelFixture(null,{records,sourceFile:'pixai-web-queue.dev.user.js',info:{scriptUpdateURL:sandbox.module.exports.UPDATE_URLS.development}}),link=f.panel.querySelector('[data-update-install]');
+  assert.match(f.panel.querySelector('[data-update-status]').textContent,/현재 설치: 개발판.*-dev\.1/);assert.equal(link.getAttribute('href'),sandbox.module.exports.UPDATE_URLS.development);
+  f.press(f.panel.querySelector('[aria-label="업데이트 채널: 안정판"]'));await runtimeFlush();assert.equal(link.getAttribute('href'),sandbox.module.exports.UPDATE_URLS.stable);assert.match(f.panel.querySelector('[data-update-status]').textContent,/현재 설치: 개발판/);assert.equal(f.storageMutations.length,0);assert.deepEqual(f.records,records);assert.equal(f.networkCalls,0);
+});
+
+test('pending generation disables channel choices and blocks native installation link activation',async()=>{
+  let checks=0,finish;const folder={name:'fixture',queryPermission:()=>++checks===2?new Promise(resolve=>{finish=resolve}):Promise.resolve('granted')};const f=panelFixture(()=>Promise.resolve(folder),{queue:[job()]});
+  f.press(f.panel.querySelector('[data-choose-folder]'));await runtimeFlush();f.press(f.panel.querySelector('[data-start]'));await runtimeFlush();const link=f.panel.querySelector('[data-update-install]'),before=new Map(f.records);
+  assert.equal(f.panel.querySelector('[aria-label="업데이트 채널: 개발판"]').disabled,true);assert.equal(link.getAttribute('aria-disabled'),'true');assert.equal(link.getAttribute('tabindex'),'-1');assert.equal(link.getAttribute('href'),null);let prevented=false;link.fire('click',{preventDefault(){prevented=true;}});assert(prevented);assert.deepEqual(f.records,before);assert.match(f.message(),/실행·저장 준비/);assert.equal(f.generateCalls,0);finish('denied');await runtimeFlush();assert.equal(link.getAttribute('aria-disabled'),'false');assert.equal(link.getAttribute('href'),sandbox.module.exports.UPDATE_URLS.stable);
+});
+
+test('pending folder selection disables both channel choices and removes the native link until cancellation',async()=>{
+  let cancel;const f=panelFixture(()=>new Promise((_resolve,reject)=>{cancel=reject}));f.press(f.panel.querySelector('[data-choose-folder]'));await runtimeFlush();const link=f.panel.querySelector('[data-update-install]');
+  assert.equal(link.getAttribute('href'),null);assert.equal(f.panel.querySelector('[aria-label="업데이트 채널: 개발판"]').disabled,true);assert.equal(f.panel.querySelector('[aria-label="업데이트 채널: 안정판"]').disabled,true);
+  cancel(Object.assign(Error('cancelled'),{name:'AbortError'}));await runtimeFlush();assert.equal(link.getAttribute('href'),sandbox.module.exports.UPDATE_URLS.stable);assert.equal(f.panel.querySelector('[aria-label="업데이트 채널: 개발판"]').disabled,false);assert.equal(f.networkCalls,0);assert.equal(f.storageMutations.length,0);
+});
 
 test('optional PNG recording survives a fresh mount and rejects another tab runner lock without changing stored flags',async()=>{
   const f=panelFixture(null),checkbox=f.panel.querySelector('[aria-label="PNG에 생성 요청 정보 기록 (선택)"]');assert.equal(checkbox.checked,false);checkbox.checked=true;checkbox.fire('change');await runtimeFlush();assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.options)).embedMetadata,true);const fresh=panelFixture(null,{records:new Map(f.records)});assert.equal(fresh.panel.querySelector('[aria-label="PNG에 생성 요청 정보 기록 (선택)"]').checked,true);assert.equal(fresh.networkCalls,0);
