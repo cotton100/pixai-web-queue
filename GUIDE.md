@@ -1,6 +1,6 @@
 # PixAI 대기열 사용 설명서
 
-PixAI 공식 API로 **프리셋·캐릭터·청크·씬을 조합하고, 여러 작업을 예약해 생성·저장**하는 비공식 유저스크립트입니다. 이 설명서는 **개발판 0.10.3-dev.1** 기준이며, 기본 설치 링크는 main의 안정판을 제공합니다. [안정판 설치·업데이트](https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js) · [개발판 설치·업데이트](https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js) · [자세한 동작과 검증 기록](README.md)
+PixAI 공식 API로 **프리셋·캐릭터·청크·씬을 조합하고, 여러 작업을 예약해 생성·저장**하는 비공식 유저스크립트입니다. 이 설명서는 **정식판 0.10.3** 기준이며, 기본 설치 링크는 main의 안정판을 제공합니다. [안정판 설치·업데이트](https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js) · [개발판 설치·업데이트](https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js) · [자세한 동작과 검증 기록](README.md)
 
 > 공식 PixAI 제품이 아닙니다. 생성에는 API 크레딧이 사용됩니다. 처음에는 **첫 작업만 실행**으로 작은 작업을 확인해 주세요.
 
