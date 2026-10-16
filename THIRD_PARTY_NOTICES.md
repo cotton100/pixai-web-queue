@@ -28,3 +28,10 @@ image fallback, and browser-local bounded thumbnail caching. No Electron or
 native app runtime is redistributed. The `modules/` sources and
 `tools/build-userscript.cjs` reproduce the bundled additions without fetching
 code from a CDN. Material Icons retain their separate Apache 2.0 license above.
+
+The 0.10.3 backup interoperability update adapts `backup-transfer.ts` and the
+bounded JSON-size calculation from PixaiClackHelper 0.1.18, commit
+be258addbb29ad0aa171d627db4ac26add950b27, under the same GPL-3.0 license.
+Changes include browser validators, JSON copying without native dependencies,
+safe partial import controls, and app-compatible inner v1 exports. Synthetic
+fixtures record that source revision; no user data or credentials are included.
