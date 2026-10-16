@@ -1,0 +1,1477 @@
+{
+  "provenance": {
+    "repository": "https://github.com/cotton100/PixaiClackHelper",
+    "head": "be258addbb29ad0aa171d627db4ac26add950b27",
+    "version": "0.1.18",
+    "sourceFiles": [
+      "src/shared/pixai/library.ts",
+      "src/shared/pixai/backup-transfer.ts",
+      "src/shared/pixai/batch-reserve.ts"
+    ],
+    "fixtureKind": "public synthetic materials only; no database, key, account, or generated personal assets"
+  },
+  "library": {
+    "version": 1,
+    "common": {
+      "prompt": "synthetic quality",
+      "negativePrompt": "synthetic blur"
+    },
+    "presets": [
+      {
+        "id": "p1",
+        "name": "합성 모델",
+        "model": {
+          "id": "10",
+          "name": "Synthetic model",
+          "versionId": "100"
+        },
+        "loras": [
+          {
+            "id": "20",
+            "name": "Synthetic LoRA",
+            "weight": 0.5,
+            "versionId": "200",
+            "triggerWords": "synthetic trigger"
+          }
+        ],
+        "commonPresetId": "common1",
+        "prompt": "preset detail",
+        "negativePrompt": "preset negative"
+      }
+    ],
+    "characters": [
+      {
+        "id": "c1",
+        "name": "합성 Alice",
+        "prompt": "alice",
+        "negativePrompt": "character negative",
+        "defaultPresetId": "p1",
+        "folderId": "cf1"
+      },
+      {
+        "id": "c2",
+        "name": "합성 Bob",
+        "prompt": "bob",
+        "negativePrompt": "",
+        "defaultPresetId": "p1"
+      }
+    ],
+    "chunkFolders": [
+      {
+        "id": "f1",
+        "name": "합성 표정"
+      },
+      {
+        "id": "f2",
+        "name": "합성 행동"
+      },
+      {
+        "id": "f-empty",
+        "name": "빈 청크 폴더"
+      }
+    ],
+    "scenes": [
+      {
+        "id": "s1",
+        "name": "웃음",
+        "prompt": "live smile",
+        "negativePrompt": "chunk negative",
+        "folderId": "f1"
+      },
+      {
+        "id": "s2",
+        "name": "손 흔듦",
+        "prompt": "wave",
+        "negativePrompt": "",
+        "folderId": "f2"
+      },
+      {
+        "id": "s3",
+        "name": "미분류",
+        "prompt": "angry",
+        "negativePrompt": ""
+      }
+    ],
+    "reservations": [
+      {
+        "id": "r2",
+        "presetId": "p1",
+        "characterId": "c1",
+        "sceneIds": [
+          "s1",
+          "s2"
+        ],
+        "count": 1,
+        "triggerPosition": "end",
+        "imageOptions": {
+          "aspectRatio": "5:3",
+          "size": "1k",
+          "mode": "pro",
+          "batchSize": 4
+        },
+        "sourceSceneId": "sc1",
+        "batch": {
+          "id": "r1",
+          "name": "합성 일괄 조합",
+          "rowName": "합성 Alice",
+          "columnName": "합성 편집 씬"
+        },
+        "snapshot": {
+          "common": {
+            "prompt": "set quality",
+            "negativePrompt": "set blur"
+          },
+          "preset": {
+            "id": "p1",
+            "name": "합성 모델",
+            "model": {
+              "id": "10",
+              "name": "Synthetic model",
+              "versionId": "100"
+            },
+            "loras": [
+              {
+                "id": "20",
+                "name": "Synthetic LoRA",
+                "weight": 0.5,
+                "versionId": "200",
+                "triggerWords": "synthetic trigger"
+              }
+            ],
+            "commonPresetId": "common1",
+            "prompt": "preset detail",
+            "negativePrompt": "preset negative"
+          },
+          "character": {
+            "id": "c1",
+            "name": "합성 Alice",
+            "prompt": "alice",
+            "negativePrompt": "character negative",
+            "defaultPresetId": "p1"
+          },
+          "chunks": [
+            {
+              "id": "s1",
+              "name": "웃음",
+              "prompt": "scene-only edited smile",
+              "negativePrompt": "chunk negative"
+            },
+            {
+              "id": "s2",
+              "name": "손 흔듦",
+              "prompt": "wave",
+              "negativePrompt": ""
+            }
+          ],
+          "extras": {
+            "scene": {
+              "prompt": "scene extra",
+              "negativePrompt": "scene negative"
+            }
+          }
+        }
+      },
+      {
+        "id": "r3",
+        "presetId": "p1",
+        "characterId": "c1",
+        "sceneIds": [
+          "s1",
+          "s2"
+        ],
+        "count": 1,
+        "triggerPosition": "end",
+        "imageOptions": {
+          "aspectRatio": "5:3",
+          "size": "1k",
+          "mode": "pro",
+          "batchSize": 4
+        },
+        "sourceSceneId": "sc1",
+        "batch": {
+          "id": "r1",
+          "name": "합성 일괄 조합",
+          "rowName": "합성 복장",
+          "columnName": "합성 편집 씬"
+        },
+        "snapshot": {
+          "common": {
+            "prompt": "set quality",
+            "negativePrompt": "set blur"
+          },
+          "preset": {
+            "id": "p1",
+            "name": "합성 모델",
+            "model": {
+              "id": "10",
+              "name": "Synthetic model",
+              "versionId": "100"
+            },
+            "loras": [
+              {
+                "id": "20",
+                "name": "Synthetic LoRA",
+                "weight": 0.5,
+                "versionId": "200",
+                "triggerWords": "synthetic trigger"
+              }
+            ],
+            "commonPresetId": "common1",
+            "prompt": "preset detail",
+            "negativePrompt": "preset negative"
+          },
+          "character": {
+            "id": "c1",
+            "name": "합성 Alice",
+            "prompt": "alice",
+            "negativePrompt": "character negative",
+            "defaultPresetId": "p1"
+          },
+          "chunks": [
+            {
+              "id": "s1",
+              "name": "웃음",
+              "prompt": "scene-only edited smile",
+              "negativePrompt": "chunk negative"
+            },
+            {
+              "id": "s2",
+              "name": "손 흔듦",
+              "prompt": "wave",
+              "negativePrompt": ""
+            }
+          ],
+          "extras": {
+            "cast": {
+              "prompt": "cast outfit",
+              "negativePrompt": "cast negative"
+            },
+            "scene": {
+              "prompt": "scene extra",
+              "negativePrompt": "scene negative"
+            }
+          }
+        }
+      },
+      {
+        "id": "r4",
+        "presetId": "p1",
+        "characterId": "c1",
+        "sceneIds": [
+          "s2"
+        ],
+        "count": 1,
+        "sourceSceneId": "sc2",
+        "batch": {
+          "id": "r1",
+          "name": "합성 일괄 조합",
+          "rowName": "합성 Alice",
+          "columnName": "합성 다른 씬"
+        },
+        "snapshot": {
+          "common": {
+            "prompt": "set quality",
+            "negativePrompt": "set blur"
+          },
+          "preset": {
+            "id": "p1",
+            "name": "합성 모델",
+            "model": {
+              "id": "10",
+              "name": "Synthetic model",
+              "versionId": "100"
+            },
+            "loras": [
+              {
+                "id": "20",
+                "name": "Synthetic LoRA",
+                "weight": 0.5,
+                "versionId": "200",
+                "triggerWords": "synthetic trigger"
+              }
+            ],
+            "commonPresetId": "common1",
+            "prompt": "preset detail",
+            "negativePrompt": "preset negative"
+          },
+          "character": {
+            "id": "c1",
+            "name": "합성 Alice",
+            "prompt": "alice",
+            "negativePrompt": "character negative",
+            "defaultPresetId": "p1"
+          },
+          "chunks": [
+            {
+              "id": "s2",
+              "name": "손 흔듦",
+              "prompt": "wave",
+              "negativePrompt": ""
+            }
+          ]
+        }
+      },
+      {
+        "id": "r-legacy",
+        "presetId": "p1",
+        "characterId": "c1",
+        "sceneIds": [
+          "s3"
+        ],
+        "count": 1
+      }
+    ],
+    "combinations": [
+      {
+        "id": "h1",
+        "presetId": "p1",
+        "characterId": "c1",
+        "sceneIds": [
+          "s1"
+        ],
+        "count": 2,
+        "favorite": true,
+        "name": "합성 즐겨찾기",
+        "at": 1,
+        "triggerPosition": "end"
+      }
+    ],
+    "commonPresets": [
+      {
+        "id": "common1",
+        "name": "합성 공통문",
+        "prompt": "set quality",
+        "negativePrompt": "set blur"
+      }
+    ],
+    "characterFolders": [
+      {
+        "id": "cf1",
+        "name": "합성 캐릭터 폴더"
+      },
+      {
+        "id": "cf-empty",
+        "name": "빈 캐릭터 폴더"
+      }
+    ],
+    "sceneFolders": [
+      {
+        "id": "sf1",
+        "name": "합성 첫 씬"
+      },
+      {
+        "id": "sf2",
+        "name": "합성 다른 씬"
+      },
+      {
+        "id": "sf-empty",
+        "name": "빈 씬 폴더"
+      }
+    ],
+    "sceneCards": [
+      {
+        "id": "sc1",
+        "name": "합성 편집 씬",
+        "sceneIds": [
+          "s1",
+          "s2"
+        ],
+        "chunks": [
+          {
+            "id": "s1",
+            "name": "웃음",
+            "prompt": "scene-only edited smile",
+            "negativePrompt": "chunk negative"
+          },
+          {
+            "id": "s2",
+            "name": "손 흔듦",
+            "prompt": "wave",
+            "negativePrompt": ""
+          }
+        ],
+        "extra": {
+          "prompt": "scene extra",
+          "negativePrompt": "scene negative"
+        },
+        "imageOptions": {
+          "aspectRatio": "5:3",
+          "size": "1k",
+          "mode": "pro",
+          "batchSize": 4
+        },
+        "triggerPosition": "end",
+        "folderId": "sf1"
+      },
+      {
+        "id": "sc2",
+        "name": "합성 다른 씬",
+        "sceneIds": [
+          "s2"
+        ],
+        "chunks": [
+          {
+            "id": "s2",
+            "name": "손 흔듦",
+            "prompt": "wave",
+            "negativePrompt": ""
+          }
+        ],
+        "folderId": "sf2"
+      },
+      {
+        "id": "sc3",
+        "name": "합성 미분류 씬",
+        "sceneIds": [
+          "s3"
+        ],
+        "chunks": [
+          {
+            "id": "s3",
+            "name": "미분류",
+            "prompt": "angry",
+            "negativePrompt": ""
+          }
+        ]
+      }
+    ],
+    "casts": [
+      {
+        "id": "cast1",
+        "name": "합성 복장",
+        "characterId": "c1",
+        "presetId": "p1",
+        "extra": {
+          "prompt": "cast outfit",
+          "negativePrompt": "cast negative"
+        },
+        "triggerPosition": "end"
+      }
+    ],
+    "batchPlans": [
+      {
+        "id": "plan1",
+        "name": "합성 일괄 조합",
+        "rows": [
+          {
+            "kind": "character",
+            "id": "c1"
+          },
+          {
+            "kind": "cast",
+            "id": "cast1"
+          }
+        ],
+        "columns": [
+          "sc1",
+          "sc2"
+        ],
+        "count": 1,
+        "exceptions": {
+          "cast:cast1|sc2": 0
+        },
+        "order": "byColumn"
+      }
+    ]
+  },
+  "options": {
+    "maxCredits": null,
+    "filePrefix": "synthetic-optional-prefix",
+    "repeat": 3,
+    "imageCount": 4,
+    "maxInFlight": 2,
+    "api": {
+      "modelVersionId": "100",
+      "aspectRatio": "5:3",
+      "size": "1k",
+      "mode": "pro",
+      "style": "",
+      "seed": 123
+    },
+    "ui": {
+      "sceneView": "grid"
+    }
+  },
+  "meta": {
+    "appVersion": "0.1.18",
+    "exportedAt": "2026-10-16T00:00:00.000Z"
+  },
+  "outputs": {
+    "full": {
+      "format": "pixai-web-queue-settings",
+      "version": 1,
+      "appVersion": "0.1.18",
+      "exportedAt": "2026-10-16T00:00:00.000Z",
+      "library": {
+        "version": 1,
+        "common": {
+          "prompt": "synthetic quality",
+          "negativePrompt": "synthetic blur"
+        },
+        "presets": [
+          {
+            "id": "p1",
+            "name": "합성 모델",
+            "model": {
+              "id": "10",
+              "name": "Synthetic model",
+              "versionId": "100"
+            },
+            "loras": [
+              {
+                "id": "20",
+                "name": "Synthetic LoRA",
+                "weight": 0.5,
+                "versionId": "200",
+                "triggerWords": "synthetic trigger"
+              }
+            ],
+            "commonPresetId": "common1",
+            "prompt": "preset detail",
+            "negativePrompt": "preset negative"
+          }
+        ],
+        "characters": [
+          {
+            "id": "c1",
+            "name": "합성 Alice",
+            "prompt": "alice",
+            "negativePrompt": "character negative",
+            "defaultPresetId": "p1",
+            "folderId": "cf1"
+          },
+          {
+            "id": "c2",
+            "name": "합성 Bob",
+            "prompt": "bob",
+            "negativePrompt": "",
+            "defaultPresetId": "p1"
+          }
+        ],
+        "chunkFolders": [
+          {
+            "id": "f1",
+            "name": "합성 표정"
+          },
+          {
+            "id": "f2",
+            "name": "합성 행동"
+          },
+          {
+            "id": "f-empty",
+            "name": "빈 청크 폴더"
+          }
+        ],
+        "scenes": [
+          {
+            "id": "s1",
+            "name": "웃음",
+            "prompt": "live smile",
+            "negativePrompt": "chunk negative",
+            "folderId": "f1"
+          },
+          {
+            "id": "s2",
+            "name": "손 흔듦",
+            "prompt": "wave",
+            "negativePrompt": "",
+            "folderId": "f2"
+          },
+          {
+            "id": "s3",
+            "name": "미분류",
+            "prompt": "angry",
+            "negativePrompt": ""
+          }
+        ],
+        "reservations": [
+          {
+            "id": "r2",
+            "presetId": "p1",
+            "characterId": "c1",
+            "sceneIds": [
+              "s1",
+              "s2"
+            ],
+            "count": 1,
+            "triggerPosition": "end",
+            "imageOptions": {
+              "aspectRatio": "5:3",
+              "size": "1k",
+              "mode": "pro",
+              "batchSize": 4
+            },
+            "sourceSceneId": "sc1",
+            "batch": {
+              "id": "r1",
+              "name": "합성 일괄 조합",
+              "rowName": "합성 Alice",
+              "columnName": "합성 편집 씬"
+            },
+            "snapshot": {
+              "common": {
+                "prompt": "set quality",
+                "negativePrompt": "set blur"
+              },
+              "preset": {
+                "id": "p1",
+                "name": "합성 모델",
+                "model": {
+                  "id": "10",
+                  "name": "Synthetic model",
+                  "versionId": "100"
+                },
+                "loras": [
+                  {
+                    "id": "20",
+                    "name": "Synthetic LoRA",
+                    "weight": 0.5,
+                    "versionId": "200",
+                    "triggerWords": "synthetic trigger"
+                  }
+                ],
+                "commonPresetId": "common1",
+                "prompt": "preset detail",
+                "negativePrompt": "preset negative"
+              },
+              "character": {
+                "id": "c1",
+                "name": "합성 Alice",
+                "prompt": "alice",
+                "negativePrompt": "character negative",
+                "defaultPresetId": "p1"
+              },
+              "chunks": [
+                {
+                  "id": "s1",
+                  "name": "웃음",
+                  "prompt": "scene-only edited smile",
+                  "negativePrompt": "chunk negative"
+                },
+                {
+                  "id": "s2",
+                  "name": "손 흔듦",
+                  "prompt": "wave",
+                  "negativePrompt": ""
+                }
+              ],
+              "extras": {
+                "scene": {
+                  "prompt": "scene extra",
+                  "negativePrompt": "scene negative"
+                }
+              }
+            }
+          },
+          {
+            "id": "r3",
+            "presetId": "p1",
+            "characterId": "c1",
+            "sceneIds": [
+              "s1",
+              "s2"
+            ],
+            "count": 1,
+            "triggerPosition": "end",
+            "imageOptions": {
+              "aspectRatio": "5:3",
+              "size": "1k",
+              "mode": "pro",
+              "batchSize": 4
+            },
+            "sourceSceneId": "sc1",
+            "batch": {
+              "id": "r1",
+              "name": "합성 일괄 조합",
+              "rowName": "합성 복장",
+              "columnName": "합성 편집 씬"
+            },
+            "snapshot": {
+              "common": {
+                "prompt": "set quality",
+                "negativePrompt": "set blur"
+              },
+              "preset": {
+                "id": "p1",
+                "name": "합성 모델",
+                "model": {
+                  "id": "10",
+                  "name": "Synthetic model",
+                  "versionId": "100"
+                },
+                "loras": [
+                  {
+                    "id": "20",
+                    "name": "Synthetic LoRA",
+                    "weight": 0.5,
+                    "versionId": "200",
+                    "triggerWords": "synthetic trigger"
+                  }
+                ],
+                "commonPresetId": "common1",
+                "prompt": "preset detail",
+                "negativePrompt": "preset negative"
+              },
+              "character": {
+                "id": "c1",
+                "name": "합성 Alice",
+                "prompt": "alice",
+                "negativePrompt": "character negative",
+                "defaultPresetId": "p1"
+              },
+              "chunks": [
+                {
+                  "id": "s1",
+                  "name": "웃음",
+                  "prompt": "scene-only edited smile",
+                  "negativePrompt": "chunk negative"
+                },
+                {
+                  "id": "s2",
+                  "name": "손 흔듦",
+                  "prompt": "wave",
+                  "negativePrompt": ""
+                }
+              ],
+              "extras": {
+                "cast": {
+                  "prompt": "cast outfit",
+                  "negativePrompt": "cast negative"
+                },
+                "scene": {
+                  "prompt": "scene extra",
+                  "negativePrompt": "scene negative"
+                }
+              }
+            }
+          },
+          {
+            "id": "r4",
+            "presetId": "p1",
+            "characterId": "c1",
+            "sceneIds": [
+              "s2"
+            ],
+            "count": 1,
+            "sourceSceneId": "sc2",
+            "batch": {
+              "id": "r1",
+              "name": "합성 일괄 조합",
+              "rowName": "합성 Alice",
+              "columnName": "합성 다른 씬"
+            },
+            "snapshot": {
+              "common": {
+                "prompt": "set quality",
+                "negativePrompt": "set blur"
+              },
+              "preset": {
+                "id": "p1",
+                "name": "합성 모델",
+                "model": {
+                  "id": "10",
+                  "name": "Synthetic model",
+                  "versionId": "100"
+                },
+                "loras": [
+                  {
+                    "id": "20",
+                    "name": "Synthetic LoRA",
+                    "weight": 0.5,
+                    "versionId": "200",
+                    "triggerWords": "synthetic trigger"
+                  }
+                ],
+                "commonPresetId": "common1",
+                "prompt": "preset detail",
+                "negativePrompt": "preset negative"
+              },
+              "character": {
+                "id": "c1",
+                "name": "합성 Alice",
+                "prompt": "alice",
+                "negativePrompt": "character negative",
+                "defaultPresetId": "p1"
+              },
+              "chunks": [
+                {
+                  "id": "s2",
+                  "name": "손 흔듦",
+                  "prompt": "wave",
+                  "negativePrompt": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "r-legacy",
+            "presetId": "p1",
+            "characterId": "c1",
+            "sceneIds": [
+              "s3"
+            ],
+            "count": 1
+          }
+        ],
+        "combinations": [
+          {
+            "id": "h1",
+            "presetId": "p1",
+            "characterId": "c1",
+            "sceneIds": [
+              "s1"
+            ],
+            "count": 2,
+            "favorite": true,
+            "name": "합성 즐겨찾기",
+            "at": 1,
+            "triggerPosition": "end"
+          }
+        ],
+        "commonPresets": [
+          {
+            "id": "common1",
+            "name": "합성 공통문",
+            "prompt": "set quality",
+            "negativePrompt": "set blur"
+          }
+        ],
+        "characterFolders": [
+          {
+            "id": "cf1",
+            "name": "합성 캐릭터 폴더"
+          },
+          {
+            "id": "cf-empty",
+            "name": "빈 캐릭터 폴더"
+          }
+        ],
+        "sceneFolders": [
+          {
+            "id": "sf1",
+            "name": "합성 첫 씬"
+          },
+          {
+            "id": "sf2",
+            "name": "합성 다른 씬"
+          },
+          {
+            "id": "sf-empty",
+            "name": "빈 씬 폴더"
+          }
+        ],
+        "sceneCards": [
+          {
+            "id": "sc1",
+            "name": "합성 편집 씬",
+            "sceneIds": [
+              "s1",
+              "s2"
+            ],
+            "chunks": [
+              {
+                "id": "s1",
+                "name": "웃음",
+                "prompt": "scene-only edited smile",
+                "negativePrompt": "chunk negative"
+              },
+              {
+                "id": "s2",
+                "name": "손 흔듦",
+                "prompt": "wave",
+                "negativePrompt": ""
+              }
+            ],
+            "extra": {
+              "prompt": "scene extra",
+              "negativePrompt": "scene negative"
+            },
+            "imageOptions": {
+              "aspectRatio": "5:3",
+              "size": "1k",
+              "mode": "pro",
+              "batchSize": 4
+            },
+            "triggerPosition": "end",
+            "folderId": "sf1"
+          },
+          {
+            "id": "sc2",
+            "name": "합성 다른 씬",
+            "sceneIds": [
+              "s2"
+            ],
+            "chunks": [
+              {
+                "id": "s2",
+                "name": "손 흔듦",
+                "prompt": "wave",
+                "negativePrompt": ""
+              }
+            ],
+            "folderId": "sf2"
+          },
+          {
+            "id": "sc3",
+            "name": "합성 미분류 씬",
+            "sceneIds": [
+              "s3"
+            ],
+            "chunks": [
+              {
+                "id": "s3",
+                "name": "미분류",
+                "prompt": "angry",
+                "negativePrompt": ""
+              }
+            ]
+          }
+        ],
+        "casts": [
+          {
+            "id": "cast1",
+            "name": "합성 복장",
+            "characterId": "c1",
+            "presetId": "p1",
+            "extra": {
+              "prompt": "cast outfit",
+              "negativePrompt": "cast negative"
+            },
+            "triggerPosition": "end"
+          }
+        ],
+        "batchPlans": [
+          {
+            "id": "plan1",
+            "name": "합성 일괄 조합",
+            "rows": [
+              {
+                "kind": "character",
+                "id": "c1"
+              },
+              {
+                "kind": "cast",
+                "id": "cast1"
+              }
+            ],
+            "columns": [
+              "sc1",
+              "sc2"
+            ],
+            "count": 1,
+            "exceptions": {
+              "cast:cast1|sc2": 0
+            },
+            "order": "byColumn"
+          }
+        ]
+      },
+      "options": {
+        "maxCredits": null,
+        "filePrefix": "synthetic-optional-prefix",
+        "repeat": 3,
+        "ui": {
+          "sceneView": "grid"
+        },
+        "maxInFlight": 2,
+        "imageCount": 4,
+        "api": {
+          "modelVersionId": "100",
+          "aspectRatio": "5:3",
+          "size": "1k",
+          "mode": "pro",
+          "style": "",
+          "seed": 123
+        }
+      }
+    },
+    "category": {
+      "format": "pixai-clack-helper-selection",
+      "version": 1,
+      "selection": {
+        "sceneCards": true,
+        "scenes": false,
+        "characters": false,
+        "presets": false,
+        "commonPresets": false,
+        "casts": false,
+        "batchPlans": false,
+        "reservations": false,
+        "combinations": false,
+        "common": false,
+        "options": false
+      },
+      "backup": {
+        "format": "pixai-web-queue-settings",
+        "version": 1,
+        "appVersion": "0.1.18",
+        "exportedAt": "2026-10-16T00:00:00.000Z",
+        "library": {
+          "version": 1,
+          "common": {
+            "prompt": "",
+            "negativePrompt": ""
+          },
+          "presets": [],
+          "characters": [],
+          "chunkFolders": [
+            {
+              "id": "f1",
+              "name": "합성 표정"
+            },
+            {
+              "id": "f2",
+              "name": "합성 행동"
+            }
+          ],
+          "scenes": [
+            {
+              "id": "s1",
+              "name": "웃음",
+              "prompt": "live smile",
+              "negativePrompt": "chunk negative",
+              "folderId": "f1"
+            },
+            {
+              "id": "s2",
+              "name": "손 흔듦",
+              "prompt": "wave",
+              "negativePrompt": "",
+              "folderId": "f2"
+            },
+            {
+              "id": "s3",
+              "name": "미분류",
+              "prompt": "angry",
+              "negativePrompt": ""
+            }
+          ],
+          "reservations": [],
+          "combinations": [],
+          "commonPresets": [],
+          "characterFolders": [],
+          "sceneFolders": [
+            {
+              "id": "sf1",
+              "name": "합성 첫 씬"
+            },
+            {
+              "id": "sf2",
+              "name": "합성 다른 씬"
+            },
+            {
+              "id": "sf-empty",
+              "name": "빈 씬 폴더"
+            }
+          ],
+          "sceneCards": [
+            {
+              "id": "sc1",
+              "name": "합성 편집 씬",
+              "sceneIds": [
+                "s1",
+                "s2"
+              ],
+              "chunks": [
+                {
+                  "id": "s1",
+                  "name": "웃음",
+                  "prompt": "scene-only edited smile",
+                  "negativePrompt": "chunk negative"
+                },
+                {
+                  "id": "s2",
+                  "name": "손 흔듦",
+                  "prompt": "wave",
+                  "negativePrompt": ""
+                }
+              ],
+              "extra": {
+                "prompt": "scene extra",
+                "negativePrompt": "scene negative"
+              },
+              "imageOptions": {
+                "aspectRatio": "5:3",
+                "size": "1k",
+                "mode": "pro",
+                "batchSize": 4
+              },
+              "triggerPosition": "end",
+              "folderId": "sf1"
+            },
+            {
+              "id": "sc2",
+              "name": "합성 다른 씬",
+              "sceneIds": [
+                "s2"
+              ],
+              "chunks": [
+                {
+                  "id": "s2",
+                  "name": "손 흔듦",
+                  "prompt": "wave",
+                  "negativePrompt": ""
+                }
+              ],
+              "folderId": "sf2"
+            },
+            {
+              "id": "sc3",
+              "name": "합성 미분류 씬",
+              "sceneIds": [
+                "s3"
+              ],
+              "chunks": [
+                {
+                  "id": "s3",
+                  "name": "미분류",
+                  "prompt": "angry",
+                  "negativePrompt": ""
+                }
+              ]
+            }
+          ],
+          "casts": [],
+          "batchPlans": []
+        },
+        "options": {
+          "maxCredits": null,
+          "filePrefix": "",
+          "repeat": 1
+        }
+      }
+    },
+    "folder": {
+      "format": "pixai-clack-helper-selection",
+      "version": 2,
+      "selection": {
+        "sceneCards": false,
+        "scenes": true,
+        "characters": false,
+        "presets": false,
+        "commonPresets": false,
+        "casts": false,
+        "batchPlans": false,
+        "reservations": false,
+        "combinations": false,
+        "common": false,
+        "options": false
+      },
+      "folderSelection": {
+        "scenes": [
+          "f1",
+          "f-empty",
+          ""
+        ]
+      },
+      "backup": {
+        "format": "pixai-web-queue-settings",
+        "version": 1,
+        "appVersion": "0.1.18",
+        "exportedAt": "2026-10-16T00:00:00.000Z",
+        "library": {
+          "version": 1,
+          "common": {
+            "prompt": "",
+            "negativePrompt": ""
+          },
+          "presets": [],
+          "characters": [],
+          "chunkFolders": [
+            {
+              "id": "f1",
+              "name": "합성 표정"
+            },
+            {
+              "id": "f-empty",
+              "name": "빈 청크 폴더"
+            }
+          ],
+          "scenes": [
+            {
+              "id": "s1",
+              "name": "웃음",
+              "prompt": "live smile",
+              "negativePrompt": "chunk negative",
+              "folderId": "f1"
+            },
+            {
+              "id": "s3",
+              "name": "미분류",
+              "prompt": "angry",
+              "negativePrompt": ""
+            }
+          ],
+          "reservations": [],
+          "combinations": [],
+          "commonPresets": [],
+          "characterFolders": [],
+          "sceneFolders": [],
+          "sceneCards": [],
+          "casts": [],
+          "batchPlans": []
+        },
+        "options": {
+          "maxCredits": null,
+          "filePrefix": "",
+          "repeat": 1
+        }
+      }
+    },
+    "sceneFolder": {
+      "format": "pixai-clack-helper-selection",
+      "version": 2,
+      "selection": {
+        "sceneCards": true,
+        "scenes": false,
+        "characters": false,
+        "presets": false,
+        "commonPresets": false,
+        "casts": false,
+        "batchPlans": false,
+        "reservations": false,
+        "combinations": false,
+        "common": false,
+        "options": false
+      },
+      "folderSelection": {
+        "sceneCards": [
+          "sf1",
+          "sf-empty"
+        ]
+      },
+      "backup": {
+        "format": "pixai-web-queue-settings",
+        "version": 1,
+        "appVersion": "0.1.18",
+        "exportedAt": "2026-10-16T00:00:00.000Z",
+        "library": {
+          "version": 1,
+          "common": {
+            "prompt": "",
+            "negativePrompt": ""
+          },
+          "presets": [],
+          "characters": [],
+          "chunkFolders": [
+            {
+              "id": "f1",
+              "name": "합성 표정"
+            },
+            {
+              "id": "f2",
+              "name": "합성 행동"
+            }
+          ],
+          "scenes": [
+            {
+              "id": "s1",
+              "name": "웃음",
+              "prompt": "live smile",
+              "negativePrompt": "chunk negative",
+              "folderId": "f1"
+            },
+            {
+              "id": "s2",
+              "name": "손 흔듦",
+              "prompt": "wave",
+              "negativePrompt": "",
+              "folderId": "f2"
+            }
+          ],
+          "reservations": [],
+          "combinations": [],
+          "commonPresets": [],
+          "characterFolders": [],
+          "sceneFolders": [
+            {
+              "id": "sf1",
+              "name": "합성 첫 씬"
+            },
+            {
+              "id": "sf-empty",
+              "name": "빈 씬 폴더"
+            }
+          ],
+          "sceneCards": [
+            {
+              "id": "sc1",
+              "name": "합성 편집 씬",
+              "sceneIds": [
+                "s1",
+                "s2"
+              ],
+              "chunks": [
+                {
+                  "id": "s1",
+                  "name": "웃음",
+                  "prompt": "scene-only edited smile",
+                  "negativePrompt": "chunk negative"
+                },
+                {
+                  "id": "s2",
+                  "name": "손 흔듦",
+                  "prompt": "wave",
+                  "negativePrompt": ""
+                }
+              ],
+              "extra": {
+                "prompt": "scene extra",
+                "negativePrompt": "scene negative"
+              },
+              "imageOptions": {
+                "aspectRatio": "5:3",
+                "size": "1k",
+                "mode": "pro",
+                "batchSize": 4
+              },
+              "triggerPosition": "end",
+              "folderId": "sf1"
+            }
+          ],
+          "casts": [],
+          "batchPlans": []
+        },
+        "options": {
+          "maxCredits": null,
+          "filePrefix": "",
+          "repeat": 1
+        }
+      }
+    },
+    "emptyFolder": {
+      "format": "pixai-clack-helper-selection",
+      "version": 2,
+      "selection": {
+        "sceneCards": false,
+        "scenes": true,
+        "characters": false,
+        "presets": false,
+        "commonPresets": false,
+        "casts": false,
+        "batchPlans": false,
+        "reservations": false,
+        "combinations": false,
+        "common": false,
+        "options": false
+      },
+      "folderSelection": {
+        "scenes": [
+          "f1"
+        ]
+      },
+      "backup": {
+        "format": "pixai-web-queue-settings",
+        "version": 1,
+        "appVersion": "0.1.18",
+        "exportedAt": "2026-10-16T00:00:00.000Z",
+        "library": {
+          "version": 1,
+          "common": {
+            "prompt": "",
+            "negativePrompt": ""
+          },
+          "presets": [],
+          "characters": [],
+          "chunkFolders": [
+            {
+              "id": "f1",
+              "name": "합성 표정"
+            }
+          ],
+          "scenes": [],
+          "reservations": [],
+          "combinations": [],
+          "commonPresets": [],
+          "characterFolders": [],
+          "sceneFolders": [],
+          "sceneCards": [],
+          "casts": [],
+          "batchPlans": []
+        },
+        "options": {
+          "maxCredits": null,
+          "filePrefix": "",
+          "repeat": 1
+        }
+      }
+    },
+    "unfiled": {
+      "format": "pixai-clack-helper-selection",
+      "version": 2,
+      "selection": {
+        "sceneCards": false,
+        "scenes": true,
+        "characters": false,
+        "presets": false,
+        "commonPresets": false,
+        "casts": false,
+        "batchPlans": false,
+        "reservations": false,
+        "combinations": false,
+        "common": false,
+        "options": false
+      },
+      "folderSelection": {
+        "scenes": [
+          ""
+        ]
+      },
+      "backup": {
+        "format": "pixai-web-queue-settings",
+        "version": 1,
+        "appVersion": "0.1.18",
+        "exportedAt": "2026-10-16T00:00:00.000Z",
+        "library": {
+          "version": 1,
+          "common": {
+            "prompt": "",
+            "negativePrompt": ""
+          },
+          "presets": [],
+          "characters": [],
+          "chunkFolders": [],
+          "scenes": [
+            {
+              "id": "s3",
+              "name": "미분류",
+              "prompt": "angry",
+              "negativePrompt": ""
+            }
+          ],
+          "reservations": [],
+          "combinations": [],
+          "commonPresets": [],
+          "characterFolders": [],
+          "sceneFolders": [],
+          "sceneCards": [],
+          "casts": [],
+          "batchPlans": []
+        },
+        "options": {
+          "maxCredits": null,
+          "filePrefix": "",
+          "repeat": 1
+        }
+      }
+    }
+  },
+  "expectedPrompts": [
+    {
+      "prompt": "set quality, preset detail, alice, scene-only edited smile, wave, scene extra, synthetic trigger",
+      "negativePrompt": "set blur, preset negative, character negative, chunk negative, scene negative"
+    },
+    {
+      "prompt": "set quality, preset detail, alice, cast outfit, scene-only edited smile, wave, scene extra, synthetic trigger",
+      "negativePrompt": "set blur, preset negative, character negative, cast negative, chunk negative, scene negative"
+    },
+    {
+      "prompt": "set quality, preset detail, synthetic trigger, alice, wave",
+      "negativePrompt": "set blur, preset negative, character negative"
+    },
+    {
+      "prompt": "set quality, preset detail, synthetic trigger, alice, angry",
+      "negativePrompt": "set blur, preset negative, character negative"
+    }
+  ]
+}

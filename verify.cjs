@@ -306,7 +306,7 @@ function folderDatabase(store) {
   }};
 }
 function panelFixture(nativePicker, gm={}) {
-  let networkCalls=0,generateCalls=0,pickerCalls=0,lockRequests=0;const lockNames=[],siteQueries=[],storageMutations=[],documentListeners={},windowListeners={};
+  let networkCalls=0,generateCalls=0,pickerCalls=0,lockRequests=0,fixtureUuid=0;const lockNames=[],siteQueries=[],storageMutations=[],documentListeners={},windowListeners={};
   function matchesPart(element,part) {
     if(part.startsWith('#'))return element.getAttribute('id')===part.slice(1);
     const tag=part.match(/^[a-z][\w-]*/i)?.[0];
@@ -377,7 +377,7 @@ function panelFixture(nativePicker, gm={}) {
     localStorage:{getItem:key=>records.get(key)||null,setItem:(key,value)=>{if(gm.queueStorageFailure&&key==='local.pixai-web-queue.v1')throw new Error('Queue storage unavailable');if(gm.storageFailureKey===key)throw new Error('Settings storage unavailable');if(gm.viewStorageFailure&&key==='local.pixai-web-queue.minimized.v1')throw new Error('View storage unavailable');records.set(key,value);storageMutations.push({method:'set',key,value});},removeItem:key=>{records.delete(key);storageMutations.push({method:'remove',key});}},
     navigator:{locks:{request:async(name,options,callback)=>{lockRequests++;lockNames.push(name);return callback(gm.lockUnavailable?null:{});}}},
     ResizeObserver:class{observe(){}},setTimeout,clearTimeout,
-    fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> 'fixture-id',getRandomValues:array=>array.fill(42)},
+    fetch:()=>{networkCalls++;throw new Error('No network in UI fixture')},crypto:{randomUUID:()=> `fixture-id-${++fixtureUuid}`,getRandomValues:array=>array.fill(42)},
     GM_xmlhttpRequest:gm.request || (()=>{networkCalls++;throw Error('No network in UI fixture');}),Blob,TextEncoder,URL,AbortController, GM_download:gm.download, GM_info:gm.info,
     GM_getValue:gm.keyStorage?.get,GM_setValue:gm.keyStorage?.set,GM_deleteValue:gm.keyStorage?.remove};
   if(gm.folderStore)context.indexedDB=folderDatabase(gm.folderStore);
@@ -432,7 +432,8 @@ test('optional PNG recording survives a fresh mount and rejects another tab runn
 });
 
 test('compatible export previews conversions before requesting a download and completed rows retain metadata warnings',async()=>{
-  const downloads=[],f=panelFixture(null,{download:details=>{downloads.push(details);details.onload();return {};},info:{downloadMode:'browser'},queue:[{id:'done',title:'Saved',prompt:'fixture',state:'done',taskId:'901',expected:4,saved:[{mediaId:'902'}],metadataWarnings:{'902':'원본 그대로 저장했습니다.'},composition:{reservation:{batch:{id:'batch',name:'Group',rowName:'C',columnName:'S'}}}}]});runtimePress(f,'앱 0.1.11 호환 내보내기');await runtimeFlush();assert.equal(downloads.length,0);assert.equal(f.panel.querySelector('[data-compatibility-preview]').hidden,false);runtimePress(f,'변환 내용 확인 후 파일 저장');await runtimeFlush();assert.equal(downloads.length,1);assert.match(downloads[0].name,/앱_0.1.11_호환/);assert.equal(f.networkCalls,0);
+  const downloads=[],f=panelFixture(null,{download:details=>{downloads.push(details);details.onload();return {};},info:{downloadMode:'browser'},queue:[{id:'done',title:'Saved',prompt:'fixture',state:'done',taskId:'901',expected:4,saved:[{mediaId:'902'}],metadataWarnings:{'902':'원본 그대로 저장했습니다.'},composition:{reservation:{batch:{id:'batch',name:'Group',rowName:'C',columnName:'S'}}}}]});runtimePress(f,'앱 호환 내보내기');await runtimeFlush();assert.equal(downloads.length,0);assert.equal(f.panel.querySelector('[data-compatibility-preview]').hidden,false);runtimePress(f,'변환 내용 확인 후 파일 저장');await runtimeFlush();assert.equal(downloads.length,1);assert.match(downloads[0].name,/앱.*호환/);
+  const exported=JSON.parse(await downloads[0].url.text());assert.equal(exported.format,'pixai-web-queue-settings');assert.equal(exported.version,1);assert.equal(exported.options.embedMetadata,undefined);assert.equal(exported.jobs,undefined);assert.equal(exported.apiKey,undefined);assert.equal(f.storageMutations.length,0);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
   const history=f.panel.querySelectorAll('[data-queue-view]').find(v=>v.dataset.queueView==='history');f.press(history);await runtimeFlush();const row=f.panel.querySelector('[data-queue-job="done"]');assert(row);const text=element=>element.textContent+element.children.map(text).join(' ');assert.match(text(row),/PNG 기록 경고.*원본 그대로/);assert.match(text(f.panel.querySelector('[data-jobs]')),/Group/);
 });
 
@@ -809,6 +810,33 @@ test('runtime skip and undo preserve the exact queued record and order',async()=
 async function runtimeChooseFile(f,text) {
   const input=runtimeField(f,'설정 백업 JSON 파일');input.files=[{name:'fixture-settings.json',size:new TextEncoder().encode(text).length,text:async()=>text}];input.fire('change');await runtimeFlush();
 }
+const runtimeBackupCategories=['씬','청크','캐릭터','모델·LoRA 프리셋','공통문 세트','저장 출연','일괄 예약 구성','조합 예약','최근 조합·즐겨찾기','기본 공통문','생성·화면 설정'];
+function runtimeSetImportMode(f,mode) {
+  const field=runtimeField(f,'백업 가져오기 방식');field.value=mode;field.fire('change');
+}
+function runtimeCheckImport(f,label,checked) {
+  const field=runtimeField(f,`백업 가져오기: ${label}`);assert.equal(field.disabled,false,`${label} must be available`);
+  field.checked=checked;field.fire('change');
+}
+function runtimeSelectImport(f,labels) {
+  for(const label of runtimeBackupCategories) {
+    const field=runtimeField(f,`백업 가져오기: ${label}`),checked=labels.includes(label);
+    if(field.disabled){assert(!checked,`${label} is not in this file`);continue;}
+    if(field.checked!==checked)runtimeCheckImport(f,label,checked);
+  }
+}
+function runtimeNodeText(element) {
+  return element ? element.textContent+element.children.map(runtimeNodeText).join(' ') : '';
+}
+function runtimeAppBackup() {
+  return JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'test-fixtures/app-backup-v0.1.18.json'),'utf8'));
+}
+function runtimeAppRecords(library=runtimeAppBackup().library) {
+  const records=runtimeSettingsRecords();records.set(runtimeSettingsKeys.library,JSON.stringify(library));return records;
+}
+function runtimeReservedPrompts(library) {
+  let id=0;return JSON.parse(JSON.stringify(sandbox.module.exports.expandPresetReservations(library,{idFactory:()=>`prompt-check-${++id}`}))).map(item=>[item.prompt,item.negativePrompt]);
+}
 
 test('runtime settings export downloads saved library and current option fields without queue or settings writes',async()=>{
   let details;const records=runtimeSettingsRecords();const f=panelFixture(null,{records,info:{downloadMode:'browser'},download:options=>{details=options;options.onload();}});
@@ -825,7 +853,7 @@ test('runtime file preview writes nothing until Apply; Apply and Undo update UI/
   runtimeField(f,'공통 프롬프트').value='stale unsaved draft';
   await runtimeChooseFile(f,runtimeSettingsBackup());
   assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);assert.match(f.message(),/파일 확인 완료/);assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);
-  runtimePress(f,'이 설정으로 교체');await runtimeFlush();
+  runtimeSetImportMode(f,'replace');runtimeCheckImport(f,'생성·화면 설정',true);runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
   assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.library)).common.prompt,'imported common');assert.deepEqual(JSON.parse(f.records.get(runtimeSettingsKeys.options)),{maxCredits:6400,filePrefix:'imported',repeat:2});
   assert.equal(runtimeField(f,'공통 프롬프트').value,'imported common');assert.equal(runtimeField(f,'생성 1회 크레딧 상한').value,'6400');assert.equal(runtimeField(f,'대기열 작업 이름').value,'imported');
   assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);assert.equal(f.records.get(runtimeSettingsKeys.queue),queue);assert.ok(f.records.has(runtimeSettingsKeys.previous));
@@ -846,9 +874,89 @@ test('runtime malformed file, preview cancellation, and empty file selection lea
 
 test('runtime settings preview remains readable but a cross-tab lock refusal blocks Apply without storage changes',async()=>{
   const records=runtimeSettingsRecords(),f=panelFixture(null,{records,lockUnavailable:true});await runtimeChooseFile(f,runtimeSettingsBackup());
-  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);runtimePress(f,'이 설정으로 교체');await runtimeFlush();
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);runtimeSetImportMode(f,'replace');runtimeCheckImport(f,'생성·화면 설정',true);runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
   assert.match(f.message(),/다른 PixAI 탭/);assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);
   assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);assert.equal(f.panel.querySelector('[data-start]').disabled,false);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime app folder v2 preview defaults to append, excludes options and cannot select absent replacement categories',async()=>{
+  const fixture=runtimeAppBackup(),records=runtimeAppRecords(),f=panelFixture(null,{records});
+  await runtimeChooseFile(f,JSON.stringify(fixture.outputs.folder));
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);assert.match(f.message(),/파일 확인 완료/);
+  assert.equal(runtimeField(f,'백업 가져오기 방식').value,'append');assert.equal(runtimeField(f,'백업 가져오기: 청크').checked,true);
+  assert.equal(runtimeField(f,'백업 가져오기: 생성·화면 설정').checked,false);assert.equal(runtimeField(f,'백업 가져오기: 캐릭터').disabled,true);
+  for(const name of ['합성 표정','빈 청크 폴더','미분류'])assert.equal(runtimeField(f,`백업 폴더: 청크: ${name}`).checked,true);
+  const excluded=f.panel.querySelector('[aria-label="백업 폴더: 청크: 합성 행동"]');assert(!excluded||excluded.disabled);
+  assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime importing only one chunk folder replaces that folder and preserves unselected materials, options, queued jobs and old reservation prompts',async()=>{
+  const fixture=runtimeAppBackup(),original=fixture.library;
+  original.reservations=[{id:'legacy-reservation',presetId:'p1',characterId:'c1',sceneIds:['s1'],count:2}];
+  const beforePrompts=runtimeReservedPrompts(original);
+  const records=runtimeAppRecords(original),f=panelFixture(null,{records}),file=fixture.outputs.full;
+  file.library.scenes.find(item=>item.id==='s1').prompt='imported folder smile';
+  await runtimeChooseFile(f,JSON.stringify(file));runtimeSelectImport(f,['청크']);runtimeSetImportMode(f,'replace');
+  for(const name of ['합성 행동','빈 청크 폴더','미분류']) {
+    const field=runtimeField(f,`백업 폴더: 청크: ${name}`);field.checked=false;field.fire('change');
+  }
+  assert.equal(runtimeField(f,'백업 폴더: 청크: 합성 표정').checked,true);
+  runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
+  const imported=JSON.parse(f.records.get(runtimeSettingsKeys.library));assert.equal(imported.scenes.find(item=>item.id==='s1').prompt,'imported folder smile');
+  assert.deepEqual(imported.scenes.filter(item=>item.id!=='s1'),original.scenes.filter(item=>item.id!=='s1'));
+  for(const key of ['presets','characters','common','commonPresets','casts','sceneCards','sceneFolders','characterFolders','batchPlans','combinations'])assert.deepEqual(imported[key],original[key],key);
+  assert(imported.reservations[0].snapshot);assert.deepEqual(runtimeReservedPrompts(imported),beforePrompts);
+  assert.equal(f.records.get(runtimeSettingsKeys.options),records.get(runtimeSettingsKeys.options));assert.equal(f.records.get(runtimeSettingsKeys.queue),records.get(runtimeSettingsKeys.queue));assert(!f.storageMutations.some(item=>item.key===runtimeSettingsKeys.queue));
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime empty-folder replacement warns before clearing only that folder and retaining its folder entry',async()=>{
+  const fixture=runtimeAppBackup(),records=runtimeAppRecords(),f=panelFixture(null,{records});
+  await runtimeChooseFile(f,JSON.stringify(fixture.outputs.emptyFolder));runtimeSetImportMode(f,'replace');
+  assert.match(runtimeNodeText(f.panel.querySelector('[data-import-preview]')),/비워|비우|삭제/);assert.equal(f.storageMutations.length,0);
+  runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();const imported=JSON.parse(f.records.get(runtimeSettingsKeys.library));
+  assert.deepEqual(imported.scenes,fixture.library.scenes.filter(item=>item.folderId!=='f1'));assert.deepEqual(imported.chunkFolders,fixture.library.chunkFolders);assert.deepEqual(imported.sceneCards,fixture.library.sceneCards);
+  assert.equal(f.records.get(runtimeSettingsKeys.options),records.get(runtimeSettingsKeys.options));assert.equal(f.records.get(runtimeSettingsKeys.queue),records.get(runtimeSettingsKeys.queue));assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime app import refuses a stale preview after another tab changes library without writing or erasing that change',async()=>{
+  const fixture=runtimeAppBackup(),f=panelFixture(null,{records:runtimeAppRecords()});await runtimeChooseFile(f,JSON.stringify(fixture.outputs.folder));
+  const changed=JSON.parse(f.records.get(runtimeSettingsKeys.library));changed.scenes[0].prompt='other tab changed this';f.records.set(runtimeSettingsKeys.library,JSON.stringify(changed));
+  const before=new Map(f.records);runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
+  assert.match(f.message(),/바뀌|변경/);assert.equal(f.storageMutations.length,0);assert.deepEqual(f.records,before);assert.equal(f.panel.querySelector('[data-import-preview]').hidden,false);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime app folder cancellation and invalid or widened file scope leave storage and queue untouched',async()=>{
+  const fixture=runtimeAppBackup(),records=runtimeAppRecords(),f=panelFixture(null,{records});
+  await runtimeChooseFile(f,JSON.stringify(fixture.outputs.folder));runtimePress(f,'불러오기 취소');await runtimeFlush();
+  assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);
+  for(const folderSelection of [{scenes:[]},{scenes:['not-in-file']},{scenes:['f1','f1']}]) {
+    await runtimeChooseFile(f,JSON.stringify({...fixture.outputs.folder,folderSelection}));assert.match(f.message(),/설정 파일 읽기 실패/);assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);
+  }
+  assert.equal(f.storageMutations.length,0);assert.deepEqual([...f.records],[...records]);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime default append gives colliding scene folders and dependency chunks fresh IDs while preserving edited scene copies and all originals',async()=>{
+  const fixture=runtimeAppBackup(),records=runtimeAppRecords(),f=panelFixture(null,{records});
+  await runtimeChooseFile(f,JSON.stringify(fixture.outputs.sceneFolder));assert.equal(runtimeField(f,'백업 가져오기 방식').value,'append');
+  assert.equal(runtimeField(f,'백업 가져오기: 씬').checked,true);assert.equal(runtimeField(f,'백업 가져오기: 청크').checked,false);assert.equal(runtimeField(f,'백업 가져오기: 청크').disabled,true);
+  runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();const imported=JSON.parse(f.records.get(runtimeSettingsKeys.library));
+  assert.deepEqual(imported.sceneCards.slice(0,fixture.library.sceneCards.length),fixture.library.sceneCards);assert.deepEqual(imported.scenes.slice(0,fixture.library.scenes.length),fixture.library.scenes);assert.deepEqual(imported.sceneFolders.slice(0,fixture.library.sceneFolders.length),fixture.library.sceneFolders);
+  const added=imported.sceneCards[fixture.library.sceneCards.length];assert(added);assert.notEqual(added.id,'sc1');assert.notEqual(added.folderId,'sf1');
+  assert.equal(imported.sceneFolders.find(item=>item.id===added.folderId).name,'합성 첫 씬');assert.equal(added.chunks[0].prompt,'scene-only edited smile');
+  const live=imported.scenes.find(item=>item.id===added.sceneIds[0]);assert(live);assert.notEqual(live.id,'s1');assert.notEqual(live.folderId,'f1');assert.equal(live.prompt,'live smile');assert.equal(added.chunks[0].id,live.id);
+  assert.deepEqual(imported.reservations,fixture.library.reservations);assert.deepEqual(imported.presets,fixture.library.presets);assert.deepEqual(imported.characters,fixture.library.characters);
+  assert.equal(f.records.get(runtimeSettingsKeys.options),records.get(runtimeSettingsKeys.options));assert.equal(f.records.get(runtimeSettingsKeys.queue),records.get(runtimeSettingsKeys.queue));assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime app compatibility export keeps modern materials and snapshots in app-readable v1 without browser metadata options or queued jobs',async()=>{
+  const fixture=runtimeAppBackup(),records=runtimeAppRecords(),downloads=[],f=panelFixture(null,{records,info:{downloadMode:'browser'},download:details=>{downloads.push(details);details.onload();return {};}});
+  const metadata=runtimeField(f,'PNG에 생성 요청 정보 기록 (선택)');metadata.checked=true;metadata.fire('change');await runtimeFlush();const before=new Map(f.records),writes=f.storageMutations.length;
+  runtimePress(f,'앱 호환 내보내기');await runtimeFlush();assert.equal(downloads.length,0);assert.match(runtimeNodeText(f.panel.querySelector('[data-compatibility-preview]')),/PNG|기록/);
+  runtimePress(f,'변환 내용 확인 후 파일 저장');await runtimeFlush();assert.equal(downloads.length,1);const exported=JSON.parse(await downloads[0].url.text());
+  assert.equal(exported.format,'pixai-web-queue-settings');assert.equal(exported.version,1);assert.equal(exported.options.embedMetadata,undefined);assert.equal(exported.jobs,undefined);
+  for(const key of ['sceneCards','sceneFolders','commonPresets','casts','batchPlans','reservations'])assert.deepEqual(exported.library[key],fixture.library[key],key);
+  assert.equal(f.storageMutations.length,writes);assert.deepEqual(f.records,before);assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
 });
 
 test('collapse keeps unsaved inputs, scroll position and status; SVG launcher restores keyboard focus without site IO',()=>{
