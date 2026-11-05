@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.10.3-dev.1
+// @version      0.10.4-dev.1
 // @license      GPL-3.0-only
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js
@@ -25,7 +25,7 @@
 (() => {
   'use strict';
   const UPDATE_CHANNEL = 'development';
-  const UPDATE_BUILD_VERSION = '0.10.3-dev.1';
+  const UPDATE_BUILD_VERSION = '0.10.4-dev.1';
   const UPDATE_URLS = Object.freeze({stable:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js',development:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js'});
   function updateChannelUrl(channel) {
     if (!Object.hasOwn(UPDATE_URLS,channel)) throw new Error('업데이트 채널을 다시 선택해 주세요.');
@@ -4998,7 +4998,7 @@ function mountPresetEditor(parent, io) {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.10.3-dev.1', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.10.4-dev.1', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue .pq-backup-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}#local-pixai-queue .pq-backup-choices label.pq-check-label,#local-pixai-queue .pq-backup-folder-list label.pq-check-label{margin:5px 0;min-width:0}#local-pixai-queue .pq-backup-choices span,#local-pixai-queue .pq-backup-folder-list span{min-width:0;overflow-wrap:anywhere}#local-pixai-queue .pq-backup-folder-list{max-height:180px;overflow:auto;padding:4px 8px}#local-pixai-queue [data-backup-result]{padding:8px;border-left:3px solid #94bedf;overflow-wrap:anywhere}@media(max-width:700px){#local-pixai-queue .pq-backup-choices{grid-template-columns:minmax(0,1fr)}}';
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
@@ -5210,14 +5210,71 @@ function mountPresetEditor(parent, io) {
       }
       render();
     }
-    const saveSettings=backupButton('설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.3-dev.1',exportedAt:new Date().toISOString()})));
+    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.4-dev.1',exportedAt:new Date().toISOString()})));
+    const exportPreview=node('div',null,{'data-export-preview':''});exportPreview.hidden=true;
+    let pendingExport=null;
+    function clearExport() {pendingExport=null;exportPreview.replaceChildren();exportPreview.hidden=true;}
+    function drawExport() {
+      const p=pendingExport;if(!p)return;
+      const focused=exportPreview.contains(document.activeElement)?document.activeElement?.getAttribute('aria-label'):null;
+      const choices=node('div',null,{class:'pq-backup-choices'}),scopes=[];
+      for(const key of [...BACKUP_CATEGORIES,'common','options']) {
+        const label=node('label',null,{class:'pq-check-label'}),check=node('input',null,{type:'checkbox','aria-label':`백업 내보내기: ${BACKUP_LABELS[key]}`,'data-edit':''});
+        check.checked=p.selection[key];check.addEventListener('change',()=>{p.selection[key]=check.checked;drawExport();});
+        const count=p.library[key]?.length;
+        label.append(check,node('span',BACKUP_LABELS[key]+(count==null?'':` · ${count}개`)));choices.append(label);
+      }
+      for(const key of ['scenes','sceneCards']) {
+        if(!p.selection[key])continue;
+        const all=backupFolderChoices(p.library,key),chosen=p.folders[key]??all.map(folder=>folder.id);
+        const group=node('details',null,{class:'pq-backup-folders'}),list=node('div',null,{class:'pq-backup-folder-list'});
+        group.open=p.openFolders[key]??true;group.addEventListener('toggle',()=>{p.openFolders[key]=group.open;});
+        group.append(node('summary',`${BACKUP_LABELS[key]} 폴더 · ${chosen.length}/${all.length} 선택`));
+        for(const folder of all) {
+          const label=node('label',null,{class:'pq-check-label'}),check=node('input',null,{type:'checkbox','aria-label':`내보낼 폴더: ${BACKUP_LABELS[key]}: ${folder.name}`,'data-edit':''});
+          check.checked=chosen.includes(folder.id);
+          check.addEventListener('change',()=>{
+            const ids=all.filter(item=>item.id===folder.id?check.checked:chosen.includes(item.id)).map(item=>item.id);
+            if(ids.length===all.length)delete p.folders[key];else p.folders[key]=ids;
+            drawExport();
+          });
+          label.append(check,node('span',`${folder.name} · ${folder.count}개`));list.append(label);
+        }
+        group.append(list);scopes.push(group);
+      }
+      const summary=node('div',null,{'data-backup-result':'','data-export-result':'',role:'status'});
+      const folders=Object.fromEntries(Object.entries(p.folders).filter(([key])=>p.selection[key]));
+      const save=backupButton('선택한 항목 파일 저장',()=>settingsAction(async()=>{
+        if(localStorage.getItem(LIBRARY_KEY)!==p.libraryBefore)throw new Error('백업 범위를 고르는 동안 자료가 바뀌었습니다. 선택 내보내기를 다시 열어 주세요.');
+        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.4-dev.1',exportedAt:new Date().toISOString()},folders);
+        await downloadSettings(data,'선택_설정');
+        if(pendingExport===p){clearExport();openExport.focus();}
+      },{readOnly:true}));
+      try {
+        if(!Object.values(p.selection).some(Boolean))throw new Error('내보낼 항목을 하나 이상 선택해 주세요.');
+        for(const [key,ids] of Object.entries(folders))if(!ids.length)throw new Error(`${BACKUP_LABELS[key]} 폴더를 하나 이상 선택해 주세요.`);
+        const selected=selectBackupLibrary(p.library,p.selection,folders);
+        summary.append(node('p',`선택 범위: ${backupSelectionLabels(p.library,p.selection,folders).join(' · ')}`));
+        const deps=Object.entries(selected.dependencies).map(([key,count])=>`${BACKUP_LABELS[key]} ${count}개`);
+        if(!p.selection.common&&(selected.library.common.prompt||selected.library.common.negativePrompt))deps.push('기본 공통문');
+        if(deps.length)summary.append(node('p',`함께 들어가는 연결 자료: ${deps.join(' · ')}`));
+      } catch(error) {summary.append(node('p',error.message));save.dataset.unavailable='true';save.disabled=true;}
+      function selectAll(enabled) {p.selection=backupSelection(enabled);p.folders={};drawExport();}
+      exportPreview.replaceChildren(node('strong','백업할 항목 선택'),node('p','앱과 최신 스크립트에서 불러올 수 있는 JSON입니다. API 키·저장 위치·등록된 대기 작업은 포함하지 않습니다. PNG 기록 선택은 전체 설정 내보내기로 보관하세요.'),backupButton('전체 항목 선택',()=>selectAll(true)),backupButton('선택 모두 해제',()=>selectAll(false)),choices,...scopes,summary,save,backupButton('선택 내보내기 취소',()=>{clearExport();openExport.focus();}));
+      if(focused)Array.from(exportPreview.querySelectorAll('[aria-label]')).find(control=>control.getAttribute('aria-label')===focused)?.focus();
+    }
+    const openExport=backupButton('선택 내보내기',()=>{
+      const libraryBefore=localStorage.getItem(LIBRARY_KEY),library=readLibrary();clearImport();compatibility.hidden=true;
+      pendingExport={library,libraryBefore,selection:backupSelection(false),folders:{},openFolders:{}};
+      drawExport();exportPreview.hidden=false;exportPreview.querySelector('input')?.focus();
+    });
     const compatibility=node('div',null,{'data-compatibility-preview':'',role:'status'});compatibility.hidden=true;
-    function compatibilityButton(label,target){return backupButton(label,()=>{const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.3-dev.1',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
+    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.4-dev.1',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
     const input=node('input',null,{type:'file',accept:'.json,application/json','aria-label':'설정 백업 JSON 파일','data-edit':''});input.hidden=true;
     const preview=node('div',null,{'data-import-preview':'','aria-live':'polite'});preview.hidden=true;
     let pendingSettings=null;
     function clearImport() {pendingSettings=null;preview.replaceChildren();preview.hidden=true;}
-    const openSettings=backupButton('설정 불러오기',()=>{clearImport();input.value='';input.click();});
+    const openSettings=backupButton('설정 불러오기',()=>{clearExport();clearImport();input.value='';input.click();});
     async function editSettings(action) {
       await settingsAction(async()=>{
         if (!navigator.locks) throw new Error('이 브라우저는 중복 실행 방지 기능을 지원하지 않습니다.');
@@ -5319,7 +5376,7 @@ function mountPresetEditor(parent, io) {
         settingsStore.undo();
       });message='가져오기 전 설정으로 복구했습니다.';render();
     });
-    backups.append(saveSettings,compatibilityButton('앱 호환 내보내기','app'),compatibilityButton('0.9.14 호환 내보내기','legacy'),compatibility,openSettings,input,preview,undoSettings);panel.append(backups);
+    backups.append(saveSettings,openExport,exportPreview,compatibilityButton('앱 호환 내보내기','app'),compatibilityButton('0.9.14 호환 내보내기','legacy'),compatibility,openSettings,input,preview,undoSettings);panel.append(backups);
     const footer=node('div',null,{class:'pq-footer'});
     decorateIcon(run,'play_arrow');decorateIcon(stopButton,'stop');
     // Both run buttons sit together in the footer; the Settings tab is the only way to the settings page.
@@ -5663,7 +5720,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.3-dev.1', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.4-dev.1', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

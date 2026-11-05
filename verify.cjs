@@ -453,7 +453,7 @@ test('cost acknowledgment remembers explicit check and uncheck locally without s
   const f=panelFixture(null,{info:{downloadMode:'browser'},download:details=>{details.onload();return {};}}),ack=f.panel.querySelector('[data-api-cost-ack]');assert.equal(ack.checked,false);
   ack.checked=true;ack.fire('change');assert.equal(f.records.get(runtimeSettingsKeys.ack),'true');
   const fresh=panelFixture(null,{records:new Map(f.records)}),restored=fresh.panel.querySelector('[data-api-cost-ack]');assert.equal(restored.checked,true);assert.equal(fresh.networkCalls,0);assert.equal(fresh.generateCalls,0);
-  runtimePress(f,'설정 내보내기');await runtimeFlush();const backupOptions=JSON.parse(f.records.get(runtimeSettingsKeys.options)||'null');assert.equal(backupOptions,null);
+  runtimePress(f,'전체 설정 내보내기');await runtimeFlush();const backupOptions=JSON.parse(f.records.get(runtimeSettingsKeys.options)||'null');assert.equal(backupOptions,null);
   restored.checked=false;restored.fire('change');const unchecked=panelFixture(null,{records:new Map(fresh.records)});assert.equal(unchecked.panel.querySelector('[data-api-cost-ack]').checked,false);
 });
 
@@ -478,7 +478,7 @@ test('runtime API key clears its field, stays out of storage/backup and disappea
   const f=panelFixture(null,{info:{downloadMode:'browser'},download:details=>{details.onload();return {};}});
   const input=f.panel.querySelector('[aria-label="공식 API 키"]');input.value='fixture-sensitive-key';runtimePress(f,'이 탭에 키 연결');await runtimeFlush();
   assert.equal(input.value,'');assert.match(f.panel.querySelector('[data-api-key-state]').textContent,/키 입력됨/);
-  runtimePress(f,'설정 내보내기');await runtimeFlush();assert([...f.records.values()].every(value=>!value.includes('fixture-sensitive-key')));
+  runtimePress(f,'전체 설정 내보내기');await runtimeFlush();assert([...f.records.values()].every(value=>!value.includes('fixture-sensitive-key')));
   f.fireWindow('pagehide');runtimePress(f,'키 지우기');await runtimeFlush();assert.match(f.panel.querySelector('[data-api-key-state]').textContent,/미입력/);
 });
 test('optional remembered key restores without DOM exposure or requests and turning it off deletes only the stored copy',async()=>{
@@ -807,8 +807,8 @@ test('runtime skip and undo preserve the exact queued record and order',async()=
   assert.deepEqual(JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs,[original]);
   assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
 });
-async function runtimeChooseFile(f,text) {
-  const input=runtimeField(f,'설정 백업 JSON 파일');input.files=[{name:'fixture-settings.json',size:new TextEncoder().encode(text).length,text:async()=>text}];input.fire('change');await runtimeFlush();
+async function runtimeChooseFile(f,text,name='fixture-settings.json') {
+  const input=runtimeField(f,'설정 백업 JSON 파일');input.files=[{name,size:new TextEncoder().encode(text).length,text:async()=>text}];input.fire('change');await runtimeFlush();
 }
 const runtimeBackupCategories=['씬','청크','캐릭터','모델·LoRA 프리셋','공통문 세트','저장 출연','일괄 예약 구성','조합 예약','최근 조합·즐겨찾기','기본 공통문','생성·화면 설정'];
 function runtimeSetImportMode(f,mode) {
@@ -838,10 +838,111 @@ function runtimeReservedPrompts(library) {
   let id=0;return JSON.parse(JSON.stringify(sandbox.module.exports.expandPresetReservations(library,{idFactory:()=>`prompt-check-${++id}`}))).map(item=>[item.prompt,item.negativePrompt]);
 }
 
+test('runtime app backup import accepts current, previous and user-renamed filenames without changing folder scope',async()=>{
+  for(const name of ['PixaiClackHelper-app-2026-10-16T12-34-56-789Z.json','PixAIS-app-2026-10-16T12-34-56-789Z.json','내가 바꾼 백업 이름.json']) {
+    const fixture=runtimeAppBackup(),records=runtimeAppRecords(),f=panelFixture(null,{records});
+    await runtimeChooseFile(f,JSON.stringify(fixture.outputs.folder),name);
+    assert.match(f.message(),/파일 확인 완료/);assert.equal(f.storageMutations.length,0);
+    assert(runtimeNodeText(f.panel.querySelector('[data-import-preview]')).includes(name));
+    assert.equal(runtimeField(f,'백업 가져오기 방식').value,'append');assert.equal(runtimeField(f,'백업 가져오기: 생성·화면 설정').checked,false);
+    runtimeSetImportMode(f,'replace');runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
+    const imported=JSON.parse(f.records.get(runtimeSettingsKeys.library));
+    assert.deepEqual([...imported.scenes].sort((a,b)=>a.id.localeCompare(b.id)),[...fixture.library.scenes].sort((a,b)=>a.id.localeCompare(b.id)));assert.deepEqual(imported.chunkFolders,fixture.library.chunkFolders);
+    for(const key of ['presets','characters','common','sceneCards','sceneFolders'])assert.deepEqual(imported[key],fixture.library[key]);
+    assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);
+    assert.equal(f.records.get(runtimeSettingsKeys.options),records.get(runtimeSettingsKeys.options));assert.equal(f.records.get(runtimeSettingsKeys.queue),records.get(runtimeSettingsKeys.queue));
+    assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+  }
+});
+
+test('runtime full settings backup import accepts the renamed app script export without depending on its filename',async()=>{
+  for(const name of ['PixaiClackHelper-script-2026-10-16T12-34-56-789Z.json','PixAIS-script-2026-10-16T12-34-56-789Z.json','직접 이름 변경.json']) {
+    const records=runtimeSettingsRecords(),f=panelFixture(null,{records});
+    await runtimeChooseFile(f,runtimeSettingsBackup(),name);
+    assert.match(f.message(),/파일 확인 완료/);assert.equal(f.storageMutations.length,0);
+    assert(runtimeNodeText(f.panel.querySelector('[data-import-preview]')).includes(name));
+    runtimeSetImportMode(f,'replace');runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
+    assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.library)).common.prompt,'imported common');
+    assert.equal(f.panel.querySelector('[data-import-preview]').hidden,true);
+    assert.equal(f.records.get(runtimeSettingsKeys.options),records.get(runtimeSettingsKeys.options));assert.equal(f.records.get(runtimeSettingsKeys.queue),records.get(runtimeSettingsKeys.queue));
+    assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+  }
+});
+
+test('runtime selective export saves only the chosen folder and reimports without replacing other materials or options',async()=>{
+  const fixture=runtimeAppBackup(),records=runtimeAppRecords(),downloads=[],f=panelFixture(null,{records,info:{downloadMode:'browser'},download:details=>{downloads.push(details);details.onload();}});
+  const mark=(name,checked)=>{const field=runtimeField(f,name);field.checked=checked;field.fire('change');};
+  runtimePress(f,'선택 내보내기');await runtimeFlush();
+  assert.equal(f.panel.querySelector('[data-export-preview]').hidden,false);
+  const save=()=>f.panel.querySelector('[data-export-preview]').querySelectorAll('button').find(control=>control.textContent==='선택한 항목 파일 저장');
+  assert.equal(save().disabled,true);assert.equal(downloads.length,0);
+  mark('백업 내보내기: 청크',true);
+  for(const name of ['합성 행동','빈 청크 폴더','미분류','합성 표정'])mark(`내보낼 폴더: 청크: ${name}`,false);
+  assert.equal(save().disabled,true);
+  mark('내보낼 폴더: 청크: 합성 표정',true);
+  runtimeField(f,'각 프롬프트 반복 횟수').value='';
+  runtimePress(f,'선택한 항목 파일 저장');await runtimeFlush();
+  assert.equal(downloads.length,1);assert.match(downloads[0].name,/선택_설정/);
+  const text=await downloads[0].url.text(),file=JSON.parse(text);
+  assert.equal(file.format,'pixai-clack-helper-selection');assert.equal(file.version,2);assert.equal(file.backup.version,1);
+  assert.deepEqual(file.folderSelection,{scenes:['f1']});
+  assert.deepEqual(Object.keys(file.selection).filter(key=>file.selection[key]),['scenes']);
+  assert.deepEqual(file.backup.library.scenes.map(scene=>scene.id),['s1']);
+  assert.deepEqual(file.backup.library.chunkFolders.map(folder=>folder.id),['f1']);assert.equal(file.backup.library.characters.length,0);
+  assert.equal(file.backup.options.embedMetadata,undefined);assert.equal(file.backup.jobs,undefined);
+  assert.equal(f.storageMutations.length,0);assert.deepEqual(f.records,records);
+  await runtimeChooseFile(f,text,downloads[0].name);
+  assert.match(f.message(),/파일 확인 완료/);
+  assert.equal(runtimeField(f,'백업 가져오기: 청크').checked,true);assert.equal(runtimeField(f,'백업 가져오기: 캐릭터').disabled,true);
+  runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
+  const imported=JSON.parse(f.records.get(runtimeSettingsKeys.library));
+  assert.equal(imported.scenes.length,fixture.library.scenes.length+1);
+  assert.deepEqual(imported.characters,fixture.library.characters);
+  assert.equal(f.records.get(runtimeSettingsKeys.options),records.get(runtimeSettingsKeys.options));assert.equal(f.records.get(runtimeSettingsKeys.queue),records.get(runtimeSettingsKeys.queue));
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
+test('runtime selective export previews scene dependencies and keeps them out of the selected replacement scope',async()=>{
+  const records=runtimeAppRecords(),downloads=[],f=panelFixture(null,{records,info:{downloadMode:'browser'},download:details=>{downloads.push(details);details.onload();}});
+  runtimePress(f,'선택 내보내기');runtimePress(f,'전체 항목 선택');
+  assert.equal(runtimeField(f,'백업 내보내기: 생성·화면 설정').checked,true);
+  runtimePress(f,'선택 모두 해제');
+  assert.equal(runtimeField(f,'백업 내보내기: 생성·화면 설정').checked,false);
+  const scene=runtimeField(f,'백업 내보내기: 씬');scene.checked=true;scene.fire('change');
+  assert.match(runtimeNodeText(f.panel.querySelector('[data-export-result]')),/함께 들어가는 연결 자료: 청크/);
+  runtimePress(f,'선택 내보내기 취소');assert.equal(downloads.length,0);
+  runtimePress(f,'선택 내보내기');assert.equal(runtimeField(f,'백업 내보내기: 씬').checked,false);
+  const sceneAgain=runtimeField(f,'백업 내보내기: 씬');sceneAgain.checked=true;sceneAgain.fire('change');
+  runtimePress(f,'선택한 항목 파일 저장');await runtimeFlush();
+  assert.equal(downloads.length,1);
+  const file=JSON.parse(await downloads[0].url.text());
+  assert.equal(file.version,1);assert.equal(file.selection.sceneCards,true);assert.equal(file.selection.scenes,false);
+  assert(file.backup.library.scenes.length>0);assert.equal(f.storageMutations.length,0);
+});
+
+test('runtime selective export refuses a stale library and keeps its selection when a download fails',async()=>{
+  const records=runtimeAppRecords(),downloads=[],f=panelFixture(null,{records,info:{downloadMode:'browser'},download:details=>{downloads.push(details);details.onerror({error:'not_enabled'});}});
+  function pickChunk(){
+    runtimePress(f,'선택 내보내기');const check=runtimeField(f,'백업 내보내기: 청크');
+    check.checked=true;check.fire('change');
+  }
+  pickChunk();
+  const changed=JSON.parse(f.records.get(runtimeSettingsKeys.library));changed.scenes[0].prompt='other tab updated the saved chunk';
+  f.records.set(runtimeSettingsKeys.library,JSON.stringify(changed));
+  runtimePress(f,'선택한 항목 파일 저장');await runtimeFlush();
+  assert.equal(downloads.length,0);assert.match(f.message(),/자료가 바뀌었습니다/);
+  pickChunk();runtimePress(f,'선택한 항목 파일 저장');await runtimeFlush();
+  assert.equal(downloads.length,1);assert.match(f.message(),/다운로드/);
+  assert.equal(f.panel.querySelector('[data-export-preview]').hidden,false);
+  assert.equal(runtimeField(f,'백업 내보내기: 청크').checked,true);
+  assert.equal(JSON.parse(await downloads[0].url.text()).backup.library.scenes[0].prompt,'other tab updated the saved chunk');
+  assert.equal(f.storageMutations.length,0);
+});
+
 test('runtime settings export downloads saved library and current option fields without queue or settings writes',async()=>{
   let details;const records=runtimeSettingsRecords();const f=panelFixture(null,{records,info:{downloadMode:'browser'},download:options=>{details=options;options.onload();}});
   runtimeField(f,'공통 프롬프트').value='unsaved draft';runtimeField(f,'생성 1회 크레딧 상한').value='6500';runtimeField(f,'대기열 작업 이름').value='current name';runtimeField(f,'각 프롬프트 반복 횟수').value='3';
-  runtimePress(f,'설정 내보내기');await runtimeFlush();
+  runtimePress(f,'전체 설정 내보내기');await runtimeFlush();
   assert.ok(details.url instanceof Blob);assert.match(details.name,/^PixAI_설정_.*\.json$/);assert.equal(details.saveAs,false);
   const exported=JSON.parse(await details.url.text());assert.equal(exported.format,'pixai-web-queue-settings');
   assert.deepEqual(exported.library,JSON.parse(records.get(runtimeSettingsKeys.library)));assert.deepEqual(exported.options,{maxCredits:6500,filePrefix:'current name',repeat:3,maxInFlight:3,imageCount:4,api:JSON.parse(JSON.stringify(sandbox.module.exports.normalizeApiOptions()))});assert.equal(exported.jobs,undefined);
@@ -1203,7 +1304,7 @@ test('while this tab runs a job, library/compose editing and registration stay o
   assert.equal(checks,4);assert.equal(f.panel.querySelector('[data-start]').textContent,'실행 중');
   assert.equal(register.disabled,false);assert.equal(addLora.disabled,false);assert.equal(f.panel.querySelector('[aria-label="청크 선택: Chunk"]').disabled,false);
   assert.equal(readSite.disabled,true);assert.equal(applySite.disabled,true);
-  for(const text of ['대기열 추가','첫 작업만 실행','건너뛰기','설정 내보내기'])assert.equal(named(text).disabled,true,text);
+  for(const text of ['대기열 추가','첫 작업만 실행','건너뛰기','전체 설정 내보내기'])assert.equal(named(text).disabled,true,text);
   assert.equal(f.panel.querySelector('[data-choose-folder]').disabled,true);assert.equal(f.panel.querySelector('[data-start]').disabled,true);
   const locksBefore=f.lockRequests,queueBefore=JSON.parse(f.records.get(runtimeSettingsKeys.queue)).jobs;
   assert.equal(queueBefore.length,1);
