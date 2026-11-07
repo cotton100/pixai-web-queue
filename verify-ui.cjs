@@ -314,6 +314,36 @@ test('named folders start folded in both libraries and composition and keep manu
   const fresh=fixture(t,f.library(),f.preferences);assert.equal(pickerGroup(fresh,'f1').open,false);assert.equal(fresh.ui.root.querySelectorAll('[data-character-picker-folder]').find(item=>item.dataset.characterPickerFolder==='cast').open,false);
 });
 
+test('character LoRA editor saves an attached model, previews its source, and freezes it in a reservation',async t=>{
+  const f=fixture(t),count=()=>f.ui.root.querySelector('[data-character-lora-editor]').querySelector('summary').textContent;
+  await f.select('저장한 캐릭터','c1');assert.equal(count(),'캐릭터 전용 LoRA · 0개');
+  await f.press('캐릭터 LoRA 추가');assert.equal(count(),'캐릭터 전용 LoRA · 1개');
+  for(const [label,value] of [['ID','302'],['버전 ID','402'],['이름','Alice 얼굴'],['수치','0.6'],['트리거 키워드','alice_trigger']])f.field('캐릭터 LoRA '+label).value=value;
+  await f.press('캐릭터 저장');assert.equal(count(),'캐릭터 전용 LoRA · 1개');
+  assert.deepEqual(f.library().characters[0].loras,[{id:'302',versionId:'402',name:'Alice 얼굴',weight:0.6,triggerWords:'alice_trigger'}]);
+  await f.select('예약 프리셋','p1');await f.select('예약 캐릭터','c1');
+  assert.match(f.field('최종 적용 LoRA').textContent,/2\/5.*프리셋.*Alice 얼굴.*캐릭터/);
+  assert.match(f.preview(),/alice_trigger/);
+  await f.press('이 조합 예약 추가');
+  const first=f.library().reservations[0];
+  assert.deepEqual(first.snapshot.preset.loras.map(item=>item.versionId),['401','402']);assert(!Object.hasOwn(first.snapshot.character,'loras'));
+  await f.select('저장한 캐릭터','c1');assert.equal(count(),'캐릭터 전용 LoRA · 1개');
+  await f.press('이 캐릭터 LoRA 제외');assert.equal(count(),'캐릭터 전용 LoRA · 0개');
+  await f.press('캐릭터 저장');assert.equal(count(),'캐릭터 전용 LoRA · 0개');
+  assert(!Object.hasOwn(f.library().characters[0],'loras'));assert(!f.preview().includes('alice_trigger'));assert.deepEqual(f.library().reservations[0],first);
+  await f.press('캐릭터 LoRA 추가');assert.equal(count(),'캐릭터 전용 LoRA · 1개');
+  await f.select('저장한 캐릭터','c1');assert.equal(count(),'캐릭터 전용 LoRA · 0개');
+  assert.equal(f.jobs.length,0);
+});
+
+test('character LoRA conflict blocks reservation instead of picking a weight',async t=>{
+  const initial=seed();initial.characters[0].loras=[{...initial.presets[0].loras[0],weight:0.2}];
+  const f=fixture(t,initial);await f.select('예약 프리셋','p1');await f.select('예약 캐릭터','c1');
+  assert.match(f.preview(),/버전·수치·트리거.*다릅니다/);
+  assert.equal(f.button('이 조합 예약 추가').disabled,true);
+  await f.press('이 조합 예약 추가');assert.equal(f.library().reservations.length,0);assert.equal(f.jobs.length,0);
+});
+
 test('character quick folder assignment, movement, duplication and deletion retain drafts and frozen reservations',async t=>{
   const f=fixture(t);await f.press('이 조합 예약 추가');const reservation=copy(f.library().reservations[0]);await f.select('저장한 캐릭터','c1');f.field('캐릭터 프롬프트').value='unsaved character';
   await f.press('캐릭터 소속 새 폴더');f.field('캐릭터 소속 새 폴더 이름').value='주연';await f.press('만들고 캐릭터 폴더 선택');const id=f.library().characterFolders[0].id;

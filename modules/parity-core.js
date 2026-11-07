@@ -39,6 +39,7 @@ function compatibleSettings(library,options,meta,target='app') {
     const out=JSON.parse(JSON.stringify(settingsBackupLibrary(library))),preferences={...normalizeSettingsOptions(options)},warnings=[];
     if(Object.hasOwn(preferences,'embedMetadata')){delete preferences.embedMetadata;warnings.push('브라우저 PNG 기록 선택은 대상 앱/구형 스크립트 옵션에서 제외합니다.');}
     if(target==='legacy') {
+        if(out.characters.some(character=>character.loras?.length))throw Error('구형 내보내기는 캐릭터 LoRA를 보존할 수 없습니다. 최신 전체 또는 선택 백업을 사용해 주세요.');
         for(const key of ['commonPresets','sceneCards','sceneFolders','casts','batchPlans'])if(Object.hasOwn(out,key)){delete out[key];warnings.push(`${key}는 0.9.14에서 편집할 수 없어 제외합니다.`);}
         const cleanPreset=preset=>{const next={...preset};delete next.prompt;delete next.negativePrompt;delete next.commonPresetId;return next;};
         if(out.presets.some(item=>item.prompt||item.negativePrompt||item.commonPresetId))warnings.push('프리셋 문구·공통문 연결은 새 조합에서 제외합니다. 이미 예약한 문구는 사본에 합쳐 보존합니다.');
@@ -49,8 +50,9 @@ function compatibleSettings(library,options,meta,target='app') {
             next.sceneIds=chunks.map(item=>item.id);next.snapshot={common:{prompt:join(frozen.common.prompt,p.prompt),negativePrompt:join(frozen.common.negativePrompt,p.negativePrompt)},preset:cleanPreset(p),character:{...frozen.character,prompt:join(frozen.character.prompt,extras.cast?.prompt),negativePrompt:join(frozen.character.negativePrompt,extras.cast?.negativePrompt)},chunks};
             delete next.snapshot.character.defaultPresetId;delete next.snapshot.character.folderId;delete next.batch;delete next.sourceSceneId;return next;
         });
-        out.presets=out.presets.map(cleanPreset);out.characters=out.characters.map(item=>{delete item.defaultPresetId;return item;});
+        out.presets=out.presets.map(cleanPreset);out.characters=out.characters.map(item=>{delete item.defaultPresetId;delete item.loras;return item;});
     }
+    if(target==='app'&&out.characters.some(character=>character.loras?.length))warnings.push('캐릭터 LoRA를 지원하는 최신 앱에서 불러오세요. 구버전 앱에서는 새 캐릭터 항목을 읽을 수 없습니다.');
     return {backup:{format:'pixai-web-queue-settings',version:1,...settingsBackupMeta(meta),library:out,options:preferences},warnings};
 }
 /** Resolve only live compositions. Frozen reservations already contain the selected text. */
@@ -349,6 +351,10 @@ function resolveBatchRow(value, row) {
         problems.push(`「${name}」의 프리셋 ${presetId}이(가) 없습니다.`);
     if (characterId && !library.characters.some((item) => item.id === characterId))
         problems.push(`출연 「${name}」의 캐릭터 ${characterId}이(가) 없습니다.`);
+    if(characterId&&presetId) {
+        const character=library.characters.find(item=>item.id===characterId),preset=library.presets.find(item=>item.id===presetId);
+        if(character?.loras?.length&&preset)try{assertCharacterApiLoras(effectiveCharacterPreset(preset,character).loras);}catch(error){problems.push(error.message);}
+    }
     return {
         key,
         kind: row.kind,
@@ -422,8 +428,9 @@ function expandBatchPlan(value, planInput, options = {}) {
     const reservations = [];
     if (!problems.some((item) => item.level === 'error')) {
         for (const { row, column, count } of pairs) {
-            const preset = library.presets.find((item) => item.id === row.presetId);
-            const character = library.characters.find((item) => item.id === row.characterId);
+            const originalCharacter=library.characters.find((item) => item.id === row.characterId);
+            const preset = effectiveCharacterPreset(library.presets.find((item) => item.id === row.presetId),originalCharacter);
+            const {loras,folderId,...character}=originalCharacter;
             const extras = {};
             if (row.extra)
                 extras.cast = row.extra;
