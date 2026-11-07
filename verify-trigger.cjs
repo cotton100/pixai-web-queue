@@ -8,7 +8,7 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname,'pixai-web-queue.user.js'
 const {readLoraTriggerWords,capturePresetSettings}=sandbox.module.exports;
 const plain=value=>JSON.parse(JSON.stringify(value));
 const selected={id:'10',versionId:'101',name:'LoRA',weight:0};
-const requested='https://pixai.art/en/model/10/101';
+const requested='https://pixai.art/model/10/101';
 
 function timerFixture() {
   let callback=null,token=null,cleared=0,delay=null;
@@ -20,7 +20,7 @@ function timerFixture() {
   };
 }
 function htmlFixture(options={}) {
-  const canonical=options.missingCanonical?null:{getAttribute:()=>options.canonical??'https://pixai.art/en/model/10'};
+  const canonical=options.missingCanonical?null:{getAttribute:()=>options.canonical??'https://pixai.art/model/10'};
   const paragraphs=(options.paragraphs??['harukav2 style']).map(textContent=>({textContent}));
   const dd={tagName:options.valueTag??'DD',textContent:options.valueText??paragraphs.map(item=>item.textContent).join(''),
     querySelector:selector=>selector==='script,style'&&options.activeContent?{}:null,
@@ -85,10 +85,30 @@ test('canonical model identity rejects other IDs, origins, and mismatched versio
     assert.equal(f.timers.cleared,1);
   }
 });
-test('public SSR detail text can be read without hydrated version links',async()=>{
-  const f=readerFixture({doc:htmlFixture({canonical:'/en/model/10'})});
+test('current and legacy English canonical paths identify the selected model without hydrated version links',async()=>{
+  for(const canonical of ['/model/10','https://pixai.art/model/10/101','/en/model/10','/en/model/10/101']) {
+    const f=readerFixture({doc:htmlFixture({canonical})});
+    assert.equal(await readLoraTriggerWords(selected,f.io),'harukav2 style');
+    assert.equal(f.calls[0].url,requested);
+  }
+});
+test('the obsolete English URL is never requested even when that route would redirect',async()=>{
+  const f=readerFixture();f.io.fetch=async(url,request)=>{
+    f.calls.push({url,request});
+    if(new URL(url).pathname.startsWith('/en/'))throw new TypeError('redirect blocked');
+    return responseFixture();
+  };
   assert.equal(await readLoraTriggerWords(selected,f.io),'harukav2 style');
-  assert.equal(f.calls[0].url,requested);
+  assert.equal(f.calls.length,1);assert.equal(f.calls[0].url,requested);
+  assert.equal(f.calls[0].request.redirect,'error');
+});
+test('current English canonical paths still reject another model, version, origin, or locale',async()=>{
+  for(const canonical of ['/model/20','/model/10/102','/model/10/unrelated','/ko/model/10',
+    'https://example.test/model/10','https://pixai.art.evil.test/model/10']) {
+    const f=readerFixture({doc:htmlFixture({canonical})});
+    await assert.rejects(readLoraTriggerWords(selected,f.io),/모델/);
+    assert.equal(f.timers.cleared,1);
+  }
 });
 test('ambiguous, absent, malformed, or active-content trigger sections are refused',async()=>{
   for(const doc of [htmlFixture({termCount:2}),htmlFixture({termCount:0}),htmlFixture({termName:'Other Words'}),
@@ -135,6 +155,19 @@ test('empty trigger results leave configuration intact without a failure warning
   const config=configuration(),f=adapterFixture(config);
   const result=await capturePresetSettings(f.adapter,async()=> '');
   assert.deepEqual(plain(result.loras),config.loras);assert.deepEqual(plain(result.triggerWarnings),[]);assert.equal(f.captures,2);
+});
+test('five LoRAs keep order and weights when one public page fails and another has no trigger',async()=>{
+  const config={model:configuration().model,loras:Array.from({length:5},(_,i)=>({id:String(10+i),versionId:String(101+i),name:`LoRA ${i+1}`,weight:i/4}))};
+  const original=plain(config),f=adapterFixture(config),readers=[];
+  const result=await capturePresetSettings(f.adapter,lora=>{
+    const reader=readerFixture({response:responseFixture({url:`https://pixai.art/model/${lora.id}/${lora.versionId}`,ok:lora.id!=='12',status:lora.id==='12'?404:200}),
+      doc:htmlFixture({canonical:`/model/${lora.id}`,paragraphs:lora.id==='14'?[]:[`trigger ${lora.id}`]})});
+    readers.push(reader);return readLoraTriggerWords(lora,reader.io);
+  });
+  assert.deepEqual(plain(result.loras),original.loras.map(lora=>({...lora,...(['12','14'].includes(lora.id)?{}:{triggerWords:`trigger ${lora.id}`} )})));
+  assert.deepEqual(plain(result.triggerWarnings),['LoRA 3']);assert.deepEqual(config,original);assert.equal(f.captures,2);
+  assert.equal(new Set(readers.map(reader=>reader.calls[0].request.signal)).size,5);
+  assert.ok(readers.every(reader=>reader.calls.length===1&&reader.timers.cleared===1));
 });
 test('model/version, LoRA weight, or selected LoRA changes during lookup reject mixed settings',async()=>{
   for(const mutate of [config=>config.model.versionId='12',config=>config.model.id='2',
