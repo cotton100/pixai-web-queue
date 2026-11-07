@@ -869,6 +869,30 @@ test('runtime full settings backup import accepts the renamed app script export 
   }
 });
 
+test('runtime character LoRA backup import protects local storage and undo restores a protected library',async()=>{
+  const core=sandbox.module.exports,fixture=runtimeAppBackup(),withLora=fixture.library;
+  withLora.characters[0].loras=[{id:'399',versionId:'499',name:'Character model',weight:0.6,triggerWords:'character_trigger'}];
+  const options={maxCredits:null,filePrefix:'',repeat:1},meta={appVersion:'fixture',exportedAt:'2026-11-07T00:00:00.000Z'};
+  const records=runtimeAppRecords(),f=panelFixture(null,{records});
+  const importLibrary=async library=>{
+    await runtimeChooseFile(f,JSON.stringify(core.makeSettingsBackup(library,options,meta)));
+    runtimeSetImportMode(f,'replace');runtimePress(f,'선택한 항목 가져오기');await runtimeFlush();
+    assert.match(f.message(),/설정을 불러왔습니다/);
+  };
+  await importLibrary(withLora);
+  const protectedRaw=f.records.get(runtimeSettingsKeys.library);
+  assert.equal(JSON.parse(protectedRaw).version,2);
+  assert.deepEqual(JSON.parse(protectedRaw).library.characters[0].loras,withLora.characters[0].loras);
+  const refreshed=panelFixture(null,{records:f.records});
+  assert(refreshed.panel.querySelector('[data-character-lora-editor]'));
+  await importLibrary(fixture.outputs.full.library);
+  assert.equal(JSON.parse(f.records.get(runtimeSettingsKeys.library)).version,1);
+  runtimePress(f,'가져오기 전 설정 복구');await runtimeFlush();
+  assert.equal(f.records.get(runtimeSettingsKeys.library),protectedRaw);
+  assert.equal(f.records.get(runtimeSettingsKeys.queue),records.get(runtimeSettingsKeys.queue));
+  assert.equal(f.networkCalls,0);assert.equal(f.generateCalls,0);
+});
+
 test('runtime selective export saves only the chosen folder and reimports without replacing other materials or options',async()=>{
   const fixture=runtimeAppBackup(),records=runtimeAppRecords(),downloads=[],f=panelFixture(null,{records,info:{downloadMode:'browser'},download:details=>{downloads.push(details);details.onload();}});
   const mark=(name,checked)=>{const field=runtimeField(f,name);field.checked=checked;field.fire('change');};

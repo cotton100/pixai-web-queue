@@ -131,10 +131,15 @@ function importedImagePreset(fields,name,id){if(fields.modelIncomplete||!fields.
 async function prepareImageForSave(blob,job,mediaId,persist=()=>{}) {if(job.embedMetadata!==true||blob.type!=='image/png')return blob;try{return new Blob([embedGenerationInfo(new Uint8Array(await blob.arrayBuffer()),job,mediaId)],{type:'image/png'});}catch{job.metadataWarnings={...(job.metadataWarnings||{}),[mediaId]:'생성 요청 정보를 추가하지 못해 검증된 다운로드 원본 그대로 저장했습니다.'};persist();return blob;}}
 function importImageComposition(library,recipe,value,selected,options={}){
     const next=JSON.parse(JSON.stringify(normalizePresetLibrary(library))),fields=imageInfoFields(value),id=options.idFactory||(()=>crypto.randomUUID()),name=options.name||'이미지에서 가져온 조합';if(!Object.values(selected).some(Boolean))throw Error('적용할 정보를 선택해 주세요.');
-    const oldPreset=next.presets.find(v=>v.id===recipe.presetId),oldCharacter=next.characters.find(v=>v.id===recipe.characterId),chunks=recipe.sceneIds.map(key=>next.scenes.find(v=>v.id===key));if(chunks.some(v=>!v))throw Error('현재 조합의 청크 연결을 먼저 확인해 주세요.');
-    const current=composePresetPrompts(resolvePresetCommon(next,oldPreset),oldCharacter||{},chunks,oldPreset||{loras:[]},recipe.triggerPosition);
+    const oldPreset=next.presets.find(v=>v.id===recipe.presetId),oldCharacter=next.characters.find(v=>v.id===recipe.characterId);
+    let current={};
+    if(!selected.prompt||!selected.negativePrompt){
+      const chunks=recipe.sceneIds.map(key=>next.scenes.find(v=>v.id===key));if(chunks.some(v=>!v))throw Error('현재 조합의 청크 연결을 먼저 확인해 주세요.');
+      current=composePresetPrompts(resolvePresetCommon(next,oldPreset),oldCharacter||{},chunks,oldPreset||{loras:[]},recipe.triggerPosition);
+    }
     if(selected.prompt&&fields.prompt===undefined||selected.negativePrompt&&fields.negativePrompt===undefined)throw Error('선택한 문구가 파일에 없습니다.');
-    const preset=selected.model?importedImagePreset(fields,name,id()):oldPreset?{id:id(),name,model:{...oldPreset.model},loras:oldPreset.loras.map(v=>({...v,triggerWords:''}))}:null;if(!preset)throw Error('조합 예약에서 사용할 PixAI 프리셋을 먼저 골라 주세요.');
+    const effective=!selected.model&&oldPreset?effectiveCharacterPreset(oldPreset,oldCharacter||{}):null;
+    const preset=selected.model?importedImagePreset(fields,name,id()):effective?{id:id(),name,model:{...effective.model},loras:effective.loras.map(v=>({...v,triggerWords:''}))}:null;if(!preset)throw Error('조합 예약에서 사용할 PixAI 프리셋을 먼저 골라 주세요.');
     const common={id:id(),name:name+' · 추가 공통문 없음',prompt:'',negativePrompt:''},character={id:id(),name:name+' · 추가 캐릭터 문구 없음',prompt:'',negativePrompt:''},chunk={id:id(),name,prompt:selected.prompt?fields.prompt:current.prompt,negativePrompt:selected.negativePrompt?fields.negativePrompt:current.negativePrompt};preset.commonPresetId=common.id;
     next.commonPresets=[...(next.commonPresets||[]),common];next.presets.push(preset);next.characters.push(character);next.scenes.push(chunk);const images={...recipe.imageOptions};if(selected.image)for(const key of ['aspectRatio','size','mode','batchSize'])if(fields[key]!==undefined)images[key]=fields[key];
     return {library:normalizePresetLibrary(next),recipe:{presetId:preset.id,characterId:character.id,sceneIds:[chunk.id],count:1,triggerPosition:'end',imageOptions:images},api:{...(selected.seed&&fields.seed!==undefined?{seed:String(fields.seed)}:{}),...(selected.style&&fields.style?{style:fields.style}:{})}};
