@@ -141,14 +141,26 @@ test('legacy export explicitly refuses attached character LoRAs instead of disca
  assert.throws(()=>core.compatibleSettings(lib,options,meta,'legacy'),/캐릭터|LoRA|로라|구형|호환/i);
 });
 
-test('final API validation applies its count limit to the combined LoRA list',()=>{
- const lib=seed();lib.characters[0].loras=Array.from({length:5},(_,index)=>lora(String(310+index),String(410+index),.5,'trigger-'+index));
- lib.reservations=[recipe()];
- let job;
- try{job=core.expandPresetReservations(lib)[0];}
- catch(error){assert.match(error.message,/5|LoRA|로라/);return;}
- assert.equal(job.configuration.loras.length,6);
- assert.throws(()=>core.buildApiPayload(job,{},4,77),/최대 5개|5.*LoRA|LoRA.*5/);
+for(const count of [10,15])test(`API payload preserves all ${count} combined LoRAs without local count filtering`,()=>{
+ const lib=seed();lib.presets[0].loras=Array.from({length:9},(_,index)=>lora(String(1000+index),String(2000+index),.5,'style-'+index));
+ lib.characters[0].loras=Array.from({length:count-9},(_,index)=>lora(String(1100+index),String(2100+index),.7,'character-'+index));
+ const entry=recipe();lib.reservations=[{...entry,snapshot:core.snapshotCombination(lib,entry)}];
+ const job=core.expandPresetReservations(lib)[0],before=copy(job),payload=core.buildApiPayload(job,{},4,77);
+ assert.equal(payload.loras.length,count);assert.deepEqual(payload.loras.map(item=>item.modelId),[...lib.presets[0].loras,...lib.characters[0].loras].map(item=>item.versionId));
+ assert.deepEqual(payload.loras.map(item=>item.weight),[...Array(9).fill(.5),...Array(count-9).fill(.7)]);assert.deepEqual(job,before);
+});
+
+test('sixteen combined LoRAs survive storage, editing, reservation snapshots and API payload creation without truncation',()=>{
+ const lib=seed();lib.presets[0].loras=Array.from({length:9},(_,index)=>lora(String(1000+index),String(2000+index),.5,'style-'+index));
+ lib.characters[0].loras=Array.from({length:7},(_,index)=>lora(String(1100+index),String(2100+index),.7,'character-'+index));
+ const restored=core.decodeLocalPresetLibrary(core.encodeLocalPresetLibrary(core.normalizePresetLibrary(lib)));
+ restored.characters[0].name='Edited character';restored.characters[0].loras[6].weight=.6;
+ const edited=core.decodeLocalPresetLibrary(core.encodeLocalPresetLibrary(restored)),entry=recipe();edited.reservations=[{...entry,snapshot:core.snapshotCombination(edited,entry)}];
+ const job=core.expandPresetReservations(edited)[0],before=copy(job);
+ assert.equal(edited.characters[0].name,'Edited character');assert.equal(job.configuration.loras.length,16);assert.equal(job.configuration.loras[15].weight,.6);
+ const payload=core.buildApiPayload(job,{},4,77);
+ assert.equal(payload.loras.length,16);assert.deepEqual(payload.loras.map(item=>item.modelId),job.configuration.loras.map(item=>item.versionId));
+ assert.deepEqual(payload.loras.map(item=>item.weight),job.configuration.loras.map(item=>item.weight));assert.equal(payload.loras[15].weight,.6);assert.deepEqual(job,before);
 });
 
 test('out-of-API-range character LoRA weights can be kept in storage but are rejected before submission',()=>{

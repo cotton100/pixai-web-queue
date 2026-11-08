@@ -15,6 +15,7 @@ function createSceneThumbnailCache(io){
     return {get:id=>images.find(v=>v.sceneId===id)?.dataUrl,clear(){try{io.save('[]');images=[];}catch{}},async remember(id,blob){if(!id||id.length>200)return false;try{const bitmap=await createImageBitmap(blob);if(bitmap.width*bitmap.height>40000000){bitmap.close();return false;}const scale=Math.min(1,256/bitmap.width,192/bitmap.height),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();const dataUrl=canvas.toDataURL('image/webp',.65);if(dataUrl.length>65536)return false;const next=[{sceneId:id,dataUrl,savedAt:Date.now()},...images.filter(v=>v.sceneId!==id)].slice(0,100);while(JSON.stringify(next).length>2*1024*1024)next.pop();io.save(JSON.stringify(next));images=next;return true;}catch{return false;}}};
 }
 function atomicRecordWrite(storage,writes,previousKey){
+    storage.prepareWrite?.(Object.keys(writes));
     const original=Object.fromEntries(Object.keys(writes).map(key=>[key,storage.getItem(key)]));
     if(previousKey)storage.setItem(previousKey,JSON.stringify(original));
     try{for(const [key,value] of Object.entries(writes))storage.setItem(key,value);}catch(error){let failed=false;for(const [key,value] of Object.entries(original))try{if(value===null)storage.removeItem(key);else storage.setItem(key,value);}catch{failed=true;}throw Error(failed?'저장·원복 모두 실패했습니다. 이전 복구 사본을 보존했습니다.':'저장 실패 · 원래 자료로 되돌렸습니다.');}
@@ -353,7 +354,7 @@ function resolveBatchRow(value, row) {
         problems.push(`출연 「${name}」의 캐릭터 ${characterId}이(가) 없습니다.`);
     if(characterId&&presetId) {
         const character=library.characters.find(item=>item.id===characterId),preset=library.presets.find(item=>item.id===presetId);
-        if(character?.loras?.length&&preset)try{assertCharacterApiLoras(effectiveCharacterPreset(preset,character).loras);}catch(error){problems.push(error.message);}
+        if(character?.loras?.length&&preset)try{effectiveCharacterPreset(preset,character);}catch(error){problems.push(error.message);}
     }
     return {
         key,
@@ -507,7 +508,7 @@ function imageInfoFields(value) {
         return {};
     const p = value;
     const out = {};
-    if(p.modelIncomplete===true||(Array.isArray(p.loras)&&p.loras.some(v=>!v||typeof v.versionId!=='string'||!/^\d{1,40}$/.test(v.versionId)||typeof v.id!=='string'||!/^\d{1,40}$/.test(v.id)))||(p.loras!==undefined&&(!Array.isArray(p.loras)||p.loras.length>5||p.loras.some(v=>!v||typeof v.weight!=='number'||!Number.isFinite(v.weight)||v.weight<0||v.weight>1))))out.modelIncomplete=true;
+    if(p.modelIncomplete===true||(Array.isArray(p.loras)&&p.loras.some(v=>!v||typeof v.versionId!=='string'||!/^\d{1,40}$/.test(v.versionId)||typeof v.id!=='string'||!/^\d{1,40}$/.test(v.id)))||(p.loras!==undefined&&(!Array.isArray(p.loras)||p.loras.some(v=>!v||typeof v.weight!=='number'||!Number.isFinite(v.weight)||v.weight<0||v.weight>1))))out.modelIncomplete=true;
     for (const key of ['prompt', 'negativePrompt'])
         if (typeof p[key] === 'string' && p[key].length <= 100000)
             out[key] = p[key];
@@ -516,7 +517,6 @@ function imageInfoFields(value) {
     if (typeof p.modelId === 'string' && /^\d{1,40}$/.test(p.modelId))
         out.modelId = p.modelId;
     if (Array.isArray(p.loras) &&
-        p.loras.length <= 5 &&
         p.loras.every((v) => v &&
             typeof v.versionId === 'string' &&
             /^\d{1,40}$/.test(v.versionId) &&

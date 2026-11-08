@@ -29,6 +29,10 @@ test('missing LoRA identity blocks model import instead of silently discarding a
  for(const lora of [{id:'301',weight:.5},{versionId:'401',weight:.5}]){const fields=core.imageInfoFields({modelId:'101',modelVersionId:'201',loras:[lora]});assert.equal(fields.modelIncomplete,true);assert.throws(()=>core.importedImagePreset(fields,'name','id'),/부모 ID/);}
 });
 
+test('image model metadata preserves every LoRA without treating a server count allowance as a file limit',()=>{
+ for(const count of [6,10,15,16]){const loras=Array.from({length:count},(_,i)=>({id:String(300+i),versionId:String(400+i),weight:.7})),input={modelId:'101',modelVersionId:'201',loras};const fields=core.imageInfoFields(input);assert(!fields.modelIncomplete);assert.deepEqual(fields.loras,loras);assert.deepEqual(core.importedImagePreset(fields,'metadata','p').loras.map(l=>({id:l.id,versionId:l.versionId,weight:l.weight})),loras);assert.equal(input.loras.length,count);}
+});
+
 test('stealth survives all PNG row filters, Adam7 interlace and 16-bit alpha conversion',async()=>{
  const record=JSON.stringify({Description:'stealth-filtered',Comment:JSON.stringify({uc:'negative'})});for(const options of [{filter:1},{filter:2},{filter:3},{filter:4},{filter:4,interlace:true},{depth:16,filter:4,interlace:true}]){const info=await core.readImageInfo(fixtures.stealthPng(core,record,options));assert(info.sources.some(v=>v.label.includes('stealth')&&v.fields.prompt==='stealth-filtered'),JSON.stringify(options));}
 });

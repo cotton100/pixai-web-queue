@@ -33,6 +33,15 @@ test('scene options merge per field, exceptions exclude zero, missing rows fail 
  const failed=core.expandBatchPlan(lib,{...plan,rows:[{kind:'character',id:'missing'}]});assert.equal(failed.reservations.length,0);assert.throws(()=>core.appendBatchReservations(lib,failed),/해결할/);assert.deepEqual(lib,before);
  lib.scenes=[];const retained=core.expandBatchPlan(lib,plan);assert.equal(retained.reservations[0].snapshot.chunks[0].prompt,'smile');assert(retained.problems.some(v=>v.level==='warning'));
 });
+test('a conflicting character LoRA rejects the complete scene batch without overwriting an existing snapshot',()=>{
+ const lib=seed(),recipe={id:'old',presetId:'p',characterId:'c',sceneIds:['s'],count:1};lib.reservations=[{...recipe,snapshot:core.snapshotCombination(lib,recipe)}];
+ lib.characters.push({...copy(lib.characters[0]),id:'conflict',name:'Conflict',loras:[{...lib.presets[0].loras[0],weight:.2}]});
+ lib.sceneCards=[core.makeSceneCard(lib,{id:'card',name:'Scene',sceneIds:['s']})];const before=copy(lib);
+ const expanded=core.expandBatchPlan(lib,{id:'plan',rows:[{kind:'character',id:'c'},{kind:'character',id:'conflict'}],columns:['card'],count:1});
+ assert(expanded.problems.some(problem=>problem.level==='error'&&/LoRA/.test(problem.message)));assert.equal(expanded.reservations.length,0);
+ assert.throws(()=>core.appendBatchReservations(lib,expanded),/LoRA/);assert.deepEqual(lib,before);assert.equal(core.expandPresetReservations(lib).length,1);
+});
+
 test('scene copies refresh only on explicit confirmation and preserve removed originals',()=>{
  const lib=seed();lib.sceneCards=[core.makeSceneCard(lib,{id:'a',sceneIds:['s']})];lib.scenes[0].prompt='new-smile';const diff=core.refreshSceneCard(lib,'a');assert.equal(diff.changes[0].before,'smile');assert.equal(lib.sceneCards[0].chunks[0].prompt,'smile');lib.scenes=[];assert.equal(core.refreshSceneCard(lib,'a').card.chunks[0].prompt,'smile');
 });

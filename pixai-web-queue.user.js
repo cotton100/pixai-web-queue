@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.10.6
+// @version      0.10.20
 // @license      GPL-3.0-only
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -15,7 +15,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @connect      api.pixai.art
-// @connect      *.pixai.art
+// @connect      127.0.0.1
+// @connect      pixai.art
 // @connect      d2doj8oszwtcqy.cloudfront.net
 // @sandbox      DOM
 // @run-at       document-start
@@ -24,6 +25,368 @@
 
 (() => {
   'use strict';
+  // BEGIN LIBRARY SYNC
+// SPDX-License-Identifier: GPL-3.0-only
+// Same-PC library transport. No PixAI credentials, job submission, or page fetch.
+const SYNC_COLLECTIONS=Object.freeze(['commonPresets','presets','characters','characterFolders','chunkFolders','scenes','sceneFolders','sceneCards','casts','batchPlans']);
+const LIBRARY_SYNC_URL='http://127.0.0.1:50321/v1/library-sync/';
+const LIBRARY_SYNC_KEY='local.pixai-web-queue.library-sync.v1';
+const LIBRARY_SYNC_MAX_BYTES=20*1024*1024;
+function canonicalSync(value) {
+    const seen=new Set();
+    function sorted(item,depth){
+        if(depth>64)throw Error('동기화 자료가 너무 깊게 중첩되어 있습니다.');
+        if(item===null||typeof item==='boolean'||typeof item==='string'||typeof item==='number'&&Number.isFinite(item))return item;
+        if(!item||typeof item!=='object'||seen.has(item))throw Error('동기화 자료는 순환하지 않는 JSON 값만 허용합니다.');
+        seen.add(item);let result;
+        if(Array.isArray(item))result=item.map(value=>sorted(value,depth+1));
+        else {if(Object.getPrototypeOf(item)!==Object.prototype&&Object.getPrototypeOf(item)!==null)throw Error('동기화 객체 형식을 확인해 주세요.');result=Object.fromEntries(Object.keys(item).sort().map(key=>{if(['__proto__','constructor','prototype'].includes(key))throw Error('허용되지 않은 동기화 필드입니다.');return [key,sorted(item[key],depth+1)];}));}
+        seen.delete(item);return result;
+    }
+    const text=JSON.stringify(sorted(value,0));if(new TextEncoder().encode(text).byteLength>LIBRARY_SYNC_MAX_BYTES)throw Error('동기화 자료는 20MiB까지 처리할 수 있습니다.');return text;
+}
+function syncProjection(library) {return {version:1,common:library.common,...Object.fromEntries(SYNC_COLLECTIONS.map(key=>[key,library[key]||[]]))};}
+function parseSyncLibrary(value) {
+    canonicalSync(value);
+    settingsBackupKeys(value,'동기화 라이브러리',['version','common',...SYNC_COLLECTIONS]);
+    for(const key of SYNC_COLLECTIONS)if(!Array.isArray(value[key]))throw Error('동기화 목록 형식이 맞지 않습니다.');
+    // Keep the existing schema's frozen-copy and saved-plan semantics. The app
+    // merger rejects newly broken references; an already missing live source is preserved.
+    return syncProjection(settingsBackupLibrary({...value,reservations:[]}));
+}
+function projectSyncLibrary(library) {return parseSyncLibrary(syncProjection(normalizePresetLibrary(library)));}
+function applySyncLibrary(current,incoming) {
+    const next=parseSyncLibrary(incoming),old=normalizePresetLibrary(current);
+    return normalizePresetLibrary({...old,...next,reservations:old.reservations.map(item=>freezeBackupReservation(old,item))});
+}
+async function syncLibraryHash(value) {
+    const digest=await globalThis.crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonicalSync(value)));
+    return Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,'0')).join('');
+}
+function createLibrarySyncTransport(request,timers={setTimeout,clearTimeout}) {
+    return (path,body,token)=>new Promise((resolve,reject)=>{
+        if(typeof request!=='function'||!['pair','exchange','approve','ack','cancel'].includes(path))return reject(Error('Tampermonkey 로컬 연결을 사용할 수 없습니다.'));
+        const data=JSON.stringify(body),url=LIBRARY_SYNC_URL+path,limit=3*LIBRARY_SYNC_MAX_BYTES;
+        if(new TextEncoder().encode(data).byteLength>LIBRARY_SYNC_MAX_BYTES)return reject(Error('동기화 요청은 20MiB까지 전송할 수 있습니다.'));
+        let handle,settled=false;
+        const finish=(error,value)=>{if(settled)return;settled=true;timers.clearTimeout(deadline);if(error)reject(error);else resolve(value);};
+        const offline=()=>finish(Object.assign(Error('앱 오프라인 · 앱의 같은 PC 연결을 켠 뒤 다시 시도하세요.'),{offline:true}));
+        // Tampermonkey fetch-mode timeouts vary by browser. Always own a deadline.
+        const deadline=timers.setTimeout(()=>{offline();handle?.abort?.();},5000);
+        try {handle=request({method:'POST',url,data,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},anonymous:true,redirect:'error',timeout:5000,
+            onerror:offline,ontimeout:offline,onabort:offline,
+            onprogress:progress=>{if(progress.loaded>limit){finish(Error('앱의 동기화 응답이 너무 큽니다.'));handle?.abort?.();}},
+            onload:response=>{
+                if(settled)return;
+                if(response.finalUrl&&response.finalUrl!==url)return finish(Error('로컬 연결 주소가 바뀌어 요청을 중지했습니다.'));
+                if(response.status!==200)return finish(Object.assign(Error(response.status===401?'연결 인증이 만료되었습니다. 앱에서 새 코드를 만든 뒤 다시 연결하세요.':'로컬 동기화 요청을 완료하지 못했습니다. 앱 상태를 확인하세요.'),{status:response.status}));
+                try {if(typeof response.responseText!=='string'||new TextEncoder().encode(response.responseText).byteLength>limit||!/^content-type:\s*application\/json(?:;|\s|$)/im.test(response.responseHeaders||''))throw Error();finish(null,JSON.parse(response.responseText));}
+                catch {finish(Error('앱의 동기화 응답 형식을 확인하지 못했습니다.'));}
+            }});}catch {offline();}
+    });
+}
+function createLibrarySyncClient(io) {
+    let token='',automatic=false,busy=false,timer=null,started=false,exchange={state:'idle'},message='연결 안 됨',authFailed=false,previewSnapshot=null;
+    const supported=!!io.storage;
+    function state(){return {supported,linked:!!token,automatic,busy,exchange,message};}
+    function emit(){io.changed?.(state());}
+    function persist(next){io.storage.set(LIBRARY_SYNC_KEY,next);if(canonicalSync(io.storage.get(LIBRARY_SYNC_KEY,null))!==canonicalSync(next))throw Error('로컬 연결 정보를 저장하지 못했습니다.');}
+    function idle(){if(busy)throw Error('동기화 요청이 끝난 뒤 다시 시도해 주세요.');}
+    function guard(){io.assertReady?.();}
+    function schedule(){if(timer!==null)io.clearTimeout(timer);timer=null;if(started&&token&&!authFailed)timer=io.setTimeout(()=>{timer=null;void sync(false);},10000);}
+    async function run(action){idle();busy=true;emit();try{return await action();}catch(error){message=error.message;if(error.status===401)authFailed=true;throw error;}finally{busy=false;emit();schedule();}}
+    async function accept(value){
+        if(!value||!['idle','preview','apply','blocked'].includes(value.state))throw Error('동기화 상태를 확인하지 못했습니다.');
+        if(value.state==='preview'){
+            const p=value.proposal;
+            if(!p||typeof p.id!=='string'||!Array.isArray(p.conflicts)||typeof p.initial!=='boolean'||![p.appCount,p.scriptCount,p.mergedCount].every(Number.isSafeInteger))throw Error('동기화 미리보기를 확인하지 못했습니다.');
+            parseSyncLibrary(p.library);
+            for(const item of p.conflicts)if(!item||typeof item.key!=='string'||typeof item.label!=='string')throw Error('동기화 충돌 형식을 확인하지 못했습니다.');
+        }
+        exchange=value;
+        if(value.state!=='apply'){message=value.state==='preview'?'미리보기를 확인하고 적용해 주세요.':value.state==='blocked'?'자료가 변경되었거나 앱 편집 중입니다. 확인한 뒤 지금 동기화를 누르세요.':'연결됨 · 라이브러리 확인 완료';return value;}
+        if(typeof value.transactionId!=='string'||!value.transactionId||!/^[a-f0-9]{64}$/.test(value.expectedScriptHash||''))throw Error('동기화 전송 정보를 확인하지 못했습니다.');
+        const incoming=parseSyncLibrary(value.library),current=io.read(),projection=projectSyncLibrary(current);
+        if(canonicalSync(projection)!==canonicalSync(incoming)){
+            guard();
+            if(await syncLibraryHash(projection)!==value.expectedScriptHash){exchange={state:'blocked'};message='미리보기 뒤 스크립트 자료가 바뀌었습니다. 지금 동기화로 다시 비교해 주세요.';return exchange;}
+            guard();
+            await io.save(current,applySyncLibrary(current,incoming));
+        }
+        // Read back persisted data. Save failures and intervening edits must never advance the baseline.
+        const saved=projectSyncLibrary(io.read());
+        if(canonicalSync(saved)!==canonicalSync(incoming))throw Error('동기화 저장 내용을 확인하지 못했습니다. 다음 확인 때 다시 비교합니다.');
+        const acknowledged=await io.request('ack',{id:value.transactionId,library:saved},token);
+        if(!acknowledged||acknowledged.state!=='idle')throw Error('앱의 저장 확인을 받지 못했습니다. 다음 확인 때 다시 시도합니다.');
+        exchange=acknowledged;message='동기화 완료 · 기존 예약·대기열·옵션 유지';return acknowledged;
+    }
+    async function sync(requestSync=true){
+        if(!token){if(requestSync)throw Error('앱 연결 코드를 먼저 입력해 주세요.');return;}
+        if(busy){if(!requestSync){schedule();return;}idle();}
+        try{return await run(async()=>{guard();authFailed=false;const snapshot=projectSyncLibrary(io.read()),result=await io.request('exchange',{library:snapshot,automatic,requestSync},token);if(result?.state==='preview')previewSnapshot=snapshot;return accept(result);});}
+        catch(error){if(requestSync)throw error;}
+    }
+    return {
+        state,
+        start(){if(started)return;started=true;try{if(supported){const saved=io.storage.get(LIBRARY_SYNC_KEY,null);if(saved){if(typeof saved.token!=='string'||!/^[A-Za-z0-9_-]{32,256}$/.test(saved.token)||typeof saved.automatic!=='boolean')throw Error('저장한 연결 정보가 올바르지 않습니다. 다시 연결해 주세요.');token=saved.token;automatic=saved.automatic;message='연결됨 · 앱 응답 대기';}}}catch(error){message=error.message;}emit();schedule();},
+        stop(){started=false;if(timer!==null)io.clearTimeout(timer);timer=null;},
+        async pair(code){if(!supported)throw Error('연결에는 Tampermonkey 전용 저장소가 필요합니다.');return run(async()=>{guard();const result=await io.request('pair',{code:String(code).trim()});if(!result||typeof result.token!=='string'||!/^[A-Za-z0-9_-]{32,256}$/.test(result.token))throw Error('앱 연결 응답을 확인하지 못했습니다.');persist({token:result.token,automatic:false});token=result.token;automatic=false;authFailed=false;exchange={state:'idle'};message='연결됨 · 지금 동기화를 눌러 첫 미리보기를 확인하세요.';});},
+        disconnect(){idle();if(supported){io.storage.remove(LIBRARY_SYNC_KEY);if(io.storage.get(LIBRARY_SYNC_KEY,null)!==null)throw Error('연결 정보 삭제를 확인하지 못했습니다.');}token='';automatic=false;authFailed=false;exchange={state:'idle'};message='이 스크립트 연결 해제됨 · 앱에서도 연결 해제할 수 있습니다.';schedule();emit();},
+        setAutomatic(value){idle();if(!token)throw Error('앱에 먼저 연결해 주세요.');persist({token,automatic:value===true});automatic=value===true;emit();},
+        sync,
+        approve(id,choices){return run(async()=>{guard();if(exchange.state!=='preview'||exchange.proposal.id!==id||!previewSnapshot||canonicalSync(projectSyncLibrary(io.read()))!==canonicalSync(previewSnapshot))throw Error('미리보기 뒤 자료가 변경됐습니다. 다시 동기화해 주세요.');await accept(await io.request('approve',{id,choices},token));});},
+        cancel(id){return run(async()=>{await accept(await io.request('cancel',{id},token));});}
+    };
+}
+function mountLibrarySyncPanel(parent,{node,button,client,isBusy=()=>false}) {
+    const box=node('section',null,{'data-library-sync':''}),status=node('p',null,{role:'status'}),code=node('input',null,{type:'password',autocomplete:'off','data-edit':'','aria-label':'앱 일회용 연결 코드',placeholder:'앱의 새 연결 코드'}),preview=node('div'),automatic=node('input',null,{type:'checkbox','data-edit':'','aria-label':'라이브러리 자동 동기화'});
+    const connect=button('앱 연결',async()=>{const value=code.value;code.value='';await client.pair(value);}),sync=button('지금 동기화',()=>client.sync()),disconnect=button('스크립트 연결 해제',()=>client.disconnect());
+    for(const control of [connect,sync,disconnect])control.setAttribute('data-edit','');
+    const label=node('label',null,{class:'pq-check-label'});label.append(automatic,node('span','자동 동기화 · 첫 연결과 충돌은 직접 확인'));
+    automatic.addEventListener('change',()=>{try{client.setAutomatic(automatic.checked);}catch{automatic.checked=client.state().automatic;}});
+    box.append(node('h3','같은 PC 앱과 라이브러리 연결'),node('small','공통문·프리셋·캐릭터·청크·씬·출연·일괄 구성만 공유합니다. 예약·기록·생성 옵션·API 키는 각 도구에 유지합니다.'),status,code,connect,sync,disconnect,label,preview);parent.append(box);
+    let displayed='';
+    function render(state){
+        status.textContent=state.supported?state.message:'같은 PC 연결에는 최신 Tampermonkey가 필요합니다.';automatic.checked=state.automatic;
+        for(const control of [code,connect,sync,disconnect,automatic]){const disabled=state.busy||isBusy()||!state.supported||(!state.linked&&![code,connect].includes(control));control.disabled=disabled;control.dataset.unavailable=String(state.busy||!state.supported||(!state.linked&&![code,connect].includes(control)));}
+        code.hidden=state.linked;connect.hidden=state.linked;
+        const proposal=state.exchange.state==='preview'?state.exchange.proposal:null;
+        for(const control of preview.querySelectorAll('button,select')){control.disabled=state.busy||isBusy();control.dataset.unavailable=String(state.busy);}
+        if((proposal?.id||'')===displayed)return;displayed=proposal?.id||'';preview.replaceChildren();if(!proposal)return;
+        const choices=Object.create(null);preview.append(node('strong',proposal.initial?'첫 동기화 미리보기':'동기화 미리보기'),node('p',`앱 ${proposal.appCount}개 · 스크립트 ${proposal.scriptCount}개 · 합친 결과 ${proposal.conflicts.length?'충돌 선택 후 확정':proposal.mergedCount+'개'}`));
+        for(const conflict of proposal.conflicts){
+            const row=node('div'),select=node('select',null,{'data-edit':'','aria-label':'충돌 선택: '+conflict.label});select.append(node('option','어느 값을 쓸지 선택',{value:''}),node('option','앱 값 사용',{value:'app'}),node('option','스크립트 값 사용',{value:'script'}));
+            select.addEventListener('change',()=>{if(select.value)choices[conflict.key]=select.value;else delete choices[conflict.key];});
+            const details=node('details');details.append(node('summary','양쪽 값 보기'),node('pre','앱\n'+JSON.stringify(conflict.app,null,2)+'\n스크립트\n'+JSON.stringify(conflict.script,null,2)));row.append(node('strong',conflict.label),select,details);preview.append(row);
+        }
+        preview.append(button('미리보기 적용',()=>{if(proposal.conflicts.some(item=>!choices[item.key]))throw Error('충돌 항목마다 사용할 값을 선택해 주세요.');return client.approve(proposal.id,choices);}),button('미리보기 취소',()=>client.cancel(proposal.id)));
+        for(const control of preview.querySelectorAll('button,select')){control.setAttribute('data-edit','');control.disabled=state.busy||isBusy();control.dataset.unavailable=String(state.busy);}
+    }
+    render(client.state());return {render};
+}
+  // END LIBRARY SYNC
+  // BEGIN WEB UNLIMITED
+// Visible website controls only. No session tokens, internal API, or React state.
+function assertWebUnlimited(snapshot) {
+  if (!snapshot.enabled || !snapshot.banner || snapshot.price !== 'free' || snapshot.count !== 1)
+    throw Error('웹 무제한: Tsubaki.3 무제한 토글·무료 표시·단일 생성을 모두 확인해야 합니다. 유료 생성은 실행하지 않았습니다.');
+  if (snapshot.busy) throw Error('사이트에서 이미 제출 중입니다. 완료 후 다시 시작해 주세요.');
+}
+function webOriginal(value) {
+  const url=new URL(value.url);
+  if (url.origin!=='https://images-ng.pixai.art' || !/^\/images\/orig\/[a-f0-9-]+$/i.test(url.pathname) || url.search || url.hash || url.username || url.password)
+    throw Error('웹 결과의 원본 이미지 주소를 확인할 수 없습니다.');
+  if (!/^\d+$/.test(value.id) || !Number.isSafeInteger(value.width) || !Number.isSafeInteger(value.height) || value.width<1 || value.height<1)
+    throw Error('웹 결과 이미지 ID·크기를 확인할 수 없습니다.');
+  return {...value,url:url.href};
+}
+function assertWebReceipt(job,receipt) {
+  if(receipt.id!==job.taskId || receipt.credits!=='0' || normalize(receipt.prompt)!==normalize(job.prompt))
+    throw Error('웹 작업 상세의 ID·무료 차감·프롬프트를 대조하지 못했습니다. 자동 연결/재제출하지 않습니다.');
+}
+async function runWebUnlimited(jobs,io,{oneJob=false,stopped=()=>false}={}) {
+  for (const job of jobs) {
+    if (job.backend!=='web-unlimited' || ['done','skipped'].includes(job.state)) continue;
+    if (stopped()) break;
+    if (!['queued','waiting','saving','save_failed'].includes(job.state)) throw Error('웹 제출 결과가 불명확합니다. 사이트 기록을 확인해 주세요. 자동 재제출하지 않습니다.');
+    if (job.state==='queued') {
+      if (job.taskId || job.submittedAt || job.apiPayload) throw Error('이미 제출됐거나 API 요청이 있는 작업을 웹에서 다시 생성할 수 없습니다.');
+      await io.prepare(job);
+      if(stopped()) break;
+      Object.assign(job,{expected:1,state:'submitting',submittedAt:Date.now(),error:''});
+      // Commit the uncertainty marker BEFORE any website click, including on quota failure.
+      try {io.persist();} catch(error){job.state='unknown';job.error=error.message;throw error;}
+      try {
+        const id=await io.submit(job);
+        if (!/^\d+$/.test(id)) throw Error('웹 작업 ID를 확인하지 못했습니다.');
+        job.taskId=id;job.state='waiting';io.persist();
+      } catch(error) {
+        job.state=job.taskId?'waiting':error.notSubmitted?'queued':'unknown';
+        if(job.state==='queued')delete job.submittedAt;
+        job.error=error.message;io.persist();throw error;
+      }
+    }
+    if(stopped()) break;
+    try {
+      if(!job.webMedia) {job.webMedia=webOriginal(await io.wait(job));job.mediaIds=[job.webMedia.id];job.state='saving';io.persist();}
+      const original=webOriginal(job.webMedia);
+      if(!job.taskId || !/^\d+$/.test(job.taskId)) throw Error('저장할 웹 작업 ID가 없습니다.');
+      job.saved=job.saved||[];
+      if(job.saved.length>1) throw Error('웹 단일 작업의 저장 기록이 맞지 않습니다.');
+      if(!job.saved.length) {await io.guard?.(job);const file=await io.save(job,original);job.saved.push({mediaId:original.id,file});io.persist();}
+      await io.guard?.(job);
+      job.state='done';job.error='';io.persist();
+    } catch(error) {job.state=job.webMedia?'save_failed':'waiting';job.error=error.message;io.persist();throw error;}
+    if(oneJob) break;
+  }
+}
+function createWebUnlimitedAdapter(doc,io) {
+  const list=(scope,selector)=>Array.from(scope.querySelectorAll(selector));
+  const shown=e=>{
+    if(!e?.getClientRects().length || e.closest('#local-pixai-queue'))return false;
+    for(let a=e;a;a=a.parentElement){const s=io.win.getComputedStyle(a);if(a.hidden||a.inert||a.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse')return false;}
+    return true;
+  };
+  const only=(items,label)=>{if(items.length!==1)throw Error(`웹 무제한: ${label}을 하나로 확인하지 못했습니다. 생성하지 않았습니다.`);return items[0];};
+  const click=e=>{io.check();if(!e||e.disabled||e.getAttribute('aria-disabled')==='true')throw Error('웹 설정 버튼이 비활성화돼 있습니다.');io.mutate(()=>e.click());};
+  const editor=()=>only(list(doc,'main [contenteditable="true"]').filter(shown),'새 에디터 프롬프트');
+  const generate=()=>only(list(doc,'main [data-share-guide="generate"] button').filter(shown),'생성 버튼');
+  const toggle=()=>only(list(doc,'main input[role="switch"]').filter(e=>['Tsubaki.3 무제한 모드','Tsubaki.3 Unlimited Mode'].includes(e.getAttribute('aria-label'))&&shown(e.closest('label'))),'무제한 토글');
+  const groupName=e=>e.getAttribute('aria-label')||(e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>doc.getElementById(id)?.textContent||'').join(' ').trim();
+  const ratioGroup=()=>only(list(doc,'main [role="group"]').filter(e=>shown(e)&&['비율','Aspect ratio','Aspect Ratio'].includes(groupName(e))),'비율 그룹');
+  const selectedRatio=()=>only(list(ratioGroup(),'button').filter(e=>/^\d+:\d+$/.test(e.textContent.trim())&&e.classList.contains('ring-neutral-700')),'선택 비율').textContent.trim();
+  function safety() {
+    // The site's marker is a display:contents span (no own client rects).
+    // Anchor the price to the uniquely visible button, not that layout wrapper.
+    const button=generate(),scope=button.closest('[data-share-guide="generate"]')?.parentElement;
+    if(!shown(scope))throw Error('웹 무제한: 생성 가격 영역을 확인하지 못했습니다. 생성하지 않았습니다.');
+    const leaves=list(scope,'span').filter(e=>shown(e)&&e.children.length===0).map(e=>e.textContent.trim());
+    const banner=list(doc,'main span').some(e=>shown(e)&&['무제한 모드 사용 중','Unlimited mode active','Unlimited Mode Active'].includes(e.textContent.trim()));
+    const price=leaves.filter(t=>/^(?:무료|Free|[\d,]+)$/.test(t));
+    const snapshot={enabled:toggle().checked===true,banner,price:price.length===1&&/^(무료|Free)$/.test(price[0])?'free':'unknown',count:io.settings.readImageCount(),busy:button.disabled||button.getAttribute('aria-busy')==='true'};
+    assertWebUnlimited(snapshot);return button;
+  }
+  async function waitFor(read,label,timeout=20000) {
+    const deadline=Date.now()+timeout;
+    while(Date.now()<deadline){io.check();const value=read();if(value)return value;await io.sleep(500);}
+    throw Error(`웹 무제한: ${label} 확인 시간 초과. 자동 재제출하지 않습니다.`);
+  }
+  async function setRatio(value) {
+    let group=ratioGroup();
+    let button=list(group,'button').find(e=>shown(e)&&e.textContent.trim()===value);
+    if(!button){const reverse=value.split(':').reverse().join(':');if(list(group,'button').some(e=>e.textContent.trim()===reverse)){click(only(list(group,'button').filter(e=>['가로/세로 전환','Swap orientation'].includes(e.getAttribute('aria-label'))),'가로/세로 전환'));await io.sleep(250);group=ratioGroup();button=list(group,'button').find(e=>shown(e)&&e.textContent.trim()===value);}}
+    if(!button)throw Error(`웹 무제한: ${value} 비율 버튼을 찾지 못했습니다. 사이트에서 해당 비율을 먼저 선택해 주세요.`);
+    click(button);await waitFor(()=>selectedRatio()===value,'비율 적용');
+  }
+  const canvas=()=>only(list(doc,'main [data-feed-scroller="true"] [data-testid="feed-column"]').filter(shown),'중앙 작업 화면');
+  function ids(){return [...new Set(list(canvas(),'[data-task-id]').map(e=>e.getAttribute('data-task-id')).filter(id=>/^\d+$/.test(id)))];}
+  async function newCanvas() {
+    const links=list(doc,'a[href]').filter(e=>shown(e)&&['새 이미지 만들기','New image','New Image'].includes(e.textContent.trim()));
+    if(!links.length||new Set(links.map(e=>e.getAttribute('href'))).size!==1)throw Error('새 이미지 만들기 링크를 확인할 수 없습니다.');
+    click(links[0]);
+    const empty=()=>!ids().length&&list(canvas(),'[data-testid="empty-composition"]').some(shown)&&!normalize(readPromptEditorText(editor()));
+    await waitFor(empty,'빈 생성 화면');await io.sleep(1000);io.check();
+    if(!empty())throw Error('빈 생성 화면을 확인하는 동안 다른 작업이 나타났습니다. 생성하지 않았습니다.');
+  }
+  async function prepareWeb(job) {
+    io.check();
+    if(!job.configuration)job.configuration=await io.settings.capture();
+    if(!Object.hasOwn(job,'negativePrompt'))job.negativePrompt=await io.settings.captureNegative();
+    if(job.apiOptions?.modelVersionId&&job.configuration.model.versionId!==job.apiOptions.modelVersionId)throw Error('웹 모델이 기본 모델 버전 ID와 다릅니다. 원하는 모델을 프리셋으로 저장해 선택해 주세요.');
+    await io.freeze?.(job); // Preserve baseline before clearing/changing site settings, even if preparation fails.
+    await newCanvas();
+    await io.settings.apply(job.configuration);
+    const control=toggle();if(!control.checked)click(control.closest('label'));
+    await waitFor(()=>toggle().checked,'무제한 모드');
+    await io.settings.setImageCount(1);
+    await setRatio(job.apiOptions?.aspectRatio||'1:1');
+    const helpers=list(doc,'main input[role="switch"]').filter(e=>['프롬프트 도우미','Prompt helper','Prompt Helper'].includes(e.getAttribute('aria-label'))&&shown(e.closest('label')));
+    if(helpers.length>1)throw Error('프롬프트 도우미를 하나로 확인하지 못했습니다.');
+    if(helpers[0]?.checked){click(helpers[0].closest('label'));await waitFor(()=>!helpers[0].checked,'프롬프트 도우미 끄기');}
+    await io.settings.setNegative(job.negativePrompt||'');
+    const input=editor();io.mutate(()=>{
+      input.focus();const selection=io.win.getSelection(),range=doc.createRange();range.selectNodeContents(input);selection.removeAllRanges();selection.addRange(range);
+      if(!doc.execCommand('insertText',false,job.prompt))throw Error('웹 프롬프트 입력에 실패했습니다.');
+      input.dispatchEvent(new io.win.InputEvent('input',{bubbles:true,inputType:'insertText',data:job.prompt}));input.blur();
+    });
+    await waitFor(()=>normalize(readPromptEditorText(editor()))===normalize(job.prompt),'프롬프트 적용');
+    await io.sleep(500);safety();
+    if(ids().length)throw Error('설정 적용 중 중앙 화면에 다른 작업이 나타났습니다. 생성하지 않았습니다.');
+    job.webBeforeIds=[];job.webApplied={aspectRatio:selectedRatio(),batchSize:1,mode:'site-unlimited',resolution:'site-fixed'};
+  }
+  async function submitWeb(job) {
+    let button,before;
+    try {
+      io.check();
+      if(normalize(readPromptEditorText(editor()))!==normalize(job.prompt)||selectedRatio()!==job.webApplied.aspectRatio)throw Error('제출 직전 웹 입력이 바뀌었습니다. 자동 제출하지 않습니다.');
+      io.settings.verifyNegative(job.negativePrompt||'');
+      assertConfiguration(job.configuration,io.settings.read());
+      button=safety();if(button.hasAttribute('data-prompt-input-missing'))throw Error('사이트가 프롬프트를 인식하지 못했습니다.');
+      before=new Set(job.webBeforeIds);if(ids().some(id=>!before.has(id)))throw Error('다른 웹 작업이 추가됐습니다. 작업 식별을 위해 중지합니다.');
+    } catch(error) {error.notSubmitted=true;throw error;}
+    // From the first possible click onward, exceptions must never mean "not submitted".
+    try {
+      click(button);
+      const id=await waitFor(()=>{const fresh=ids().filter(id=>!before.has(id));if(fresh.length>1)throw Error('여러 웹 작업이 나타나 결과를 확정하지 못했습니다.');return fresh[0];},'새 작업 ID',180000);
+      // Persist identity before waiting for generation. This is not a verified receipt.
+      job.webIdentity='pending-new';return id;
+    } catch(error) {delete error.notSubmitted;throw error;}
+  }
+  function checkOtherTasks(job) {
+    const allowed=new Set([...(job.webBeforeIds||[]),job.taskId]);
+    if(ids().some(id=>!allowed.has(id)))throw Error('다른 웹 작업이 함께 나타났습니다. 잘못 연결하지 않도록 중지합니다. 사이트에서 같은 작업을 확인해 주세요.');
+  }
+  function taskCard(id) {return only(list(canvas(),'section[data-testid="mobile-task-card"]').filter(e=>shown(e)&&e.getAttribute('data-task-id')===id),'같은 작업 카드');}
+  function checkImport(job,card) {
+    // History-opened cards are valid for explicitly confirmed existing-ID recovery.
+    // A new submission's rejected evidence must survive a restart or disappearing label.
+    const meta=card?.querySelector('[data-testid="task-card-meta"]')?.textContent||'';
+    if(job.webIdentity==='pending-new' && /가져오기|\bImported\b/i.test(meta))job.webIdentity='rejected-import';
+    if(job.webIdentity==='rejected-import')throw Error('새 제출 결과에 가져오기 표시가 있어 자동 연결을 중단했습니다. 작업 ID는 보존했습니다. 사이트에서 확인 후 작업 ID를 연결해 주세요.');
+  }
+  async function verifyReceipt(job) {
+    checkOtherTasks(job);
+    const card=taskCard(job.taskId);
+    checkImport(job,card);
+    const detail=list(card,'button').filter(e=>shown(e)&&['작업 상세 보기','View task details'].includes(e.textContent.trim()));
+    if(detail.length===1)click(detail[0]);
+    else {
+      click(only(list(card,'button[data-testid="mobile-task-card-more"]').filter(shown),'작업 메뉴'));
+      click(await waitFor(()=>{const found=list(doc,'button').filter(e=>shown(e)&&['작업 상세 보기','View task details'].includes(e.textContent.trim()));return found.length===1?found[0]:null;},'작업 상세 메뉴'));
+    }
+    // A departing task menu can also have role=dialog. Wait for the actual
+    // details heading, then for its asynchronously mounted fields.
+    const dialog=await waitFor(()=>{
+      const found=list(doc,'[role="dialog"]').filter(shown).filter(d=>list(d,'h2').some(e=>shown(e)&&['작업 상세','Task details','Task Details'].includes(e.textContent.trim())));
+      return found.length?only(found,'작업 상세 창'):null;
+    },'작업 상세 창');
+    let receipt;
+    try {
+      receipt=await waitFor(()=>{
+        const contents=list(dialog,'[data-ui="dialog-content"]').filter(shown);
+        if(!contents.length)return null;
+        const content=only(contents,'작업 상세 내용');
+        const value=labels=>{
+          const matches=list(content,'span').filter(e=>shown(e)&&labels.includes(e.textContent.trim()));
+          if(!matches.length)return null;
+          const field=only(matches,'상세 항목').nextElementSibling;
+          return shown(field)?field.textContent.trim():null;
+        };
+        const id=value(['작업 ID','Task ID']),credits=value(['소모 크레딧','Credits used','Credits consumed']);
+        const prompts=list(content,'[translate="no"]').filter(shown);
+        const prompt=prompts.length?only(prompts,'작업 프롬프트').textContent:null;
+        if(!id||!credits||!prompt?.trim())return null;
+        return {id,credits,prompt};
+      },'작업 상세 ID·차감·프롬프트');
+      assertWebReceipt(job,receipt);
+    }finally{
+      const cancel=list(dialog,'button').filter(e=>['취소','Cancel'].includes(e.textContent.trim()));
+      if(cancel.length===1){io.mutate(()=>cancel[0].click());await waitFor(()=>!list(doc,'[role="dialog"]').filter(shown).includes(dialog),'작업 상세 창 닫힘',5000);}
+    }
+    checkOtherTasks(job);checkImport(job,taskCard(job.taskId));return receipt;
+  }
+  async function waitWeb(job) {
+    checkImport(job,null);
+    const original=await waitFor(()=>{
+      checkOtherTasks(job);
+      const cards=list(canvas(),'section[data-testid="mobile-task-card"]').filter(e=>shown(e)&&e.getAttribute('data-task-id')===job.taskId);
+      if(!cards.length)return null;
+      const card=only(cards,'제출한 작업 카드');
+      checkImport(job,card);
+      if(/생성 실패|생성 오류|Generation failed|Generation error/i.test(card.innerText))throw Error('사이트에서 생성 실패를 표시했습니다. 같은 작업을 확인해 주세요.');
+      const media=list(card,'[data-media-id]');if(!media.length)return null;
+      const target=only(media,'단일 결과 이미지'),img=target.querySelector('img');
+      if(!img?.complete||!img.naturalWidth)return null;
+      return webOriginal({id:target.getAttribute('data-media-id'),url:img.getAttribute('src'),width:img.naturalWidth,height:img.naturalHeight});
+    },'같은 작업의 원본 이미지',60*60*1000);
+    if(job.webReceipt?.id!==job.taskId || job.webIdentity==='pending-new')job.webReceipt=await verifyReceipt(job);
+    assertWebReceipt(job,job.webReceipt);
+    delete job.webIdentity;
+    return original;
+  }
+  return {prepare:prepareWeb,submit:submitWeb,wait:waitWeb,safety,guard:checkOtherTasks,hasTask:id=>ids().includes(id)};
+}
+  // END WEB UNLIMITED
   // BEGIN CHARACTER LORA
 // SPDX-License-Identifier: GPL-3.0-only
 // Browser-only envelope: older userscripts reject version 2 instead of dropping
@@ -90,7 +453,7 @@ function effectiveCharacterPreset(preset, character = {}, options = {}) {
 }
   // END CHARACTER LORA
   const UPDATE_CHANNEL = 'stable';
-  const UPDATE_BUILD_VERSION = '0.10.6';
+  const UPDATE_BUILD_VERSION = '0.10.20';
   const UPDATE_URLS = Object.freeze({stable:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js',development:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js'});
   function updateChannelUrl(channel) {
     if (!Object.hasOwn(UPDATE_URLS,channel)) throw new Error('업데이트 채널을 다시 선택해 주세요.');
@@ -983,13 +1346,37 @@ function mountCommonPresetSets(ctx) {
 }
 function mountParityWorkspace(ctx) {
     ctx.root.append(ctx.el('style',`
-#local-pixai-queue [data-page="studio"]{padding:0;overflow:hidden}
+#local-pixai-queue [data-page="studio"]{display:flex;flex-direction:column;min-height:0;padding:0;overflow:hidden}
 #local-pixai-queue .pq-studio-layout>div:not(.pq-pane-handle){min-width:0;min-height:0;height:100%;overflow:auto;padding:12px;box-sizing:border-box;display:flex;flex-direction:column;gap:9px;overscroll-behavior:contain}
-#local-pixai-queue .pq-studio-layout{height:auto;flex:1}
-#local-pixai-queue .pq-studio-list{min-height:90px;max-height:38vh;overflow:auto;flex:none;overscroll-behavior:contain}
+#local-pixai-queue .pq-studio-layout{height:auto;flex:1;min-height:0}
+#local-pixai-queue .pq-studio-list{flex:1 1 220px;min-height:150px;max-height:38vh;overflow:auto;overscroll-behavior:contain}
+#local-pixai-queue .pq-studio-layout>.pq-studio-materials{overflow:hidden;gap:8px}
+#local-pixai-queue .pq-studio-material-tabs{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) minmax(0,.8fr);gap:4px;flex:none}
+#local-pixai-queue .pq-studio-material-tabs button{min-width:0;margin:0;padding:7px 4px;white-space:normal;font-size:14px}
+#local-pixai-queue .pq-studio-material-tabs button[aria-pressed="true"],#local-pixai-queue .pq-studio-mode button[aria-pressed="true"]{border-color:var(--pq-accent);color:var(--pq-accent);background:var(--pq-raised)}
+#local-pixai-queue .pq-studio-material-panel{display:flex;flex-direction:column;flex:1;min-height:0;gap:7px;overflow:hidden}
+#local-pixai-queue .pq-studio-material-panel[hidden]{display:none}
+#local-pixai-queue .pq-studio-material-panel>.pq-studio-list{flex:1 1 0;min-height:0;max-height:none;overflow:auto;scrollbar-gutter:stable}
+#local-pixai-queue .pq-studio-material-panel>input[type="search"]{flex:none;width:100%;margin:0;padding:7px 8px;font-size:14px}
+#local-pixai-queue .pq-studio-material-panel>label,#local-pixai-queue .pq-studio-material-panel>strong,#local-pixai-queue .pq-studio-material-actions{flex:none}
+#local-pixai-queue .pq-studio-material-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.6fr);gap:4px}
+#local-pixai-queue .pq-studio-material-actions button{min-width:0;margin:0;padding:7px 4px;white-space:nowrap;font-size:14px}
+#local-pixai-queue .pq-studio-material-management{display:block;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+#local-pixai-queue .pq-studio-material-management .pq-studio-list{min-height:0;max-height:none;overflow:visible}
 #local-pixai-queue .pq-studio-list .pq-parity-card{position:relative}
+#local-pixai-queue .pq-studio-list .pq-studio-material-card{padding:6px 4px}
+#local-pixai-queue .pq-studio-card-head{display:flex;align-items:center;gap:4px;min-width:0}
+#local-pixai-queue .pq-studio-card-head label.pq-check-label{display:flex;align-items:center;gap:4px;margin:0;min-width:0;min-height:28px;font-size:14px}
+#local-pixai-queue .pq-studio-card-head label.pq-studio-row-choice{flex:1}
+#local-pixai-queue .pq-studio-card-head label.pq-studio-reserve-check{flex:none;width:24px;justify-content:center}
+#local-pixai-queue .pq-studio-card-head label.pq-studio-manage-check{flex:none;white-space:nowrap}
+#local-pixai-queue .pq-studio-card-head>button{margin:0;padding:3px 4px;min-width:24px;min-height:28px;font-size:14px}
+#local-pixai-queue .pq-studio-card-head>.pq-studio-card-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+#local-pixai-queue .pq-studio-row-choice>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#local-pixai-queue .pq-studio-material-card .pq-material-preview p{font-size:14px;line-height:1.35;-webkit-line-clamp:1;margin:2px 0}
 #local-pixai-queue .pq-studio-choice .pq-choice-list,#local-pixai-queue .pq-studio-image-grid .pq-choice-list{max-height:110px;overflow:auto;display:flex;flex-wrap:wrap;align-content:start;gap:4px}
-#local-pixai-queue .pq-studio-selected{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto}
+#local-pixai-queue .pq-studio-selected{display:flex;flex-direction:column;gap:4px;flex:none;max-height:200px;overflow:auto}
+#local-pixai-queue .pq-studio-schedule .pq-preview{flex:none}
 #local-pixai-queue .pq-studio-selected .pq-parity-card{display:flex;flex-wrap:wrap;gap:7px;align-items:center}
 #local-pixai-queue .pq-studio-image-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
 #local-pixai-queue .pq-studio-image-grid>div:first-child{grid-column:1/-1}
@@ -1023,7 +1410,7 @@ function mountParityWorkspace(ctx) {
     function confirmDraft(dirty,save,discard,next){if(!dirty){next();return;}box.replaceChildren(el('p','저장하지 않은 편집 내용이 있습니다.'),action('저장하고 이동',async()=>{await save();box.hidden=true;next();}),action('버리고 이동',()=>{discard();box.hidden=true;next();}),action('편집 계속',()=>{box.hidden=true;}));box.hidden=false;}
     const full={...ctx,confirm,confirmDraft},common=mountCommonPresetSets(full),studio=mountSceneStudio(full),info=typeof mountImageInfoPanel==='function'?mountImageInfoPanel(full):null;
     function requestNavigation(id,next){const editor=[common,studio,studio.castEditor].find(v=>v.dirty());if(editor){confirmDraft(true,editor.save,editor.discard,()=>{if(!requestNavigation(id,next))next();});return true;}return false;}
-    return {refresh(){common.refresh();studio.refresh();},requestNavigation,confirm,confirmDraft,studio,info};
+    return {refresh(){common.refresh();studio.refresh();},hasDirty:()=>[common,studio,studio.castEditor].some(editor=>editor.dirty()),requestNavigation,confirm,confirmDraft,studio,info};
 }
 function mountCastTools(ctx,tools,changed){
     const {el,field,action}=ctx,copy=v=>JSON.parse(JSON.stringify(v)),name=field('출연 이름'),positive=field('출연 추가 포지','textarea'),negative=field('출연 추가 네거','textarea'),choices=el('div'),list=el('div',null,{class:'pq-studio-list'}),status=el('small',null,{role:'status'}),selected=new Set();
@@ -1075,7 +1462,7 @@ function parityDrag(ctx,row,id,ids,onOrder,label) {
     row.addEventListener('dragover',event=>{if(event.isTrusted!==false&&!ctx.io.isBusy?.()){event.preventDefault();row.dataset.dropPosition=event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2?'after':'before';}});
     row.addEventListener('dragleave',()=>{row.dataset.dropPosition='';});
     row.addEventListener('drop',event=>{row.dataset.dropPosition='';if(event.isTrusted===false||ctx.io.isBusy?.()||ctx.parityDragBusy)return;event.preventDefault();event.stopPropagation();try{const source=JSON.parse(event.dataTransfer?.getData(type)||'null');if(source?.label!==label||source.id!==ctx.parityDragSession?.id||label!==ctx.parityDragSession?.label||!ids.includes(source.id)||source.id===id)return;const next=ids.filter(v=>v!==source.id),after=event.clientY>=row.getBoundingClientRect().top+row.getBoundingClientRect().height/2;next.splice(next.indexOf(id)+(after?1:0),0,source.id);ctx.parityDragSession=null;ctx.parityDragBusy=true;void Promise.resolve(onOrder(next,source.id,id)).catch(error=>ctx.io.notify(error.message)).finally(()=>{ctx.parityDragBusy=false;});}catch(error){ctx.io.notify(error.message);}});
-    handle.addEventListener('keydown',event=>{if(!['ArrowUp','ArrowDown'].includes(event.key)||event.isTrusted===false||ctx.io.isBusy?.())return;event.preventDefault();const next=[...ids],at=next.indexOf(id),to=at+(event.key==='ArrowUp'?-1:1);if(to<0||to>=next.length)return;[next[at],next[to]]=[next[to],next[at]];void Promise.resolve(onOrder(next)).catch(error=>ctx.io.notify(error.message));});return handle;
+    handle.addEventListener('keydown',event=>{if(!['ArrowUp','ArrowDown'].includes(event.key)||event.isTrusted===false||ctx.io.isBusy?.()||ctx.parityDragBusy)return;event.preventDefault();const next=[...ids],at=next.indexOf(id),to=at+(event.key==='ArrowUp'?-1:1);if(at<0||to<0||to>=next.length)return;[next[at],next[to]]=[next[to],next[at]];ctx.parityDragBusy=true;void Promise.resolve().then(()=>onOrder(next,id,ids[to])).catch(error=>ctx.io.notify(error.message)).finally(()=>{ctx.parityDragBusy=false;});});return handle;
 }
 function studioImages(ctx,value,onChange,{optional=false}={}) {
     const {el,field}=ctx,wrap=el('div',null,{class:'pq-studio-images'});let current=value?{...value}:null;
@@ -1090,20 +1477,20 @@ function studioImages(ctx,value,onChange,{optional=false}={}) {
 }
 function mountSceneStudio(ctx) {
     const {el,action,field}=ctx,copy=v=>JSON.parse(JSON.stringify(v)),body=ctx.addPage('studio','씬·일괄 예약');
-    let draft=null,baseline=null,checked=new Set(),selectedCopies=new Set(),selectedCard='',plan={id:'studio',name:'',rows:[],columns:[],count:1,exceptions:{},order:'byRow',imageOptions:ctx.getImages()},rowQuery='',sceneQuery='',openRows=new Set(['']),openScenes=new Set(['']),managedGroup='',uiWarning='',studioMode='materials';
-    try {const saved=ctx.io.loadStudioDraft?.();if(saved){studioMode=['materials','editor','schedule'].includes(saved.mode)?saved.mode:'materials';plan=normalizeBatchPlan(saved.plan,saved.plan.id);selectedCard=typeof saved.selectedCard==='string'?saved.selectedCard:'';rowQuery=String(saved.rowQuery||'');sceneQuery=String(saved.sceneQuery||'');openRows=new Set(saved.openRows||['']);openScenes=new Set(saved.openScenes||['']);}}catch{ctx.io.notify('씬 구성 복원 실패 · 기존 저장값은 유지했습니다.');}
+    let draft=null,baseline=null,checked=new Set(),selectedCopies=new Set(),selectedCard='',plan={id:'studio',name:'',rows:[],columns:[],count:1,exceptions:{},order:'byRow',imageOptions:ctx.getImages()},rowQuery='',sceneQuery='',openRows=new Set(['']),openScenes=new Set(['']),managedGroup='',uiWarning='',studioMode='materials',materialMode='rows';
+    try {const saved=ctx.io.loadStudioDraft?.();if(saved){studioMode=['materials','editor','schedule'].includes(saved.mode)?saved.mode:'materials';materialMode=['rows','scenes','manage'].includes(saved.materialMode)?saved.materialMode:'rows';plan=normalizeBatchPlan(saved.plan,saved.plan.id);selectedCard=typeof saved.selectedCard==='string'?saved.selectedCard:'';rowQuery=String(saved.rowQuery||'');sceneQuery=String(saved.sceneQuery||'');openRows=new Set(saved.openRows||['']);openScenes=new Set(saved.openScenes||['']);}}catch{ctx.io.notify('씬 구성 복원 실패 · 기존 저장값은 유지했습니다.');}
     const layout=el('div',null,{class:'pq-studio-layout'}),materials=el('div',null,{class:'pq-studio-materials'}),editor=el('div',null,{class:'pq-studio-editor'}),schedule=el('div',null,{class:'pq-studio-schedule'}),notice=el('div',null,{role:'status',class:'pq-studio-notice'});
-    const searchRows=field('캐릭터·출연 검색','input',{type:'search'}),searchScenes=field('씬 검색','input',{type:'search'}),rowList=el('div',null,{class:'pq-studio-list','aria-label':'캐릭터·출연 선택'}),sceneList=el('div',null,{class:'pq-studio-list','aria-label':'씬 선택 목록'});
+    const searchRows=field('캐릭터·출연 검색','input',{type:'search',placeholder:'캐릭터·출연 검색'}),searchScenes=field('씬 검색','input',{type:'search',placeholder:'씬 검색'}),rowList=el('div',null,{class:'pq-studio-list','aria-label':'캐릭터·출연 선택'}),sceneList=el('div',null,{class:'pq-studio-list','aria-label':'씬 선택 목록'});
     searchRows.input.value=rowQuery;searchScenes.input.value=sceneQuery;
     const selectedRows=el('div',null,{class:'pq-studio-selected','aria-label':'선택 행 순서'}),selectedColumns=el('div',null,{class:'pq-studio-selected','aria-label':'선택 씬 순서'}),summary=el('strong',null,{role:'status','aria-label':'일괄 예약 수량'}),preview=el('div',null,{class:'pq-preview','aria-label':'일괄 조합 문구 미리보기'}),exceptions=el('details');exceptions.append(el('summary','조합별 반복 · 0회는 제외'));const table=el('div',null,{class:'pq-studio-matrix'});exceptions.append(table);
     const count=field('일괄 반복 수','input',{type:'number',min:'1',max:'100'}),batchName=field('묶음 이름','input',{placeholder:'비우면 자동 이름'}),order=el('div'),plans=el('div',null,{class:'pq-choice-list','aria-label':'저장한 일괄 구성'});count.input.value=String(plan.count);batchName.input.value=plan.name;
     const images=studioImages(ctx,plan.imageOptions,value=>updatePlan({...plan,imageOptions:value}));
-    function persist(strict=false){try{ctx.io.saveStudioDraft?.({mode:studioMode,plan,selectedCard,rowQuery,sceneQuery,openRows:[...openRows],openScenes:[...openScenes]});uiWarning='';}catch(error){uiWarning='화면 구성 저장 실패 · 현재 화면만 유지: '+error.message;if(strict)throw error;notice.textContent=uiWarning;}}
+    function persist(strict=false){try{ctx.io.saveStudioDraft?.({mode:studioMode,materialMode,plan,selectedCard,rowQuery,sceneQuery,openRows:[...openRows],openScenes:[...openScenes]});uiWarning='';}catch(error){uiWarning='화면 구성 저장 실패 · 현재 화면만 유지: '+error.message;if(strict)throw error;notice.textContent=uiWarning;}}
     function updatePlan(next){const previous=plan;try{plan=normalizeBatchPlan(next,next.id||'studio');persist(true);}catch(error){plan=previous;notice.textContent=uiWarning;}renderSchedule();renderMaterials();}
     const dirty=()=>!!draft&&JSON.stringify(draft)!==JSON.stringify(baseline);
     async function save(){if(!draft)return;const live=ctx.getLibrary();if(baseline?.id&&JSON.stringify(live.sceneCards?.find(v=>v.id===baseline.id))!==JSON.stringify(baseline))throw Error('편집 중 씬이 변경·삭제됐습니다. 새 값 다시 읽기 또는 복제 저장을 사용하세요.');const card={...copy(draft),id:draft.id||crypto.randomUUID()};if(!card.name.trim())throw Error('씬 이름을 입력해 주세요.');const next=copy(live);next.sceneCards=next.sceneCards||[];const at=next.sceneCards.findIndex(v=>v.id===card.id);if(at<0)next.sceneCards.push(card);else next.sceneCards[at]=card;await ctx.commit(next,'씬 사본을 저장했습니다. 원본 청크·기존 예약은 유지됩니다.');selectedCard=card.id;baseline=copy(ctx.getLibrary().sceneCards.find(v=>v.id===card.id));draft=copy(baseline);persist();renderEditor();renderMaterials();}
     function discard(){const live=ctx.getLibrary().sceneCards?.find(v=>v.id===selectedCard);draft=live?copy(live):null;baseline=live?copy(live):null;renderEditor();}
-    function editCard(card){ctx.confirmDraft(dirty(),save,discard,()=>{studioMode='editor';body.dataset.studioMode=studioMode;selectedCard=card?.id||'';draft=card?copy(card):{id:'',name:'',sceneIds:[],chunks:[],extra:{prompt:'',negativePrompt:''}};baseline=card?copy(card):copy(draft);persist();renderEditor();});}
+    function editCard(card){ctx.confirmDraft(dirty(),save,discard,()=>{studioMode='editor';renderModes();selectedCard=card?.id||'';draft=card?copy(card):{id:'',name:'',sceneIds:[],chunks:[],extra:{prompt:'',negativePrompt:''}};baseline=card?copy(card):copy(draft);persist();renderEditor();});}
     function rowItems(){const library=ctx.getLibrary();return [...library.characters.map(v=>({key:'character:'+v.id,name:v.name,kind:'character',id:v.id,folderId:v.folderId||'',text:v.prompt})),...(library.casts||[]).map(v=>({key:'cast:'+v.id,name:v.name,kind:'cast',id:v.id,folderId:library.characters.find(c=>c.id===v.characterId)?.folderId||'',text:v.extra?.prompt||'',searchText:(library.characters.find(c=>c.id===v.characterId)?.name||'')+' '+v.name+' '+(v.extra?.prompt||'')}))];}
     function grouped(list,parent,groups,opened,query,isRow){
         parent.replaceChildren();const library=ctx.getLibrary();
@@ -1115,12 +1502,12 @@ function mountSceneStudio(ctx) {
             if(!isRow){heading.addEventListener('dragover',event=>{if(ctx.parityDragSession?.label==='씬 목록'){event.preventDefault();heading.dataset.dropActive='true';}});heading.addEventListener('drop',event=>{heading.dataset.dropActive='false';if(event.isTrusted===false||ctx.io.isBusy?.()||ctx.parityDragBusy||ctx.parityDragSession?.label!=='씬 목록')return;event.preventDefault();event.stopPropagation();const source=ctx.parityDragSession;ctx.parityDragSession=null;void ctx.commit(changeSceneCards(ctx.getLibrary(),[source.id],{folderId:group.id}),'씬을 그룹으로 이동했습니다.').catch(error=>ctx.io.notify(error.message));});}
             details.addEventListener('toggle',()=>{if(!query){if(details.open)opened.add(group.id);else opened.delete(group.id);persist();}});
             for(const item of items){
-                const row=el('div',null,{class:'pq-parity-card','data-studio-scene':isRow?'':item.id}),choice=field((isRow?'일괄 행':'일괄 씬')+' 선택: '+item.name,'input',{type:'checkbox'});
+                const row=el('div',null,{class:'pq-parity-card pq-studio-material-card','data-studio-scene':isRow?'':item.id}),head=el('div',null,{class:'pq-studio-card-head'}),choice=field((isRow?'일괄 행':'일괄 씬')+' 선택: '+item.name,'input',{type:'checkbox'});
                 choice.input.checked=isRow?plan.rows.some(v=>batchRowKey(v)===item.key):plan.columns.includes(item.id);
-                choice.input.addEventListener('change',()=>{const next=copy(plan);if(isRow)next.rows=choice.input.checked?[...next.rows,{kind:item.kind,id:item.id}]:next.rows.filter(v=>batchRowKey(v)!==item.key);else next.columns=choice.input.checked?[...next.columns,item.id]:next.columns.filter(v=>v!==item.id);updatePlan(next);});row.append(choice.wrap);
+                choice.input.addEventListener('change',()=>{const next=copy(plan);if(isRow)next.rows=choice.input.checked?[...next.rows,{kind:item.kind,id:item.id}]:next.rows.filter(v=>batchRowKey(v)!==item.key);else next.columns=choice.input.checked?[...next.columns,item.id]:next.columns.filter(v=>v!==item.id);updatePlan(next);});choice.wrap.className='pq-check-label '+(isRow?'pq-studio-row-choice':'pq-studio-reserve-check');choice.wrap.title='예약 선택: '+item.name;choice.wrap.replaceChildren(choice.input,...(isRow?[el('span',item.name)]:[]));head.append(choice.wrap);row.append(head);
                 if(!isRow){
-                    row.append(parityDrag(ctx,row,item.id,(library.sceneCards||[]).map(v=>v.id),async(ids,moved)=>{const next=copy(ctx.getLibrary());next.sceneCards=ids.map(id=>next.sceneCards.find(v=>v.id===id));const card=next.sceneCards.find(v=>v.id===moved);if(group.id)card.folderId=group.id;else delete card.folderId;await ctx.commit(next,'씬 순서·그룹을 저장했습니다.');},'씬 목록'));
-                    const check=field('씬 관리 선택: '+item.name,'input',{type:'checkbox'});check.input.checked=checked.has(item.id);check.input.addEventListener('change',()=>{if(check.input.checked)checked.add(item.id);else checked.delete(item.id);renderMaterials();});row.append(check.wrap,action(item.name,()=>editCard(ctx.getLibrary().sceneCards.find(v=>v.id===item.id))));
+                    head.append(parityDrag(ctx,row,item.id,(library.sceneCards||[]).map(v=>v.id),async(ids,moved,target)=>{const next=copy(ctx.getLibrary());next.sceneCards=ids.map(id=>next.sceneCards.find(v=>v.id===id));const card=next.sceneCards.find(v=>v.id===moved),folderId=next.sceneCards.find(v=>v.id===target)?.folderId;if(folderId)card.folderId=folderId;else delete card.folderId;await ctx.commit(next,'씬 순서·그룹을 저장했습니다.');},'씬 목록'));
+                    const check=field('씬 관리 선택: '+item.name,'input',{type:'checkbox'}),edit=action(item.name,()=>editCard(ctx.getLibrary().sceneCards.find(v=>v.id===item.id)));edit.className='pq-studio-card-name';edit.title=item.name+' · 씬 편집';check.wrap.className='pq-check-label pq-studio-manage-check';check.wrap.title='이동·복제·삭제할 씬 선택: '+item.name;check.wrap.replaceChildren(check.input,el('span','관리'));check.input.checked=checked.has(item.id);check.input.addEventListener('change',()=>{if(check.input.checked)checked.add(item.id);else checked.delete(item.id);renderMaterials();});head.append(edit,check.wrap);
                     const thumb=ctx.getThumbnail(item.id);if(thumb)row.append(el('img',null,{src:thumb,alt:item.name+' 최근 성공 결과',class:'pq-scene-thumbnail'}));
                     if(item.imageOptions)row.append(ratioMark(el,item.imageOptions.aspectRatio),el('small',item.imageOptions.aspectRatio+' · '+ratioDescription(item.imageOptions.aspectRatio)));
                 }
@@ -1129,7 +1516,7 @@ function mountSceneStudio(ctx) {
             parent.append(details);
         }
     }
-    function renderMaterials(){const lib=ctx.getLibrary();grouped(rowItems(),rowList,lib.characterFolders||[],openRows,rowQuery,true);grouped((lib.sceneCards||[]).map(v=>({...v,text:v.chunks.map(c=>c.prompt).join(', ')+', '+(v.extra?.prompt||''),negativePrompt:v.extra?.negativePrompt||''})),sceneList,lib.sceneFolders||[],openScenes,sceneQuery,false);groupChoices.replaceChildren(parityChoice(ctx,'씬 이동 그룹',[{id:'',name:'미분류'},...(lib.sceneFolders||[])],managedGroup,value=>{managedGroup=value;renderMaterials();}));selectionStatus.textContent=`씬 관리 ${checked.size}개 선택 · 그룹 ${lib.sceneFolders?.find(v=>v.id===managedGroup)?.name||'미분류'}`;}
+    function renderMaterials(){const lib=ctx.getLibrary();grouped(rowItems(),rowList,lib.characterFolders||[],openRows,rowQuery,true);grouped((lib.sceneCards||[]).map(v=>({...v,text:v.chunks.map(c=>c.prompt).join(', ')+', '+(v.extra?.prompt||''),negativePrompt:v.extra?.negativePrompt||''})),sceneList,lib.sceneFolders||[],openScenes,sceneQuery,false);groupChoices.replaceChildren(parityChoice(ctx,'씬 이동 그룹',[{id:'',name:'미분류'},...(lib.sceneFolders||[])],managedGroup,value=>{managedGroup=value;renderMaterials();}));selectionStatus.textContent=`씬 관리 ${checked.size}개 선택 · 그룹 ${lib.sceneFolders?.find(v=>v.id===managedGroup)?.name||'미분류'}`;renderMaterialMode();}
     async function moveCards(operation,newGroup){let next=copy(ctx.getLibrary()),folderId=managedGroup;if(newGroup){folderId=crypto.randomUUID();next.sceneFolders=[...(next.sceneFolders||[]),{id:folderId,name:newGroup}];}next=changeSceneCards(next,[...checked],{operation,folderId});await ctx.commit(next,'선택한 씬을 '+({move:'이동',duplicate:'복제',delete:'삭제'})[operation]+'했습니다. 등록된 작업·원본 이미지에는 영향이 없습니다.');if(newGroup)managedGroup=folderId;if(operation==='delete')checked.clear();renderMaterials();}
     const groupName=field('새 씬 그룹 이름'),groupChoices=el('div'),selectionStatus=el('small',null,{role:'status'}),management=el('details');management.append(el('summary','씬·그룹 관리'),selectionStatus,groupChoices,groupName.wrap,action('새 그룹 만들기',async()=>{if(!groupName.input.value.trim())throw Error('그룹 이름을 입력해 주세요.');const next=copy(ctx.getLibrary()),id=crypto.randomUUID();next.sceneFolders=[...(next.sceneFolders||[]),{id,name:groupName.input.value.trim()}];await ctx.commit(next,'씬 그룹을 만들었습니다.');managedGroup=id;renderMaterials();}),action('선택 씬 이동',()=>moveCards('move')),action('새 그룹으로 선택 이동',()=>{if(!groupName.input.value.trim())throw Error('새 그룹 이름을 입력해 주세요.');return moveCards('move',groupName.input.value.trim());}),action('선택 씬 복제',()=>moveCards('duplicate')),action('선택 씬 삭제',()=>ctx.confirm('선택한 씬 카드만 삭제합니다. 예약 사본과 원본 이미지는 유지합니다.',()=>moveCards('delete'))),action('그룹 이름 변경',async()=>{if(!managedGroup||!groupName.input.value.trim())throw Error('그룹과 새 이름을 입력해 주세요.');const next=copy(ctx.getLibrary());next.sceneFolders.find(v=>v.id===managedGroup).name=groupName.input.value.trim();await ctx.commit(next,'씬 그룹 이름을 바꿨습니다.');renderMaterials();}),action('선택 그룹 삭제',()=>ctx.confirm('그룹만 삭제하고 씬은 미분류로 옮깁니다.',async()=>{const next=copy(ctx.getLibrary());next.sceneFolders=next.sceneFolders.filter(v=>v.id!==managedGroup);for(const card of next.sceneCards||[])if(card.folderId===managedGroup)delete card.folderId;await ctx.commit(next,'씬 그룹을 삭제했습니다.');managedGroup='';renderMaterials();})));
     function renderEditor(){editor.replaceChildren(el('strong','씬 사본 편집'));if(!draft){editor.append(el('p','씬을 누르면 이 칸에서 청크 사본을 편집합니다.'));return;}const lib=ctx.getLibrary(),name=field('씬 이름'),extraPrompt=field('씬 추가 포지','textarea'),extraNegative=field('씬 추가 네거','textarea'),status=el('small',null,{role:'status'});name.input.value=draft.name;extraPrompt.input.value=draft.extra?.prompt||'';extraNegative.input.value=draft.extra?.negativePrompt||'';
@@ -1151,9 +1538,14 @@ function mountSceneStudio(ctx) {
     async function reserve(register){const previous=copy(ctx.getLibrary()),expanded=expandBatchPlan(previous,plan,{defaultImageOptions:ctx.getImages()}),next=appendBatchReservations(previous,expanded);if(register)await ctx.enqueue({...next,reservations:expanded.reservations},{fresh:true});else await ctx.commit(next,`${expanded.totals.jobs}개 미등록 예약을 만들었습니다. 생성 요청은 보내지 않았습니다.`);renderSchedule();}
     count.input.addEventListener('change',()=>updatePlan({...plan,count:Number(count.input.value)}));batchName.input.addEventListener('input',()=>updatePlan({...plan,name:batchName.input.value}));searchRows.input.addEventListener('input',()=>{rowQuery=searchRows.input.value;persist();renderMaterials();});searchScenes.input.addEventListener('input',()=>{sceneQuery=searchScenes.input.value;persist();renderMaterials();});
     const castTools=el('details');castTools.append(el('summary','캐릭터 기본 프리셋·출연 관리'));const castEditor=mountCastTools(ctx,castTools,()=>{renderMaterials();renderSchedule();});const renderCast=()=>castEditor.refresh();
-    materials.append(el('strong','캐릭터·출연 고르기'),searchRows.wrap,rowList,castTools,el('strong','씬 고르기'),action('새 씬 만들기',()=>editCard(null)),action('현재 조합으로 씬 만들기',async()=>{const recipe=ctx.getRecipe(),lib=ctx.getLibrary(),card={id:crypto.randomUUID(),name:recipe.sceneIds.map(id=>lib.scenes.find(v=>v.id===id)?.name).filter(Boolean).join(' · ')||'새 씬',sceneIds:[...recipe.sceneIds],chunks:recipe.sceneIds.map(id=>stripFolder(lib.scenes.find(v=>v.id===id))),imageOptions:recipe.imageOptions,triggerPosition:recipe.triggerPosition};const next=copy(lib);next.sceneCards=[...(next.sceneCards||[]),card];await ctx.commit(next,'현재 청크 조합을 씬 사본으로 저장했습니다.');editCard(card);}),searchScenes.wrap,sceneList,management);
+    const materialTabs=el('div',null,{class:'pq-studio-material-tabs',role:'group','aria-label':'재료 목록 전환'}),materialPanels={rows:el('div',null,{class:'pq-studio-material-panel','data-studio-material':'rows'}),scenes:el('div',null,{class:'pq-studio-material-panel','data-studio-material':'scenes'}),manage:el('div',null,{class:'pq-studio-material-panel pq-studio-material-management','data-studio-material':'manage'})},materialButtons={};
+    for(const [id,label] of [['rows','캐릭터·출연'],['scenes','씬'],['manage','관리']]){const control=action(label,()=>{materialMode=id;renderMaterialMode();persist();});control.setAttribute('aria-label',`${label} 목록 보기`);control.setAttribute('data-view-only','');materialButtons[id]=control;materialTabs.append(control);}
+    function renderMaterialMode(){for(const [id,pane] of Object.entries(materialPanels)){pane.hidden=id!==materialMode;materialButtons[id].setAttribute('aria-pressed',String(id===materialMode));}materialButtons.rows.textContent=`캐릭터·출연 ${plan.rows.length}`;materialButtons.scenes.textContent=`씬 ${plan.columns.length}`;materialButtons.manage.textContent=checked.size?`관리 ${checked.size}`:'관리';materialButtons.rows.title=`예약에 선택한 캐릭터·출연 ${plan.rows.length}개`;materialButtons.scenes.title=`예약에 선택한 씬 ${plan.columns.length}개`;}
+    const sceneActions=el('div',null,{class:'pq-studio-material-actions'}),newScene=action('새 씬',()=>editCard(null)),fromRecipe=action('조합에서 만들기',async()=>{const recipe=ctx.getRecipe(),lib=ctx.getLibrary(),card={id:crypto.randomUUID(),name:recipe.sceneIds.map(id=>lib.scenes.find(v=>v.id===id)?.name).filter(Boolean).join(' · ')||'새 씬',sceneIds:[...recipe.sceneIds],chunks:recipe.sceneIds.map(id=>stripFolder(lib.scenes.find(v=>v.id===id))),imageOptions:recipe.imageOptions,triggerPosition:recipe.triggerPosition};const next=copy(lib);next.sceneCards=[...(next.sceneCards||[]),card];await ctx.commit(next,'현재 청크 조합을 씬 사본으로 저장했습니다.');editCard(card);});
+    newScene.setAttribute('aria-label','새 씬 만들기');fromRecipe.setAttribute('aria-label','현재 조합으로 씬 만들기');newScene.title='새 씬 만들기';fromRecipe.title='현재 조합으로 씬 만들기';sceneActions.append(newScene,fromRecipe);
+    materialPanels.rows.append(searchRows.input,rowList);materialPanels.scenes.append(sceneActions,searchScenes.input,sceneList);materialPanels.manage.append(castTools,management);materials.append(materialTabs,...Object.values(materialPanels));
     schedule.append(el('strong','예약 구성·순서'),selectedRows,selectedColumns,images.wrap,order,count.wrap,batchName.wrap,summary,notice,preview,exceptions,action('선택 조합 전부 예약',()=>reserve(false)),action('예약 후 바로 등록',()=>reserve(true)),action('구성 저장',async()=>{const next=copy(ctx.getLibrary()),saved=normalizeBatchPlan(plan,plan.id||crypto.randomUUID());saved.name=plan.name||defaultBatchName(plan.rows.length,plan.columns.length);next.batchPlans=next.batchPlans||[];const at=next.batchPlans.findIndex(v=>v.id===saved.id);if(at<0)next.batchPlans.push(saved);else next.batchPlans[at]=saved;await ctx.commit(next,'일괄 구성을 저장했습니다.');}),action('새 구성',()=>{plan={id:crypto.randomUUID(),name:'',rows:[],columns:[],count:1,exceptions:{},order:'byRow',imageOptions:ctx.getImages()};count.input.value='1';batchName.input.value='';images.set(plan.imageOptions);persist();renderSchedule();renderMaterials();}),el('strong','저장한 구성'),plans);
-    ctx.resizable(layout,[materials,editor,schedule],'씬·일괄 예약',[.32,.34,.34],[240,260,250]);const mode=el('div',null,{class:'pq-studio-mode'});body.dataset.studioMode=studioMode;for(const [id,label] of [['materials','재료 선택'],['editor','씬 편집'],['schedule','구성·예약']])mode.append(action(label,()=>{studioMode=id;body.dataset.studioMode=id;persist();}));body.append(mode,layout);const restored=ctx.getLibrary().sceneCards?.find(v=>v.id===selectedCard);if(restored){draft=copy(restored);baseline=copy(restored);}renderMaterials();renderEditor();renderSchedule();renderCast();
+    ctx.resizable(layout,[materials,editor,schedule],'씬·일괄 예약',[.32,.34,.34],[240,260,250]);const mode=el('div',null,{class:'pq-studio-mode'}),modeButtons={};for(const [id,label] of [['materials','재료 선택'],['editor','씬 편집'],['schedule','구성·예약']]){const control=action(label,()=>{studioMode=id;renderModes();persist();});control.setAttribute('data-view-only','');modeButtons[id]=control;mode.append(control);}function renderModes(){body.dataset.studioMode=studioMode;for(const [id,control] of Object.entries(modeButtons))control.setAttribute('aria-pressed',String(id===studioMode));}renderModes();body.append(mode,layout);const restored=ctx.getLibrary().sceneCards?.find(v=>v.id===selectedCard);if(restored){draft=copy(restored);baseline=copy(restored);}renderMaterials();renderEditor();renderSchedule();renderCast();
     return {dirty,save,discard,castEditor,refresh(){const live=ctx.getLibrary().sceneCards?.find(v=>v.id===selectedCard);if(!dirty()){draft=live?copy(live):null;baseline=live?copy(live):null;renderEditor();}renderMaterials();renderSchedule();renderCast();}};
 }
   // END PARITY UI
@@ -1175,6 +1567,7 @@ function createSceneThumbnailCache(io){
     return {get:id=>images.find(v=>v.sceneId===id)?.dataUrl,clear(){try{io.save('[]');images=[];}catch{}},async remember(id,blob){if(!id||id.length>200)return false;try{const bitmap=await createImageBitmap(blob);if(bitmap.width*bitmap.height>40000000){bitmap.close();return false;}const scale=Math.min(1,256/bitmap.width,192/bitmap.height),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();const dataUrl=canvas.toDataURL('image/webp',.65);if(dataUrl.length>65536)return false;const next=[{sceneId:id,dataUrl,savedAt:Date.now()},...images.filter(v=>v.sceneId!==id)].slice(0,100);while(JSON.stringify(next).length>2*1024*1024)next.pop();io.save(JSON.stringify(next));images=next;return true;}catch{return false;}}};
 }
 function atomicRecordWrite(storage,writes,previousKey){
+    storage.prepareWrite?.(Object.keys(writes));
     const original=Object.fromEntries(Object.keys(writes).map(key=>[key,storage.getItem(key)]));
     if(previousKey)storage.setItem(previousKey,JSON.stringify(original));
     try{for(const [key,value] of Object.entries(writes))storage.setItem(key,value);}catch(error){let failed=false;for(const [key,value] of Object.entries(original))try{if(value===null)storage.removeItem(key);else storage.setItem(key,value);}catch{failed=true;}throw Error(failed?'저장·원복 모두 실패했습니다. 이전 복구 사본을 보존했습니다.':'저장 실패 · 원래 자료로 되돌렸습니다.');}
@@ -1513,7 +1906,7 @@ function resolveBatchRow(value, row) {
         problems.push(`출연 「${name}」의 캐릭터 ${characterId}이(가) 없습니다.`);
     if(characterId&&presetId) {
         const character=library.characters.find(item=>item.id===characterId),preset=library.presets.find(item=>item.id===presetId);
-        if(character?.loras?.length&&preset)try{assertCharacterApiLoras(effectiveCharacterPreset(preset,character).loras);}catch(error){problems.push(error.message);}
+        if(character?.loras?.length&&preset)try{effectiveCharacterPreset(preset,character);}catch(error){problems.push(error.message);}
     }
     return {
         key,
@@ -1667,7 +2060,7 @@ function imageInfoFields(value) {
         return {};
     const p = value;
     const out = {};
-    if(p.modelIncomplete===true||(Array.isArray(p.loras)&&p.loras.some(v=>!v||typeof v.versionId!=='string'||!/^\d{1,40}$/.test(v.versionId)||typeof v.id!=='string'||!/^\d{1,40}$/.test(v.id)))||(p.loras!==undefined&&(!Array.isArray(p.loras)||p.loras.length>5||p.loras.some(v=>!v||typeof v.weight!=='number'||!Number.isFinite(v.weight)||v.weight<0||v.weight>1))))out.modelIncomplete=true;
+    if(p.modelIncomplete===true||(Array.isArray(p.loras)&&p.loras.some(v=>!v||typeof v.versionId!=='string'||!/^\d{1,40}$/.test(v.versionId)||typeof v.id!=='string'||!/^\d{1,40}$/.test(v.id)))||(p.loras!==undefined&&(!Array.isArray(p.loras)||p.loras.some(v=>!v||typeof v.weight!=='number'||!Number.isFinite(v.weight)||v.weight<0||v.weight>1))))out.modelIncomplete=true;
     for (const key of ['prompt', 'negativePrompt'])
         if (typeof p[key] === 'string' && p[key].length <= 100000)
             out[key] = p[key];
@@ -1676,7 +2069,6 @@ function imageInfoFields(value) {
     if (typeof p.modelId === 'string' && /^\d{1,40}$/.test(p.modelId))
         out.modelId = p.modelId;
     if (Array.isArray(p.loras) &&
-        p.loras.length <= 5 &&
         p.loras.every((v) => v &&
             typeof v.versionId === 'string' &&
             /^\d{1,40}$/.test(v.versionId) &&
@@ -3128,6 +3520,63 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     const increment = Number(step);
     if (step && step !== 'any' && increment > 0 && Math.abs((number - Number(min || 0)) / increment - Math.round((number - Number(min || 0)) / increment)) > 0.000001) throw new Error(`LoRA 수치는 사이트의 ${step} 간격으로 입력해 주세요.`);
   }
+  // Keep a small commit pointer in the site's synchronous storage. The payload is immutable:
+  // a different tab's stale GM cache can only cause a retry, never return an older queue.
+  function createUserscriptStorage(native, manager, makeId=()=>crypto.randomUUID()) {
+    const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const usable=!!manager && ['get','set','remove'].every(name=>typeof manager[name]==='function');
+    const checkKey=key=>{if(typeof key!=='string'||!key.startsWith('local.pixai-web-queue.')||key.length>240||/api-key|storage\.v1:/.test(key))throw Error('허용되지 않은 스크립트 저장 항목입니다.');};
+    const slot=(key,id)=>'local.pixai-web-queue.storage.v1:'+key+':'+id;
+    const unavailable=()=>Error('스크립트 저장 자료를 아직 읽지 못했습니다. 다른 PixAI 탭을 새로고침하고 다시 시도해 주세요. 기존 자료는 지우지 마세요.');
+    function pointer(raw) {
+      if(!raw || !raw.includes('"pixaiQueueStorage"'))return null;
+      let value;try{value=JSON.parse(raw);}catch{throw unavailable();}
+      if(!Object.hasOwn(value||{},'pixaiQueueStorage'))return null;
+      if(value.pixaiQueueStorage!==1||value.version!==-1||!uuid.test(value.record)||!(value.previous===null||uuid.test(value.previous)))throw unavailable();
+      return value;
+    }
+    function resolve(key,raw) {
+      const ref=pointer(raw);if(!ref)return raw;
+      if(!usable)throw unavailable();
+      const value=manager.get(slot(key,ref.record),null);
+      if(!value||value.version!==1||value.record!==ref.record||!(value.value===null||typeof value.value==='string'))throw unavailable();
+      return value.value;
+    }
+    function write(key,value) {
+      checkKey(key);
+      const before=native.getItem(key),prior=pointer(before);
+      resolve(key,before); // Fail closed before any mutation if the active payload is unavailable.
+      if(!usable){try{if(value===null)native.removeItem(key);else native.setItem(key,value);}catch(error){if(error?.name==='QuotaExceededError')throw Error('사이트 저장 공간이 가득 찼습니다. Tampermonkey 저장 권한이 있는 최신 스크립트로 업데이트해 주세요. 기존 자료는 유지됩니다.');throw error;}return;}
+      const id=makeId();if(!uuid.test(id)||id===prior?.record||id===prior?.previous)throw Error('저장 기록 식별자를 만들지 못했습니다. 다시 시도해 주세요.');
+      const recordKey=slot(key,id),record={version:1,record:id,value};
+      if(manager.get(recordKey,null)!==null)throw Error('저장 기록 식별자가 겹쳤습니다. 다시 시도해 주세요.');
+      let committed=false;
+      try {
+        manager.set(recordKey,record);
+        const saved=manager.get(recordKey,null);
+        if(!saved||saved.version!==1||saved.record!==id||saved.value!==value)throw unavailable();
+        if(native.getItem(key)!==before)throw Error('다른 탭에서 자료가 바뀌었습니다. 다시 읽고 저장해 주세요.');
+        native.setItem(key,JSON.stringify({pixaiQueueStorage:1,version:-1,record:id,previous:prior?.record||null}));
+        committed=true;
+      } finally {
+        // Keep the current and preceding payload; failed cleanup must not turn a saved edit into failure.
+        const obsolete=committed?prior?.previous:id;
+        if(obsolete)try{manager.remove(slot(key,obsolete));}catch{}
+      }
+    }
+    return {
+      getItem(key){checkKey(key);return resolve(key,native.getItem(key));},
+      setItem(key,value){write(key,String(value));},
+      removeItem(key){write(key,null);},
+      prepareWrite(keys){
+        for(const key of keys){checkKey(key);resolve(key,native.getItem(key));}
+        if(!usable)return;
+        const records=keys.map(key=>{checkKey(key);return {key,raw:native.getItem(key)};}).filter(({raw})=>raw!==null&&!pointer(raw)).sort((a,b)=>b.raw.length-a.raw.length);
+        // Free space with the largest existing record first; moving tiny options could initially grow it.
+        for(const {key,raw} of records)if(raw.length>180)write(key,raw);
+      }
+    };
+  }
   function createSettingsStore(storage, keys) {
     if (!keys || ['library','options','previous'].some(name => typeof keys[name] !== 'string' || !keys[name].trim()) || new Set(Object.values(keys)).size !== 3) {
       throw new Error('설정 저장 키를 확인해 주세요.');
@@ -3170,6 +3619,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         const library = normalizePresetLibrary(parsed?.library);
         const options = parsed?.options === null ? null : normalizeSettingsOptions(parsed?.options);
         const nextLibrary = encodeLocalPresetLibrary(library), nextOptions = options === null ? null : JSON.stringify(options);
+        storage.prepareWrite?.([keys.library,keys.options]);
         const original = snapshot();
         try { storage.setItem(keys.previous, JSON.stringify(original)); }
         catch (error) { throw new Error(`이전 설정 복구 사본을 저장하지 못했습니다 [${error.name || 'Error'}]. 현재 설정은 바꾸지 않았습니다.`); }
@@ -3189,6 +3639,13 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         try { previous(); return true; } catch { return false; }
       }
     };
+  }
+  async function readOfficialLoraTriggerWords(lora, api) {
+    const id=presetIdentifier(lora.id,'LoRA',true), versionId=presetIdentifier(lora.versionId,'LoRA 버전',true);
+    const version=await api.modelVersion(versionId);
+    if (!version || Array.isArray(version) || version.id!==versionId || version.modelId!==id) throw new Error('공식 API에서 읽은 LoRA 모델·버전이 선택한 항목과 다릅니다.');
+    if (!version.extra || Array.isArray(version.extra) || typeof version.extra.triggerWords!=='string') throw new Error('이 LoRA 버전의 트리거 정보를 확인하지 못했습니다.');
+    return presetText(version.extra.triggerWords);
   }
   async function readLoraTriggerWords(lora, io = {}) {
     const id=presetIdentifier(lora.id,'LoRA',true), versionId=presetIdentifier(lora.versionId,'LoRA 버전',true);
@@ -3308,6 +3765,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
       io.check();
       if (input.disabled || input.readOnly) throw new Error('설정 입력창을 사용할 수 없습니다.');
       io.mutate(()=>{
+        input.focus?.();
         const proto = input.tagName === 'TEXTAREA' ? io.win.HTMLTextAreaElement.prototype : input.tagName === 'SELECT' ? io.win.HTMLSelectElement.prototype : io.win.HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto,'value')?.set;
         if (!setter) throw new Error('사이트 입력값을 적용할 수 없습니다.');
@@ -3323,9 +3781,34 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     async function selectCard(d, item, type) {
       let found=labelById(d,item.id,type);
       if (!found.length) {
-        const search=only(list(d,'input[type="search"]'),'모델 검색창');
-        fill(search,item.name || item.id);
-        found=await waitFor(()=>{const matches=labelById(d,item.id,type);return matches.length?matches:null},`모델 ${item.name || item.id}`);
+        const search=()=>only(list(d,'input[type="search"]').filter(shown),'모델 검색창');
+        const findInTab=async()=>{
+          fill(search(),item.name || item.id);
+          for(let count=0;count<50;count++){
+            io.check();const matches=labelById(d,item.id,type);
+            if(matches.length)return matches;
+            await io.sleep(200);
+          }
+          return [];
+        };
+        found=await findInTab();
+        // The selector inherits the side panel's tab. A public name cannot be
+        // found under My LoRAs, and private LoRAs cannot be found in Market.
+        // Search only visible tabs and select only an exact numeric model ID.
+        for(const names of [['마켓','market'],['내 lora','my lora','my loras','mine']]){
+          if(found.length)break;
+          const tabs=list(d,'[role="tab"]').filter(e=>shown(e)&&names.includes(e.textContent.trim().toLowerCase()));
+          if(!tabs.length)continue;
+          const tab=only(tabs,'모델 검색 범위 탭');
+          if(tab.getAttribute('aria-selected')==='true')continue;
+          click(tab);
+          await waitFor(()=>tab.getAttribute('aria-selected')==='true','모델 검색 범위 전환');
+          fill(search(),'');
+          // My LoRAs may already display the private card without a search.
+          found=labelById(d,item.id,type);
+          if(!found.length)found=await findInTab();
+        }
+        if(!found.length)throw new Error(`모델 ${item.name || item.id}을 공개·내 모델 검색에서 찾지 못했습니다. 생성하지 않았습니다.`);
       }
       const label=only(found,'선택할 모델 카드');
       click(label.querySelector(`input[type="${type}"]`));
@@ -3359,20 +3842,34 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         }
       }
       for (const target of config.loras) {
+        try {
         if (!loraRows().some(item=>item.id === target.id)) {
           click(only(mainButtons('전체 LoRA 보기'),'전체 LoRA 보기 버튼'));
           const d=await waitFor(dialog,'LoRA 선택창');
           await selectCard(d,target,'checkbox');
           await waitFor(()=>!!d.querySelector(`[id="weight-slider-${target.id}"]`),'LoRA 선택');
-          click(only(buttons(d,'확인'),'LoRA 확인 버튼'));
+          const confirm=await waitFor(()=>{const matches=buttons(d,'확인');if(!matches.length)return null;const button=only(matches,'LoRA 확인 버튼');return !button.disabled && button.getAttribute('aria-disabled')!=='true'?button:null;},'LoRA 확인 버튼 활성화');
+          click(confirm);
           await waitFor(()=>!dialog(),'LoRA 선택창 닫힘');
           await waitFor(()=>loraRows().some(item=>item.id===target.id),'LoRA 반영');
         }
+        }catch(error){throw new Error(`LoRA ${target.name || target.id} 선택: ${error.message}`);}
+      }
+      // Finish all modal selections first; opening the next selector can rerender
+      // draft weight inputs. Focus/blur commits each input, then verify after rerender.
+      for (const target of config.loras) {
         const selected=loraRows().find(item=>item.id === target.id);
         if (target.versionId && selected.versionId !== target.versionId) throw new Error(`LoRA ${target.name || target.id}의 저장한 버전을 선택하지 못했습니다. 사이트에서 버전을 선택해 주세요.`);
         assertNumberField(selected.input,target.weight);
         fill(selected.input,target.weight);
         await waitFor(()=>Math.abs(loraRows().find(item=>item.id===target.id)?.weight-target.weight)<0.000001,'LoRA 수치 반영');
+      }
+      if(config.loras.length){
+        click(only(mainButtons('전체 LoRA 보기'),'LoRA 수치 확인용 선택창'));
+        const d=await waitFor(dialog,'LoRA 수치 확인창');
+        const confirm=await waitFor(()=>{const matches=buttons(d,'확인');if(!matches.length)return null;const button=only(matches,'LoRA 확인 버튼');return !button.disabled && button.getAttribute('aria-disabled')!=='true'?button:null;},'LoRA 수치 확인 버튼 활성화');
+        click(confirm);await waitFor(()=>!dialog(),'LoRA 수치 확인창 닫힘');
+        assertConfiguration(config,read());
       }
     }
     async function capture() {
@@ -3440,6 +3937,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
 
 function mountPresetEditor(parent, io) {
   const copy = value => JSON.parse(JSON.stringify(value));
+  const syncDraftChecks=[];
   let library = normalizePresetLibrary(io.load() || makePresetLibrary());
   const root = document.createElement('div'); root.className = 'pq-presets';
   const runtimePages = []; // 대기열·설정 페이지: 실행 중 잠금 대상
@@ -3469,8 +3967,8 @@ function mountPresetEditor(parent, io) {
   const libraryIds=['chunks','characters','presets','common'];
   let libraryPage=null,libraryTab='chunks',parityUI=null;
   root.append(navigation,pages);
-  function showPage(id,focus=false,bypass=false) {
-    if(!bypass&&parityUI?.requestNavigation(id,()=>showPage(id,focus,true)))return;
+  function showPage(id,focus=false,bypass=false,remember=true) {
+    if(!bypass&&parityUI?.requestNavigation(id,()=>showPage(id,focus,true,remember)))return;
     const view=views.find(item=>item.id===id);if (!view) return;
     if (libraryIds.includes(id)) libraryTab=id;
     const mainId=libraryPage && libraryIds.includes(id) ? 'library' : id;
@@ -3481,6 +3979,7 @@ function mountPresetEditor(parent, io) {
     }
     if (focus) {view.tab.focus({preventScroll:true});view.tab.scrollIntoView?.({block:'nearest',inline:'nearest',behavior:'auto'});}
     const registration=root.querySelector('.pq-registration-bar');if (registration) registration.hidden=mainId!=='compose';
+    if(remember)try{io.saveNavigation?.(mainId==='library'?libraryTab:mainId);}catch(error){io.notify(`화면 위치 저장 실패: ${error.message}`);}
   }
   function buttonPicker(control,{icon='folder',caption=null,empty=true,onChange=()=>{},editable=true,groups=null}={}) {
     control.wrap.hidden=true;
@@ -3509,6 +4008,7 @@ function mountPresetEditor(parent, io) {
   }
   function quickFolder(picker,label,onCreate,moving=false) {
     const create=el('div',null,{class:'pq-quick-folder'}),name=field(`${label} 새 폴더 이름`,'input',{placeholder:'새 폴더 이름'}),form=el('div',null,{class:'pq-quick-folder-form'});form.hidden=true;
+    syncDraftChecks.push(()=>!form.hidden&&!!name.input.value.trim());
     const open=action('새 폴더',()=>{form.hidden=false;name.input.focus();});open.setAttribute('aria-label',`${label} 새 폴더`);open.dataset.headerFeedback='';
     async function saveFolder() {await onCreate(nameValue(name.input));form.hidden=true;name.input.value='';picker.render();[...picker.list.children].find(item=>item.getAttribute('aria-pressed')==='true')?.focus({preventScroll:true});}
     const save=action(moving ? (label.startsWith('캐릭터') ? '만들고 선택 캐릭터 이동' : '만들고 선택 청크 이동') : (label.startsWith('캐릭터') ? '만들고 캐릭터 폴더 선택' : '만들고 폴더 선택'),saveFolder);save.dataset.headerFeedback='';
@@ -3535,7 +4035,7 @@ function mountPresetEditor(parent, io) {
       if (next<0) return;event.preventDefault();showPage(peers[next].id,true);
     });
     views.push({id,body,tab});navigation.append(tab);pages.append(body);
-    showPage(open ? id : views.find(item=>!item.body.hidden)?.id || id);return body;
+    showPage(open ? id : views.find(item=>!item.body.hidden)?.id || id,false,false,false);return body;
   }
   function selectOptions(select, items, caption, selected, first = false) {
     select.replaceChildren(el('option',caption,{value:''}));
@@ -3673,7 +4173,7 @@ function mountPresetEditor(parent, io) {
     const controls = {row,id:id.input,versionId:versionId.input,name:name.input,weight:weight.input,triggerWords:triggerWords.input};
     loraRows.push(controls);
     const identity=el('details');identity.append(el('summary','LoRA ID 직접 편집'),id.wrap,versionId.wrap);
-    row.append(name.wrap,weight.wrap,triggerWords.wrap,el('small','설정 읽기에서 공개 트리거를 자동으로 채웁니다. 직접 수정하거나 비워도 됩니다. 저장한 문구가 조합에 붙습니다.'),identity,publicLinkEditor({el,action,field},'LoRA 공개 링크',info=>{id.input.value=info.id;versionId.input.value=info.versionId;name.input.value=info.name;}),action('이 LoRA 제외',() => {
+    row.append(name.wrap,weight.wrap,triggerWords.wrap,el('small','API 키를 연결하면 공식 API에서 선택한 버전의 트리거를 읽습니다. 키가 없으면 공개 페이지만 조회합니다. 직접 입력한 문구를 우선 보존하며, 저장한 문구가 조합에 붙습니다.'),identity,publicLinkEditor({el,action,field},'LoRA 공개 링크',info=>{id.input.value=info.id;versionId.input.value=info.versionId;name.input.value=info.name;}),action('이 LoRA 제외',() => {
       row.remove(); loraRows = loraRows.filter(item => item !== controls);
     }));
     loraList.append(row);
@@ -3689,6 +4189,14 @@ function mountPresetEditor(parent, io) {
     loraList.replaceChildren(); loraRows = [];
     for (const lora of value?.loras || []) addLora(lora);
     renderPresetList();
+  }
+  function presetSyncDraft(value) {
+    const fields=['name','prompt','negativePrompt','commonPresetId'];
+    const inputs=[presetName,presetPrompt,presetNegative,presetCommon];
+    const result=Object.fromEntries(fields.map((key,index)=>[key,presetText(value===undefined?inputs[index].input.value:value?.[key]||'')]));
+    result.model=Object.fromEntries(['id','versionId','name','family'].map((key,index)=>[key,presetText(value===undefined?[modelId,modelVersionId,modelName,modelFamily][index].input.value:value?.model?.[key]||'')]));
+    result.loras=(value===undefined?loraRows:value?.loras||[]).map(item=>Object.fromEntries(['id','versionId','name','weight','triggerWords'].map(key=>[key,String(value===undefined?item[key].value:item[key]??'').trim()])));
+    return result;
   }
   function readPreset() {
     const id = modelId.input.value.trim();
@@ -3714,7 +4222,7 @@ function mountPresetEditor(parent, io) {
   presetBody.append(presetSelect.wrap,presetName.wrap,presetCommonPicker.wrap,presetPrompt.wrap,presetNegative.wrap,
     el('small','PixAI 화면에서 모델·LoRA를 선택한 뒤 읽어오세요. 읽어오기와 설정 확인은 이미지를 생성하지 않습니다.'),
     siteAction('사이트의 현재 설정 읽기',async () => {
-      io.notify('현재 모델·LoRA와 공개 트리거를 읽는 중…');
+      io.notify('현재 모델·LoRA와 트리거를 읽는 중…');
       const triggers = loraRows.map(item=>({id:item.id.value.trim(),versionId:item.versionId.value.trim(),triggerWords:item.triggerWords.value}));
       const settings = await io.captureSettings();
       let autoFilled=0;
@@ -3812,10 +4320,11 @@ function mountPresetEditor(parent, io) {
     function readCharacterLoras() {
       return normalizeCharacterLoras(characterLoraRows.map(item=>Object.fromEntries(Object.entries(item.fields).map(([key,field])=>[key,field.input.value]))));
     }
-    if(characterLoraPanel)characterLoraPanel.append(el('summary','캐릭터 전용 LoRA'),el('small','캐릭터를 고르면 프리셋 LoRA와 함께 적용됩니다. 공개 링크 또는 ID로 추가하고 수치·트리거를 입력한 뒤 캐릭터를 저장하세요. 생성 API는 최종 5개, 수치 0~1입니다.'),characterLoraList,action('캐릭터 LoRA 추가',()=>{addCharacterLora();characterLoraPanel.open=true;}));
+    if(characterLoraPanel)characterLoraPanel.append(el('summary','캐릭터 전용 LoRA'),el('small','캐릭터를 고르면 프리셋 LoRA와 함께 적용됩니다. 공개 링크 또는 ID로 추가하고 수치·트리거를 입력한 뒤 캐릭터를 저장하세요. LoRA 개수는 서버가 판단하며 선택한 목록을 그대로 전송합니다. API 수치는 0~1이고 웹 실행은 사이트의 허용 조건을 따릅니다.'),characterLoraList,action('캐릭터 LoRA 추가',()=>{addCharacterLora();characterLoraPanel.open=true;}));
     let resetFolderCreate=()=>{};
     let renderManager = () => {};
     let refreshFolders = () => {};
+    let refreshFolderDraft = () => {};
     let resetView = () => {};
     function fill(value) {
       editorOpen=true;
@@ -3833,10 +4342,12 @@ function mountPresetEditor(parent, io) {
       const folderTools=el('details');folderTools.append(el('summary','폴더 관리'));
       const managedFolder=field(`관리할 ${label} 폴더`,'select');
       const folderName=field(`${label} 폴더 이름`,'input',{placeholder:key==='characters' ? '예: 주연, 조연, 작품 이름' : '예: 표정, 행동, 배경'});
+      syncDraftChecks.push(()=>folderName.input.value.trim()!==(library[folderKey].find(item=>item.id===managedFolder.input.value)?.name||''));
       function chooseManagedFolder() {
         folderName.input.value=library[folderKey].find(item=>item.id===managedFolder.input.value)?.name || '';
         for (const refresh of orderRefreshers) refresh();
       }
+      refreshFolderDraft=chooseManagedFolder;
       managedFolder.input.addEventListener('change',chooseManagedFolder);
       const managedFolderPicker=buttonPicker(managedFolder,{onChange:chooseManagedFolder});
       const folderActions=el('div',null,{class:'pq-actions'});
@@ -4016,7 +4527,8 @@ function mountPresetEditor(parent, io) {
       };
       resetView=()=>{endDrag();managedChunkIds.clear();resetFolderCreate();resetMoveCreate();search.input.value='';filter.input.value='';opened.clear();opened.add('');folderName.input.value=library[folderKey].find(item=>item.id===managedFolder.input.value)?.name || '';};
       filter.wrap.hidden=true;rail.append(filter.wrap);rail.hidden=true;
-      browse.append(search.wrap,folderTools,count,list);body.append(management);layout.className='pq-inline-library';layout.replaceChildren(browse,rail);
+      const libraryTools=el('div',null,{class:'pq-library-tools'});libraryTools.append(search.wrap,folderTools);
+      browse.append(libraryTools,count,list);body.append(management);layout.className='pq-inline-library';layout.replaceChildren(browse,rail);
     }
     const controls=el('div',null,{class:'pq-actions'});
     controls.append(action(`${label} 저장`,async () => {
@@ -4038,7 +4550,15 @@ function mountPresetEditor(parent, io) {
     controls.append(action(`${label} 편집 닫기`,()=>{editorOpen=false;renderManager();}));
     select.wrap.hidden=true;editor.append(el('strong',`${label} 편집`),select.wrap,name.wrap,...(folder ? [folderPicker.wrap] : []),prompt.wrap,negative.wrap,...(characterLoraPanel?[characterLoraPanel]:[]),controls);
     const create=action(`새 ${label} 만들기`,()=>{select.input.value='';fill(null);setMode('edit');name.input.focus({preventScroll:true});for (const refresh of orderRefreshers) refresh();});browse.append(create);
-    return {key,select:select.input,label,fill,resetView,refresh:()=>{selectOptions(select.input,orderedChunks(library,key),`새 ${label}`,select.input.value);refreshFolders();}};
+    function hasDirty(){
+      const saved=library[key].find(item=>item.id===select.input.value);
+      if([name.input.value,prompt.input.value,negative.input.value,folder.input.value].map(value=>value.trim()).some((value,index)=>value!==[saved?.name||'',saved?.prompt||'',saved?.negativePrompt||'',saved?.folderId||''][index]))return true;
+      const fields=['id','versionId','name','weight','triggerWords'];
+      const draft=characterLoraRows.map(item=>fields.map(key=>String(item.fields[key].input.value).trim()));
+      const previous=(saved?.loras||[]).map(item=>fields.map(key=>String(item[key]??'').trim()));
+      return canonicalSync(draft)!==canonicalSync(previous);
+    }
+    return {key,select:select.input,label,fill,resetView,hasDirty,refreshSynced:()=>{fill(library[key].find(item=>item.id===select.input.value));refreshFolderDraft();},refresh:()=>{selectOptions(select.input,orderedChunks(library,key),`새 ${label}`,select.input.value);refreshFolders();}};
   }
   const characterEditor = promptEditor('characters','③ 캐릭터 프롬프트','캐릭터','외모, 의상, 캐릭터 고유 특징');
   const chunkEditor = promptEditor('scenes','④ 프롬프트 청크','청크','표정, 행동, 구도, 배경 등 함께 쓸 프롬프트 조각');
@@ -4092,9 +4612,11 @@ function mountPresetEditor(parent, io) {
   setRecipeImages();
   for (const control of [reserveRatio.input,reserveSize.input,reserveMode.input,reserveBatch.input]) control.addEventListener('change',chooseRecipeImages);
   const combined = el('div',null,{class:'pq-preview','aria-label':'저장한 프롬프트 조합 미리보기'});
-  const finalLoras=el('div',null,{'aria-label':'최종 적용 LoRA','data-final-loras':'',role:'status'});
+  const finalLoras=el('details',null,{'aria-label':'최종 적용 LoRA','data-final-loras':''}),finalLorasSummary=el('summary'),finalLorasBody=el('div',null,{class:'pq-final-loras'});finalLoras.append(finalLorasSummary,finalLorasBody);
   const sequenceList=el('div',null,{class:'pq-sequence-list','aria-label':'합쳐지는 순서'});
   const missingNotice=el('div',null,{class:'pq-missing-notice',role:'status'});
+  const conflictActions=el('div',null,{class:'pq-actions','aria-label':'조합 오류 수정'});conflictActions.hidden=true;
+  for(const [id,label] of [['presets','프리셋 확인'],['characters','캐릭터 LoRA 확인'],['common','공통문 확인']]){const control=el('button',label,{type:'button'});control.addEventListener('click',()=>showPage(id,true));conflictActions.append(control);}
   const acknowledgeMissing=action('누락 재료 제외하고 계속',()=>{missingMaterials=[];preview();});
   const selectedChunksInOrder=()=>[...selectedChunkIds].map(id=>library.scenes.find(chunk=>chunk.id===id)).filter(Boolean);
   const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,count:repeatValue(reserveCount.input),imageOptions:{...recipeImages}});
@@ -4122,10 +4644,12 @@ function mountPresetEditor(parent, io) {
   }
   function renderSequence(preset,character,chunks) {
     sequenceList.replaceChildren();
-    const {loras}=mergeCharacterLoras(preset?.loras||[],character?.loras);
-    const commonBlock=presetPreviewText(library,preset||{});
-    const materials=[{id:'common',name:'공통문',text:commonBlock.prompt||commonBlock.negativePrompt},{id:'character',name:'캐릭터',text:character?.prompt},
-      {id:'trigger',name:'LoRA 트리거',text:loras.map(item=>item.triggerWords || '').filter(Boolean).join(', ')},
+    // Invalid generation settings must not remove the controls needed to edit the composition.
+    let commonText,triggerText;
+    try {const block=presetPreviewText(library,preset||{});commonText=block.prompt||block.negativePrompt;} catch {commonText='공통문 연결 확인 필요';}
+    try {const {loras}=mergeCharacterLoras(preset?.loras||[],character?.loras);triggerText=loras.map(item=>item.triggerWords||'').filter(Boolean).join(', ');} catch {triggerText='LoRA 설정 확인 필요';}
+    const materials=[{id:'common',name:'공통문',text:commonText},{id:'character',name:'캐릭터',text:character?.prompt},
+      {id:'trigger',name:'LoRA 트리거',text:triggerText},
       ...chunks.map((chunk,index)=>({id:'chunk:'+chunk.id,name:chunk.name,text:chunk.prompt || chunk.negativePrompt,chunk,index}))];
     const keys=sequenceKeys();
     for (const [order,key] of keys.entries()) {
@@ -4188,6 +4712,7 @@ function mountPresetEditor(parent, io) {
     imageGroup.setSummary(`${recipeImages.aspectRatio} ${ratioDescription(recipeImages.aspectRatio)} · ${recipeImages.size} · ${modeName} · ${recipeImages.batchSize}장`);
   }
   function recipeImageSummary(options) {return `${options.aspectRatio} ${ratioDescription(options.aspectRatio)} · ${options.size}${Object.hasOwn(options,'mode') ? ` · ${options.mode || '모델 기본값'}` : ''}${options.batchSize ? ` · ${options.batchSize}장` : ''}`;}
+  let compositionError='';
   function preview() {
     renderRecipeImages();
     const preset = library.presets.find(item => item.id === reservePreset.input.value);
@@ -4196,16 +4721,15 @@ function mountPresetEditor(parent, io) {
     materialGroup.setSummary(`${preset?.name||'프리셋 미선택'} · ${character?.name||'캐릭터 미선택'}${preset?.commonPresetId&&!library.commonPresets?.some(item=>item.id===preset.commonPresetId)?' · 공통문 연결 확인 필요':''}`);
     chunkGroup.setSummary(chunks.length?`${chunks.length}개 선택 · ${chunks.map(chunk=>chunk.name).join(' → ')}`:'선택한 청크 없음');
     if (triggerPosition!=='end') triggerPosition=Math.min(triggerPosition,chunks.length+2);
-    let prompts;
+    let prompts,errorMessage='';
     try {
       const effectiveCommon=resolvePresetCommon(library,preset),merged=mergeCharacterLoras(preset?.loras||[],character?.loras);
       const sourceNames={preset:'프리셋',character:'캐릭터',both:'양쪽'};
       const labels=merged.loras.map((lora,index)=>(lora.name||lora.id)+' ('+lora.weight+' · '+sourceNames[merged.sources[index]]+')');
-      finalLoras.textContent=labels.length?'최종 LoRA '+labels.length+'/5개 · '+labels.join(' · '):'적용 LoRA 없음';
-      if(character?.loras?.length&&preset)assertCharacterApiLoras(merged.loras);
+      finalLorasSummary.textContent=labels.length?'최종 LoRA '+labels.length+'개':'적용 LoRA 없음';finalLorasBody.textContent=labels.length?' · '+labels.join(' · '):'';
       prompts=composePresetPrompts(effectiveCommon,character||{},chunks,preset||{loras:[]},triggerPosition);
-    } catch(error){combined.textContent=error.message;sequenceList.replaceChildren();finalLoras.textContent='LoRA·재료 설정 확인 필요';available(addReservation,false);available(favoriteCurrent,false);return;}
-    const {prompt,negativePrompt}=prompts;
+    } catch(error){errorMessage=error.message;finalLorasSummary.textContent='LoRA·재료 설정 확인 필요';finalLorasBody.textContent='';}
+    const {prompt='',negativePrompt=''}=prompts||{};
     const visible=visibleChunks(),visibleIds=new Set(visible.map(chunk=>chunk.id)),hidden=chunks.filter(chunk=>!visibleIds.has(chunk.id)).length;
     chunkCount.textContent = chunks.length ? `${chunks.length}개 선택 · ${chunks.map(chunk=>chunk.name).join(' · ')}` : '선택한 청크 없음 · 청크 없이 예약할 수 있습니다.';
     chunkCount.append(el('small',hidden ? `현재 목록 밖에 선택 ${hidden}개가 있습니다. 선택한 청크는 모두 함께 예약됩니다.` : '선택 순서대로 합칩니다. 가운데 목록에서 끌어 순서를 바꿀 수 있습니다.'));
@@ -4216,13 +4740,16 @@ function mountPresetEditor(parent, io) {
       const summary=groupSummaries.get(group.id);
       if (summary) summary.textContent=`${group.name} · 선택 ${selected} / 전체 ${all.length}개`;
     }
-    combined.textContent = `전송 프롬프트\n${prompt || '(비어 있음)'}${negativePrompt ? `\n\n네거티브\n${negativePrompt}` : ''}`;
+    combined.textContent = errorMessage ? `예약할 수 없음: ${errorMessage}\n청크 순서는 계속 편집할 수 있습니다.` : `전송 프롬프트\n${prompt || '(비어 있음)'}${negativePrompt ? `\n\n네거티브\n${negativePrompt}` : ''}`;
+    conflictActions.hidden=!errorMessage;
     missingMaterials=missingMaterials.filter(item=>item==='프리셋' ? !preset : item==='캐릭터' ? !character : true);
     missingNotice.hidden=!missingMaterials.length;missingNotice.textContent=missingMaterials.length ? `불러온 조합에서 없는 재료: ${missingMaterials.join(', ')}. 다시 선택하거나 누락 재료 제외를 확인해 주세요.` : '';
     if (missingMaterials.length) missingNotice.append(acknowledgeMissing);
     available(addReservation,!!preset && !!character && !missingMaterials.length && !!prompt);available(favoriteCurrent,!!preset && !!character && !missingMaterials.length && !!prompt);
+    addReservation.title=errorMessage;favoriteCurrent.title=errorMessage;
     renderSequence(preset,character,chunks);
     saveComposeDraft();
+    if(errorMessage!==compositionError){const previous=compositionError;compositionError=errorMessage;if(errorMessage)io.notify(`예약할 수 없음: ${errorMessage}`);else if(previous)io.notify('조합의 LoRA·공통문 오류가 해결됐습니다. 선택한 설정을 확인해 주세요.');}
   }
   for (const event of ['input','change']) reserveCount.input.addEventListener(event,preview);
   for (const select of [reservePreset.input,reserveCharacter.input]) select.addEventListener('change',preview);
@@ -4377,7 +4904,7 @@ function mountPresetEditor(parent, io) {
       if (!library.reservations.length) throw new Error('조합 예약을 먼저 추가해 주세요.');
       await io.enqueue(copy(library));
     });register.dataset.headerFeedback='';
-  review.append(el('strong','합쳐지는 순서'),sequenceList,el('strong','전송 미리보기'),finalLoras,combined,missingNotice);
+  review.append(el('strong','합쳐지는 순서'),sequenceList,el('strong','전송 미리보기'),finalLoras,combined,conflictActions,missingNotice);
   schedule.append(reserveCount.wrap,reservationActions,scheduleTabs,reservations,recentList,favoritesList);
   const composeMode=el('div',null,{class:'pq-compose-mode'});
   for (const [id,name] of [['choices','재료'],['review','순서·미리보기'],['schedule','예약·기록']]) {const button=el('button',name,{type:'button','data-compose-mode':id});button.addEventListener('click',()=>{reserveBody.dataset.composeMode=id;for (const control of composeMode.children) control.setAttribute('aria-pressed',String(control===button));});composeMode.append(button);}
@@ -4394,7 +4921,7 @@ function mountPresetEditor(parent, io) {
   parityUI=mountParityWorkspace({root,el,action,field,commonBody,resizable,getLibrary:()=>library,commit,refreshCommonChoices,getRecipe:recipe,getImages:()=>({...recipeImages}),reloadLibrary:()=>{library=normalizePresetLibrary(io.load());refreshLists();renderReservations();preview();},loadRecipe:value=>{reservePreset.input.value=value.presetId;reserveCharacter.input.value=value.characterId;reserveCount.input.value=String(value.count||1);selectedChunkIds=new Set(value.sceneIds);triggerPosition=value.triggerPosition??1;setRecipeImages(value.imageOptions);reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();showPage('compose',false,true);},addPage:(id,title)=>{const body=section(title,false,id);navigation.append(views.find(v=>v.id===id).tab);return body;},enqueue:(value,options)=>io.enqueue(value,options),getThumbnail:id=>io.getThumbnail?.(id),io});
   root.append(el('style','#local-pixai-queue .pq-material-preview p{margin:4px 0;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;font-size:13px;line-height:1.4}#local-pixai-queue .pq-preview-positive{-webkit-line-clamp:2}#local-pixai-queue .pq-preview-negative{-webkit-line-clamp:1;color:#a9b4bc}#local-pixai-queue .pq-ratio-mark{display:inline-block;flex:none;border:1.5px solid currentColor;border-radius:2px;margin-right:7px}#local-pixai-queue .pq-confirm{position:absolute;inset:15% 12% auto;background:#252b2f;border:1px solid #8bb8b0;padding:16px;z-index:20;border-radius:10px;box-shadow:0 8px 40px #0008}#local-pixai-queue .pq-common-default{flex:none}#local-pixai-queue .pq-common-editor{display:flex;flex-direction:column;gap:6px;padding:8px;overflow:auto}#local-pixai-queue .pq-parity-card{border-bottom:1px solid #455059;padding:8px}'));
   libraryTab='chunks';
-  showPage('compose');
+  showPage('compose',false,false,false);
   refreshLists(); renderReservations(); preview();
   try {
     const saved=io.loadDraft?.();
@@ -4409,6 +4936,9 @@ function mountPresetEditor(parent, io) {
   return {
     root,
     showPage,
+    hasDirty:()=>commonPrompt.input.value.trim()!==library.common.prompt||commonNegative.input.value.trim()!==library.common.negativePrompt||canonicalSync(presetSyncDraft())!==canonicalSync(presetSyncDraft(library.presets.find(item=>item.id===presetSelect.input.value)||null))||characterEditor.hasDirty()||chunkEditor.hasDirty()||syncDraftChecks.some(check=>check())||!!parityUI?.hasDirty(),
+    refreshSynced:()=>{library=normalizePresetLibrary(io.load()||makePresetLibrary());refreshLists();commonPrompt.input.value=library.common.prompt;commonNegative.input.value=library.common.negativePrompt;fillPreset(library.presets.find(item=>item.id===presetSelect.input.value));for(const editor of [characterEditor,chunkEditor])editor.refreshSynced();renderReservations();preview();parityUI?.refresh();},
+    restoreNavigation:()=>{try{const saved=io.loadNavigation?.();if(typeof saved==='string'&&views.some(item=>item.id===saved))showPage(saved,false,true,false);}catch(error){io.notify(`화면 위치 복원 실패: ${error.message}`);}},
     addPage:(id,title,...content)=>{const body=section(title,false,id);body.append(...content);runtimePages.push(body);return body;},
     // Library/compose controls may be used while this tab's runner is busy; runtime pages and site-touching buttons may not.
     allowsWhileRunning:element=>root.contains(element) && !runtimePages.some(page=>page.contains(element)) && element.dataset?.siteIo == null,
@@ -4501,10 +5031,6 @@ function mountPresetEditor(parent, io) {
     if (out.seed!=='') out.seed=presetInteger(out.seed,'시드',0,4294967295);
     return out;
   }
-  function assertCharacterApiLoras(loras) {
-    if(loras.length>5)throw Error('프리셋과 캐릭터를 합친 LoRA는 최대 5개까지 전송할 수 있습니다.');
-    if(loras.some(lora=>!lora.versionId||lora.weight<0||lora.weight>1))throw Error('캐릭터 조합의 모든 LoRA에 버전 ID와 0~1 수치를 지정해 주세요.');
-  }
   function buildApiPayload(job, options, batchSize, randomSeed) {
     const opts=normalizeApiOptions(options),config=job.configuration;
     if (![1,4].includes(batchSize)) throw new Error('공식 API는 1장 또는 4장 배치를 지원합니다.');
@@ -4512,7 +5038,8 @@ function mountPresetEditor(parent, io) {
     const prompt=presetText(job.prompt);
     if (!prompt) throw new Error('프롬프트를 입력해 주세요.');
     const loras=config?.loras ?? [];
-    if (!Array.isArray(loras) || loras.length>5) throw new Error('공식 API는 LoRA 최대 5개를 지원합니다.');
+    // The server decides the current count allowance. Never trim adapters to fit a guessed limit.
+    if (!Array.isArray(loras)) throw new Error('LoRA 목록 형식을 확인해 주세요.');
     const seen=new Set();
     const payload={modelVersionId,prompt,negativePrompt:presetText(job.negativePrompt),aspectRatio:opts.aspectRatio,size:opts.size,
       batchSize,seed:presetInteger(opts.seed==='' ? randomSeed : opts.seed,'시드',0,4294967295),promptHelper:'disable',
@@ -4560,6 +5087,7 @@ function mountPresetEditor(parent, io) {
     };
   }
   function reconfigureQueuedApiJob(job,options,batchSize,randomSeed) {
+    if(job.backend==='web-unlimited')throw Error('웹 무제한 작업에는 API 옵션을 적용할 수 없습니다.');
     if (job.state!=='queued' || job.taskId || job.saved?.length || job.mediaIds?.length || job.metadataFile) throw new Error('미제출 대기 작업의 API 옵션만 바꿀 수 있습니다. 제출된 작업은 같은 ID로 재개해 주세요.');
     if (job.submittedAt && !/^공식 API 오류 \((400|401|403|404|422)\)\./.test(job.error || '')) throw new Error('이전 제출 결과를 확인할 수 없어 요청을 바꾸지 않습니다.');
     const apiOptions=normalizeApiOptions(options),apiPayload=buildApiPayload(job,apiOptions,batchSize,job.apiPayload?.seed ?? randomSeed);
@@ -4588,7 +5116,9 @@ function mountPresetEditor(parent, io) {
     return new Promise((resolve,reject)=>{
       let settled=false,control;
       const finish=(action,value)=>{if (settled) return;settled=true;timers.clear(timer);action(value);};
-      const fail=()=>finish(reject,new Error('공식 API 네트워크·시간 초과 오류. 제출 결과가 불명확하면 자동 재제출하지 않습니다.'));
+      const fail=()=>finish(reject,new Error(details.responseType==='blob'
+        ? '이미지 다운로드 연결·시간 초과 오류. Tampermonkey의 이미지 서버 접근 허용을 확인해 주세요. 기존 작업 ID를 유지하며 재생성 없이 저장만 재시도합니다.'
+        : '공식 API 네트워크·시간 초과 오류. 제출 결과가 불명확하면 자동 재제출하지 않습니다.'));
       const timer=timers.set(()=>{fail();try {control?.abort();} catch {}},timeoutMs);
       try {control=request({...details,anonymous:true,fetch:true,redirect:'error',onload:value=>finish(resolve,value),onerror:fail,onabort:fail,ontimeout:fail});}
       catch {fail();}
@@ -4633,6 +5163,7 @@ function mountPresetEditor(parent, io) {
   }
   function apiHttpError(status,method,responseText,context) {
     const advice={400:'입력값·모델/LoRA 버전과 모드 호환성을 확인해 주세요.',401:'API 키 인증 실패입니다. 키를 다시 연결해 주세요.',403:'이 키의 접근 권한을 확인해 주세요.',404:'작업·모델·미디어를 찾지 못했습니다. 키 유효성은 이 응답으로 판정하지 않습니다.',422:'API 입력값을 확인해 주세요.',429:'API 대기열·요청 제한입니다. 추가 제출을 멈췄습니다.'};
+    if(status===403){try{if(JSON.parse(responseText)?.code==='LORA_NUM_EXCEEDED')advice[403]='가입 플랜의 LoRA 허용 개수를 초과했습니다. 선택 개수를 줄여 새 예약을 만들어 주세요. 기존 LoRA를 자동으로 빼지 않습니다.';}catch{}}
     const details=[400,422].includes(status) ? apiValidationDetails(responseText) : '';
     const reason=[400,422].includes(status) && context ? apiServerReason(responseText,context) : '';
     return Object.assign(new Error(`공식 API 오류 (${status}). ${advice[status] || '같은 작업 ID를 보존합니다. 제출 결과가 불명확하면 재제출하지 않습니다.'}${details ? '\n서버 검증: '+details : ''}${reason ? '\n서버 사유: '+reason : ''}`),
@@ -4640,7 +5171,7 @@ function mountPresetEditor(parent, io) {
   }
   function createOfficialApiClient(request,getKey,timers) {
     async function json(method,path,payload) {
-      if (!((method==='POST' && path==='/v2/image/create') || (method==='GET' && /^\/v1\/(?:task|media)\/\d+$/.test(path)))) throw new Error('허용되지 않은 공식 API 경로입니다.');
+      if (!((method==='POST' && path==='/v2/image/create') || (method==='GET' && (/^\/v1\/(?:task|media)\/\d+$/.test(path) || /^\/v2\/generation-model-version\/\d+$/.test(path))))) throw new Error('허용되지 않은 공식 API 경로입니다.');
       if (typeof request!=='function') throw Object.assign(new Error('최신 Tampermonkey로 업데이트하고 스크립트의 API 접근 권한을 허용해 주세요.'),{notSubmitted:true});
       let key;try {key=getKey();} catch(error) {error.notSubmitted=true;throw error;}
       const response=await gmResponse(request,{method,url:'https://api.pixai.art'+path,responseType:'text',
@@ -4652,10 +5183,11 @@ function mountPresetEditor(parent, io) {
     }
     return {async create(payload){const task=await json('POST','/v2/image/create',payload);if (typeof task.id!=='string' || !/^\d+$/.test(task.id)) throw new Error('공식 API 작업 ID를 확인하지 못했습니다. 자동 재제출하지 않습니다.');return task.id;},
       task:id=>json('GET','/v1/task/'+presetIdentifier(id,'작업',true)),media:id=>json('GET','/v1/media/'+presetIdentifier(id,'미디어',true)),
+      modelVersion:id=>json('GET','/v2/generation-model-version/'+presetIdentifier(id,'모델 버전',true)),
       async image(url){const allowed=mediaUrlAllowed(url);if (allowed.username || allowed.password || allowed.port) throw new Error('이미지 주소 형식을 확인해 주세요.');
         const response=await gmResponse(request,{method:'GET',url:allowed.href,responseType:'blob'},90000,timers);
         if (response.finalUrl && mediaUrlAllowed(response.finalUrl).origin!==allowed.origin) throw new Error('이미지 서버 이동으로 저장을 중단했습니다.');
-        if (response.status!==200) throw apiHttpError(response.status,'GET');return response.response;}
+        if (response.status!==200) throw new Error(`이미지 다운로드 오류 (${response.status}). 기존 작업 ID를 유지합니다. 재생성 없이 저장만 재시도해 주세요.`);return response.response;}
     };
   }
   // 서버가 알려준 원본 크기와 실제 내려받은 이미지 크기가 다르면(미리보기 등) 저장하지 않는다.
@@ -4681,14 +5213,18 @@ function mountPresetEditor(parent, io) {
   }
 
   const core = {encodeLocalPresetLibrary,decodeLocalPresetLibrary,normalizeCharacterLoras,mergeCharacterLoras,effectiveCharacterPreset,BACKUP_CATEGORIES,BACKUP_LABELS,backupSelection,backupFolderChoices,backupSelectionLabels,selectBackupLibrary,makeTransferBackup,parseTransferBackup,prepareBackupImport,filterQueueJobs,jobBatch,readPublicModelName,prepareImageForSave,createSceneThumbnailCache,atomicRecordWrite,subsetRegisteredLibrary,changeSceneCards,readImageInfo,embedGenerationInfo,imageCrc,inspectImageContainer,importImageComposition,importedImagePreset,compatibleSettings,resolvePresetCommon,deleteCommonPreset,normalizeBatchPlan,makeSceneCard,refreshSceneCard,resolveBatchRow,expandBatchPlan,appendBatchReservations,parsePublicModelLink,imageInfoFields,submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
-  Object.assign(core,{UPDATE_URLS,updateChannelUrl,updateChannelInfo,queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeComposeDraft,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{assertWebReceipt,assertWebUnlimited,webOriginal,runWebUnlimited,createWebUnlimitedAdapter,createUserscriptStorage,readOfficialLoraTriggerWords,UPDATE_URLS,updateChannelUrl,updateChannelInfo,queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeComposeDraft,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
+  Object.assign(core,{SYNC_COLLECTIONS,canonicalSync,parseSyncLibrary,projectSyncLibrary,applySyncLibrary,syncLibraryHash,createLibrarySyncTransport,createLibrarySyncClient,mountLibrarySyncPanel});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
+  const dataStorage=createUserscriptStorage(localStorage,typeof GM_getValue==='function' && typeof GM_setValue==='function' && typeof GM_deleteValue==='function' ? {get:GM_getValue,set:GM_setValue,remove:GM_deleteValue} : null);
   const KEY = 'local.pixai-web-queue.v1';
   const LIBRARY_KEY = 'local.pixai-web-queue.presets.v1';
   const OPTIONS_KEY = 'local.pixai-web-queue.options.v1';
   const COMPOSE_DRAFT_KEY = 'local.pixai-web-queue.compose.v1';
   const API_COST_ACK_KEY = 'local.pixai-web-queue.api-cost-ack.v1';
+  const EXECUTION_KEY = 'local.pixai-web-queue.execution.v1';
+  let executionMode=dataStorage.getItem(EXECUTION_KEY)==='web-unlimited'?'web-unlimited':'official-api';
   const PREVIOUS_SETTINGS_KEY = 'local.pixai-web-queue.before-import.v1';
   const LOCK = 'local.pixai-web-queue.runner.v1';
   const LABELS = {queued:'대기', submitting:'제출 중', waiting:'완료 확인', saving:'저장 중', save_failed:'저장 재시도 필요', done:'저장 완료', unknown:'제출 결과 확인 필요', skipped:'건너뜀'};
@@ -4706,7 +5242,7 @@ function mountPresetEditor(parent, io) {
   let internalAction = false;
   let runImageCount = null;
   let settingsBusy = false;
-  const sceneThumbnails=createSceneThumbnailCache({load:()=>localStorage.getItem(LIBRARY_KEY+'.scene-thumbnails.v1'),save:value=>localStorage.setItem(LIBRARY_KEY+'.scene-thumbnails.v1',value)});
+  const sceneThumbnails=createSceneThumbnailCache({load:()=>dataStorage.getItem(LIBRARY_KEY+'.scene-thumbnails.v1'),save:value=>dataStorage.setItem(LIBRARY_KEY+'.scene-thumbnails.v1',value)});
   let presetEditor;
   let panel;
   const apiKey=createSessionApiKey();
@@ -4733,21 +5269,31 @@ function mountPresetEditor(parent, io) {
     check:() => { if (!onGenerator()) throw new Error('PixAI 한국어 새 이미지 생성 화면에서 실행해 주세요.'); if ((running || starting || settingsBusy) && stopRequested) throw new Error('설정 적용이 중지됐습니다.'); },
     mutate:action => { internalAction=true; try {return action();} finally {internalAction=false;} }
   });
-  function readLibrary() { return decodeLocalPresetLibrary(localStorage.getItem(LIBRARY_KEY)); }
+  const webRunner=createWebUnlimitedAdapter(document,{
+    win:window,settings,sleep,freeze:()=>persist(),
+    check:()=>{if(stopRequested||!onGenerator())throw Error('웹 실행을 중지했습니다. 제출된 작업은 재생성하지 않습니다.');},
+    mutate:action=>{internalAction=true;try{return action();}finally{internalAction=false;}}
+  });
+  for(const type of ['pointerdown','keydown','input','change'])document.addEventListener(type,event=>{
+    if((running||starting)&&executionMode==='web-unlimited'&&event.isTrusted&&!internalAction&&event.target?.closest?.('main')&&!event.target.closest('#local-pixai-queue')){
+      stopRequested=true;message='사이트 직접 조작을 감지해 웹 자동 실행을 중지합니다. 제출된 작업은 보존합니다.';render();
+    }
+  },true);
+  function readLibrary() { return decodeLocalPresetLibrary(dataStorage.getItem(LIBRARY_KEY)); }
   function withLibraryLock(run){if(!navigator.locks)throw Error('이 브라우저는 라이브러리 중복 저장 방지를 지원하지 않습니다.');return navigator.locks.request(LIBRARY_KEY+'.edit',{},lock=>{if(!lock)throw Error('다른 탭에서 라이브러리 작업 중입니다.');return run();});}
-  function saveLibrary(value,expected){return withLibraryLock(()=>{const previous=localStorage.getItem(LIBRARY_KEY);if(expected&&JSON.stringify(readLibrary())!==JSON.stringify(normalizePresetLibrary(expected)))throw Error('다른 탭에서 라이브러리가 바뀌었습니다. 다시 읽거나 편집 내용을 복제해 저장해 주세요.');const normalized=normalizePresetLibrary(value);if(previous&&!localStorage.getItem(LIBRARY_KEY+'.pre-0.10'))localStorage.setItem(LIBRARY_KEY+'.pre-0.10',previous);localStorage.setItem(LIBRARY_KEY,encodeLocalPresetLibrary(normalized));});}
+  function saveLibrary(value,expected,validate){return withLibraryLock(()=>{validate?.();const previous=dataStorage.getItem(LIBRARY_KEY);if(expected&&JSON.stringify(readLibrary())!==JSON.stringify(normalizePresetLibrary(expected)))throw Error('다른 탭에서 라이브러리가 바뀌었습니다. 다시 읽거나 편집 내용을 복제해 저장해 주세요.');const normalized=normalizePresetLibrary(value);dataStorage.prepareWrite([LIBRARY_KEY]);if(previous&&!dataStorage.getItem(LIBRARY_KEY+'.pre-0.10'))dataStorage.setItem(LIBRARY_KEY+'.pre-0.10',previous);dataStorage.setItem(LIBRARY_KEY,encodeLocalPresetLibrary(normalized));});}
   async function settingsAction(action, {readOnly = false} = {}) {
     if (running || starting || settingsBusy) throw new Error('실행 중인 작업이 끝난 뒤 설정을 편집해 주세요.');
     settingsBusy=true; stopRequested=false; render();
     try { return await (readOnly ? action() : locked(()=>withLibraryLock(action))); } finally {settingsBusy=false;render();}
   }
   function load() {
-    const stored = JSON.parse(localStorage.getItem(KEY) || '{"version":1,"jobs":[]}');
+    const stored = JSON.parse(dataStorage.getItem(KEY) || '{"version":1,"jobs":[]}');
     if (stored.version !== 1 || !Array.isArray(stored.jobs)) throw new Error('대기열 형식이 맞지 않습니다.');
     jobs = recover(stored.jobs);
   }
   function persist() {
-    localStorage.setItem(KEY, JSON.stringify({version:1, jobs}));
+    dataStorage.setItem(KEY, JSON.stringify({version:1, jobs}));
     render();
   }
   // Queue additions from this tab: while its runner holds the queue lock, `jobs` is the live array the
@@ -4875,8 +5421,32 @@ function mountPresetEditor(parent, io) {
       if (storage.mode === 'folder' && jobs.some(job => job.saved?.length && !['done','skipped'].includes(job.state) && job.folderToken !== folderToken)) {
         throw new Error('부분 저장 작업의 폴더를 다시 선택해 확인해 주세요.');
       }
-      apiKey.get();
       const pendingJobs=jobs.filter(job=>!['done','skipped'].includes(job.state));
+      if(executionMode==='web-unlimited') {
+        if(pendingJobs.some(job=>job.backend!=='web-unlimited'))throw Error('API 대기 작업이 함께 있습니다. 먼저 기존 작업을 완료하거나 보관해 주세요. 실행 방식은 새로 등록한 작업에만 적용됩니다.');
+        if(storage.mode==='download')resetDownloadProgress(jobs);
+        running=true;starting=false;oneJobRun=oneJob;
+        message='웹 무제한 · 단일 생성 → 원본 저장 → 다음 작업';render();
+        try {
+          await runWebUnlimited(jobs,{
+            persist,prepare:async job=>{await ensureDestination();await webRunner.prepare(job);},submit:webRunner.submit,wait:webRunner.wait,guard:webRunner.guard,
+            save:async(job,original)=>{
+              await ensureDestination();job.folderToken=folderToken;persist();
+              const blob=await api.image(original.url); // Anonymous image download only; never reads an API key.
+              if(!['image/png','image/jpeg','image/webp'].includes(blob?.type)||!blob.size)throw Error('웹 결과 파일이 이미지가 아닙니다.');
+              await assertOriginalDimensions(blob,original,image=>createImageBitmap(image));
+              webRunner.guard(job);
+              const extension={'image/png':'png','image/jpeg':'jpg','image/webp':'webp'}[blob.type];
+              const name=await writeNew(`${safeName(job.title)}_${job.taskId}_1_${original.id}.${extension}`,blob);
+              await sceneThumbnails.remember(job.composition?.reservation?.sourceSceneId,blob);return name;
+            }
+          },{oneJob,stopped:()=>stopRequested});
+          message=stopRequested?'웹 실행 중지 · 제출한 작업은 그대로 보존합니다.':'웹 무제한 실행과 이미지 저장이 끝났습니다.';
+        }finally{running=false;render();}
+        return;
+      }
+      if(pendingJobs.some(job=>job.backend==='web-unlimited'))throw Error('웹 무제한 작업이 있습니다. 실행 방식을 웹 무제한으로 선택해 주세요. API로 대신 제출하지 않습니다.');
+      apiKey.get();
       const newJobs=(oneJob ? pendingJobs.slice(0,1) : pendingJobs.some(job=>job.state!=='queued') ? [] : pendingJobs).filter(job=>job.state==='queued');
       if (newJobs.length && !panel.querySelector('[data-api-cost-ack]').checked) {
         throw new Error('설정 탭에서 공식 API 과금·비용 상한 미지원 안내를 확인해 주세요. 기존 작업 조회만 재개할 때는 필요하지 않습니다.');
@@ -4922,7 +5492,7 @@ function mountPresetEditor(parent, io) {
   function button(text, action) {
     const element = node('button', text, {type:'button'});
     bindFolderActivation(element, () => element, () => {
-      if (element.getAttribute('data-view-only') == null) {
+      if (element.getAttribute('data-view-only') == null && /[\p{L}\p{N}]/u.test(String(text))) {
         notifyAction(`입력 확인: ${text}`);
       }
       return action();
@@ -4931,8 +5501,8 @@ function mountPresetEditor(parent, io) {
   }
   let notificationTimer;
   const expandedJobs=new Set(),selectedJobs=new Set();
-  const queueViewingKey=KEY+'.view',queueViewing=readGroupView(localStorage,queueViewingKey);let queueView=queueViewing.view||'active',queueState=queueViewing.state||'',queueBatch=queueViewing.batch||'',queueConfirmation=null;
-  const openedBatches=new Set(queueViewing.opened||[]);const persistQueueView=()=>{try{localStorage.setItem(queueViewingKey,JSON.stringify({view:queueView,state:queueState,batch:queueBatch,opened:[...openedBatches]}));}catch{notifyAction('목록 보기 저장 실패 · 현재 화면은 유지합니다.');}};
+  const queueViewingKey=KEY+'.view',queueViewing=readGroupView(dataStorage,queueViewingKey);let queueView=queueViewing.view||'active',queueState=queueViewing.state||'',queueBatch=queueViewing.batch||'',queueConfirmation=null;
+  const openedBatches=new Set(queueViewing.opened||[]);const persistQueueView=()=>{try{dataStorage.setItem(queueViewingKey,JSON.stringify({view:queueView,state:queueState,batch:queueBatch,opened:[...openedBatches]}));}catch{notifyAction('목록 보기 저장 실패 · 현재 화면은 유지합니다.');}};
   async function confirmQueueChange() {
     if(running || starting || settingsBusy)throw new Error('실행을 중지한 뒤 목록을 정리해 주세요.');
     const request=queueConfirmation;if(!request)return;
@@ -5014,10 +5584,11 @@ function mountPresetEditor(parent, io) {
       check.checked=selectedJobs.has(job.id);check.disabled=running || starting || settingsBusy || !queueJobRemovable(job);
       check.addEventListener('change',()=>{if(check.disabled)return;if(check.checked)selectedJobs.add(job.id);else selectedJobs.delete(job.id);queueConfirmation=null;render();});
       selection.append(check,node('strong',job.title));row.append(selection);
-      if(!queueJobRemovable(job))row.append(node('small','복구 필요 · 삭제 보호'));
+      if(!queueJobRemovable(job))row.append(node('small',job.error||job.state==='unknown'?'확인 필요 · 삭제 보호':'제출된 작업 · 삭제 보호'));
       row.append(node('span', `${LABELS[job.state]}${job.expected ? ` · ${job.saved?.length || 0}/${job.expected}` : ''}`));
       const imageOptions=job.apiPayload || job.apiOptions;
-      if (imageOptions?.aspectRatio) {
+      if(job.backend==='web-unlimited')row.append(node('small',`웹 무제한 · ${job.webApplied?.aspectRatio||imageOptions?.aspectRatio||'사이트 비율'} · 1장 · 프로/사이트 고정 해상도`));
+      else if (imageOptions?.aspectRatio) {
         row.append(ratioMark(node,imageOptions.aspectRatio),node('small',`적용 비율 ${imageOptions.aspectRatio} ${ratioDescription(imageOptions.aspectRatio)} (가로:세로) · 크기 ${imageOptions.size || '1k'} · ${imageOptions.batchSize||job.apiBatchSize||1}장 · ${imageOptions.mode||'모델 기본값'}`));
         const current=currentApiOptions();
         if (job.state==='queued' && !job.taskId && (imageOptions.aspectRatio!==current.aspectRatio || imageOptions.size!==current.size)) row.append(node('small',`현재 설정 ${current.aspectRatio} · ${current.size}과 다릅니다. 조합 예약에서 대기 작업에 비율·크기를 적용할 수 있습니다.`));
@@ -5034,7 +5605,7 @@ function mountPresetEditor(parent, io) {
       detail.append(node('summary','작업 내용 보기'),node('strong','전송 프롬프트'),node('div',job.prompt,{class:'pq-job-prompt'}),node('strong','네거티브'),node('div',job.negativePrompt || '(없음)',{class:'pq-job-prompt'}));
       if (job.configuration?.model && Array.isArray(job.configuration.loras)) detail.append(node('small',`모델 ${job.configuration.model.name || job.configuration.model.id} · 버전 ${job.configuration.model.versionId}`),...job.configuration.loras.filter(lora=>lora && typeof lora==='object').map(lora=>node('small',`LoRA ${lora.name || lora.id} · ${lora.weight}`)));
       detail.addEventListener('toggle',()=>{if (detail.open) expandedJobs.add(job.id);else expandedJobs.delete(job.id);});row.append(detail);
-      if (job.state==='queued' && !job.taskId && !job.saved?.length) {
+      if (job.backend!=='web-unlimited' && job.state==='queued' && !job.taskId && !job.saved?.length) {
         const configure=button('현재 API 옵션 적용',async()=>{
           if (running || starting || settingsBusy) throw new Error('실행 중에는 대기열 요청을 바꿀 수 없습니다.');
           await locked(()=>{
@@ -5048,13 +5619,20 @@ function mountPresetEditor(parent, io) {
         });
         configure.setAttribute('aria-label',`현재 API 옵션 적용: ${job.title}`);configure.dataset.edit='';row.append(configure);
       }
-      if (job.state === 'unknown') row.append(button('사이트 확인 후 작업 ID 연결', async () => {
+      if (!running && !starting && (job.state==='unknown' || (job.backend==='web-unlimited' && job.state==='waiting' && job.webIdentity))) row.append(button('사이트 확인 후 작업 ID 연결', async () => {
         const id = window.prompt('사이트에서 해당 작업 ID를 확인하고 입력해 주세요. 새 생성은 하지 않습니다.');
         if (!id || !/^\d+$/.test(id)) return;
         await locked(async () => {
           const target = jobs.find(item => item.id === job.id);
-          const task = await getTask(id);
-          verifyTask({...target, taskId:id}, task);
+          if(target.backend==='web-unlimited'){
+            if(target.taskId && target.taskId!==id)throw Error('이미 확보한 작업 ID와 다릅니다. 기존 결과를 다른 작업으로 바꿀 수 없습니다.');
+            if(!webRunner.hasTask(id)||target.webBeforeIds?.includes(id))throw Error('제출 이후의 해당 웹 작업 카드를 사이트에서 열어 주세요.');
+            // This explicit user confirmation permits existing-ID recovery from history.
+            delete target.webIdentity;delete target.webReceipt;
+          }else{
+            const task = await getTask(id);
+            verifyTask({...target, taskId:id}, task);
+          }
           target.taskId = id; target.state = 'waiting'; target.error = ''; persist();
         });
       }));
@@ -5081,7 +5659,7 @@ function mountPresetEditor(parent, io) {
             target.skippedFrom=target.state;target.state='skipped';persist();
           });
         });
-        skip.setAttribute('data-edit','');const menu=node('details',null,{class:'pq-job-menu'});menu.append(node('summary','⋮',{'aria-label':`작업 메뉴: ${job.title}`}),skip);row.append(menu);
+        skip.setAttribute('data-edit','');skip.setAttribute('aria-label',`건너뛰기: ${job.title}`);row.append(skip);
       }
       parent.append(row);
     }
@@ -5104,6 +5682,7 @@ function mountPresetEditor(parent, io) {
     if (chooseOther) { chooseOther.hidden=storage.mode !== 'folder' || !rememberedFolder || !!folder;chooseOther.disabled=choose.disabled; }
     panel.querySelector('[data-start]').textContent = running ? '실행 중' : starting ? '시작 준비 중…' : '시작 / 같은 작업 재개';
     decorateIcon(panel.querySelector('[data-start]'),'play_arrow');
+    panel.querySelector('[data-start]').setAttribute('aria-label',running?'실행 중':starting?'시작 준비 중…':'시작 / 같은 작업 재개');
     // Keep idle Start clickable so its preflight can explain missing setup.
     panel.querySelector('[data-start]').title = !storage.supported ? storage.message
       : (storage.mode === 'download' && !downloadsReady ? '자동 다운로드 준비 확인을 먼저 완료해 주세요.' : '저장 준비와 대기열을 확인한 뒤 실행합니다.');
@@ -5111,8 +5690,9 @@ function mountPresetEditor(parent, io) {
   function mount() {
     if (panel || document.getElementById('local-pixai-queue') || !document.body) return;
     panel = node('aside', null, {id:'local-pixai-queue'});
+    if (typeof ResizeObserver==='function') new ResizeObserver(()=>{panel.dataset.short=String(panel.clientHeight>0 && panel.clientHeight<560);}).observe(panel);
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.10.6', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.10.20', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue .pq-backup-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}#local-pixai-queue .pq-backup-choices label.pq-check-label,#local-pixai-queue .pq-backup-folder-list label.pq-check-label{margin:5px 0;min-width:0}#local-pixai-queue .pq-backup-choices span,#local-pixai-queue .pq-backup-folder-list span{min-width:0;overflow-wrap:anywhere}#local-pixai-queue .pq-backup-folder-list{max-height:180px;overflow:auto;padding:4px 8px}#local-pixai-queue [data-backup-result]{padding:8px;border-left:3px solid #94bedf;overflow-wrap:anywhere}@media(max-width:700px){#local-pixai-queue .pq-backup-choices{grid-template-columns:minmax(0,1fr)}}';
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
@@ -5134,14 +5714,14 @@ function mountPresetEditor(parent, io) {
       panel.dataset.minimized=String(value);
       panelDrag?.keepRight(before); // not yet bound at startup: the saved position is restored as is
       collapse.setAttribute('aria-expanded',String(!value));launcher.setAttribute('aria-expanded',String(!value));
-      if (remember) {try {localStorage.setItem('local.pixai-web-queue.minimized.v1',JSON.stringify(value));} catch { /* Folding does not depend on storage access. */ }}
+      if (remember) {try {dataStorage.setItem('local.pixai-web-queue.minimized.v1',JSON.stringify(value));} catch { /* Folding does not depend on storage access. */ }}
       if (focus) (value ? launcher : collapse).focus({preventScroll:true});
       if (!value) panel.scrollTop=expandedScrollTop;
     }
     // View-only controls stay enabled during generation and never replace its status.
     bindFolderActivation(collapse,()=>collapse,()=>minimize(true),()=>{});
     let minimized=false;
-    try {minimized=JSON.parse(localStorage.getItem('local.pixai-web-queue.minimized.v1')||'false')===true;} catch { /* Ignore malformed or unavailable view preferences. */ }
+    try {minimized=JSON.parse(dataStorage.getItem('local.pixai-web-queue.minimized.v1')||'false')===true;} catch { /* Ignore malformed or unavailable view preferences. */ }
     minimize(minimized,false,false);
     const toast=node('div',null,{'data-toast':'',role:'status','aria-live':'polite'});toast.hidden=true;
     panel.append(style,launcher,header, node('div',message,{'data-message':'','role':'status','aria-live':'polite'}),toast, node('small','공식 API로 생성·저장 · 이미지 비율·크기는 조합 예약에서, 스타일은 설정에서 정합니다.'));
@@ -5210,17 +5790,17 @@ function mountPresetEditor(parent, io) {
     const imageActions=node('details');imageActions.append(node('summary','기존 대기 작업의 비율·크기 변경'),note('이미 등록한 작업은 기존 비율·크기를 유지합니다.','아래 버튼은 미제출 작업에만 현재 선택값을 적용합니다. 예약별로 다른 비율을 유지하려면 적용 대상을 확인하세요.'),applyImageOptions);
     apiField('style','츠바키 API 스타일',[['','스타일 보내지 않음'],...API_STYLES.map(value=>[value,value])]);
     apiField('seed','API 시드 (빈칸은 작업별 랜덤)').setAttribute('placeholder','0~4294967295');
-    const embedMetadata=node('input',null,{type:'checkbox','data-edit':'','aria-label':'PNG에 생성 요청 정보 기록 (선택)'});embedMetadata.checked=false;const embedMetadataLabel=node('label',null,{class:'pq-check-label'});embedMetadataLabel.append(embedMetadata,node('span','PNG에 생성 요청 정보 기록 · 공유 시 포지/네거·모델/LoRA·요청 시드도 전달됩니다. 기본 꺼짐, JPEG/WebP는 원본 그대로, JSON 파일은 추가하지 않습니다.'));apiContent.append(embedMetadataLabel);embedMetadata.addEventListener('change',async()=>{const previous=savedOptions.embedMetadata===true;try{if(running||starting||settingsBusy)throw Error('실행 중에는 PNG 기록 선택을 바꿀 수 없습니다.');await settingsAction(()=>{const options=normalizeSettingsOptions({...savedOptions,embedMetadata:embedMetadata.checked});localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));savedOptions=options;});message='PNG 기록 선택을 저장했습니다. 새로 등록하는 작업부터 적용합니다.';}catch(error){embedMetadata.checked=previous;message=error.message;}render();});
+    const embedMetadata=node('input',null,{type:'checkbox','data-edit':'','aria-label':'PNG에 생성 요청 정보 기록 (선택)'});embedMetadata.checked=false;const embedMetadataLabel=node('label',null,{class:'pq-check-label'});embedMetadataLabel.append(embedMetadata,node('span','PNG에 생성 요청 정보 기록 · 공유 시 포지/네거·모델/LoRA·요청 시드도 전달됩니다. 기본 꺼짐, JPEG/WebP는 원본 그대로, JSON 파일은 추가하지 않습니다.'));apiContent.append(embedMetadataLabel);embedMetadata.addEventListener('change',async()=>{const previous=savedOptions.embedMetadata===true;try{if(running||starting||settingsBusy)throw Error('실행 중에는 PNG 기록 선택을 바꿀 수 없습니다.');await settingsAction(()=>{const options=normalizeSettingsOptions({...savedOptions,embedMetadata:embedMetadata.checked});dataStorage.setItem(OPTIONS_KEY,JSON.stringify(options));savedOptions=options;});message='PNG 기록 선택을 저장했습니다. 새로 등록하는 작업부터 적용합니다.';}catch(error){embedMetadata.checked=previous;message=error.message;}render();});
     const costAck=node('input',null,{type:'checkbox','data-api-cost-ack':'','data-edit':''});
     costAck.checked=false;
-    try {costAck.checked=JSON.parse(localStorage.getItem(API_COST_ACK_KEY) || 'false')===true;} catch {message='과금 안내 체크를 읽지 못했습니다. 내용을 확인하고 다시 체크해 주세요.';}
+    try {costAck.checked=JSON.parse(dataStorage.getItem(API_COST_ACK_KEY) || 'false')===true;} catch {message='과금 안내 체크를 읽지 못했습니다. 내용을 확인하고 다시 체크해 주세요.';}
     let savedCostAck=costAck.checked;
     costAck.addEventListener('change',()=>{
-      try {localStorage.setItem(API_COST_ACK_KEY,JSON.stringify(costAck.checked));savedCostAck=costAck.checked;}
+      try {dataStorage.setItem(API_COST_ACK_KEY,JSON.stringify(costAck.checked));savedCostAck=costAck.checked;}
       catch(error) {costAck.checked=savedCostAck;message=`과금 안내 체크 저장 실패: ${error.message}`;render();}
     });
     const costAckLabel=node('label',null,{class:'pq-check-label'});costAckLabel.append(costAck,node('span','시작은 크레딧을 사용하는 공식 API 생성 요청이며, 기존 사이트 비용 상한을 이 API 실행에 적용할 수 없음을 확인했습니다.'));
-    apiContent.append(note('비율·크기·생성 모드·배치 수는 조합 예약에서 고릅니다 · 자세히','모델·LoRA는 프리셋에서, 스타일·시드는 여기서 정합니다. 사이트의 해상도·스타일·참조 설정은 자동 복사하지 않습니다. LoRA 수치는 0~1, 최대 5개입니다.'),costAckLabel);
+    apiContent.append(note('비율·크기·생성 모드·배치 수는 조합 예약에서 고릅니다 · 자세히','모델·LoRA는 프리셋에서, 스타일·시드는 여기서 정합니다. 사이트의 해상도·스타일·참조 설정은 자동 복사하지 않습니다. 공식 API의 LoRA 수치는 0~1입니다. 개수는 로컬에서 제한하지 않으며 서버가 거절하면 받은 오류를 표시하고 다음 작업 제출을 멈춥니다.'),costAckLabel);
     function readApiFields() {return normalizeApiOptions({...apiOptions,...Object.fromEntries(Object.entries(apiFields).map(([key,input])=>[key,input.value]))});}
     function readOptions() {
       return normalizeSettingsOptions({maxCredits:budget.value.trim() ? Number(budget.value) : null,filePrefix:title.value,repeat:Number(repeat.value),imageCount:Number(imageCount.value),maxInFlight:Number(maxInFlight.value),api:readApiFields(),...(Object.hasOwn(savedOptions,'embedMetadata')?{embedMetadata:embedMetadata.checked}:{})});
@@ -5234,11 +5814,11 @@ function mountPresetEditor(parent, io) {
       apiOptions=normalizeApiOptions(value.api);for (const [key,input] of Object.entries(apiFields)) input.value=String(apiOptions[key]);
     }
     function loadOptions() {
-      fillOptions(normalizeSettingsOptions(JSON.parse(localStorage.getItem(OPTIONS_KEY) || '{"maxCredits":7800,"filePrefix":"","repeat":1}')));
+      fillOptions(normalizeSettingsOptions(JSON.parse(dataStorage.getItem(OPTIONS_KEY) || '{"maxCredits":7800,"filePrefix":"","repeat":1}')));
     }
     try {loadOptions();} catch {fillOptions(savedOptions);message='기본 옵션을 읽지 못해 기본값으로 열었습니다. 기억한 조합 편집 상태가 있으면 비율·크기는 그 값으로 복원합니다. 조합 예약 상단에서 확인해 주세요.';}
     for (const input of [budget,title,repeat,imageCount,maxInFlight,...Object.values(apiFields)]) input.addEventListener('change',()=>{
-      try {const options=readOptions();localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));fillOptions(options);render();}
+      try {const options=readOptions();dataStorage.setItem(OPTIONS_KEY,JSON.stringify(options));fillOptions(options);render();}
       catch(error) {fillOptions(savedOptions);message=`기본 옵션 저장 실패: ${error.message}\n화면과 실행 옵션을 이전 설정으로 되돌렸습니다.`;render();}
     });
     const add = button('대기열 추가', async () => locked(() => {
@@ -5252,7 +5832,8 @@ function mountPresetEditor(parent, io) {
       for (let index=0; index<parts.length; index++) for (let n=0; n<count; n++) added.push({
         id:crypto.randomUUID(), title:`${title.value.trim() || 'PixAI'}_${index+1}_${n+1}`, prompt:parts[index], maxCredits, state:'queued', saved:[],apiOptions:currentApiOptions(),apiBatchSize:currentApiBatchSize(),embedMetadata:savedOptions.embedMetadata===true
       });
-      jobs.push(...added); persist(); prompts.value=''; message=`${added.length}개 작업을 추가했습니다.`; render();
+      if(executionMode==='web-unlimited')for(const job of added)Object.assign(job,{backend:'web-unlimited',apiBatchSize:1,expected:1,embedMetadata:false});
+      jobs.push(...added); persist(); prompts.value=''; message=`${added.length}개 작업을 추가했습니다.${executionMode==='web-unlimited'?' 웹 무제한 · 작업당 1장 · 사이트 고정 해상도입니다.':''}`; render();
     }));
     add.dataset.edit='';
     const run = button('시작 / 같은 작업 재개', start); run.dataset.start=''; run.dataset.primary='';run.dataset.headerFeedback='';
@@ -5263,24 +5844,25 @@ function mountPresetEditor(parent, io) {
     function mountEditor() { try { presetEditor=mountPresetEditor(editorSlot, {
       isBusy:() => starting || settingsBusy,isRunning:()=>running||starting||settingsBusy, // library/compose editing stays open while this tab runs the queue; render() locks runtime pages
       load:readLibrary,save:saveLibrary,button,
-      loadGroupView:name=>readGroupView(localStorage,LIBRARY_KEY+'.view.'+name),saveGroupView:(name,value)=>localStorage.setItem(LIBRARY_KEY+'.view.'+name,JSON.stringify(value)),loadStudioDraft:()=>JSON.parse(localStorage.getItem(LIBRARY_KEY+'.studio-draft')||'null'),saveStudioDraft:value=>localStorage.setItem(LIBRARY_KEY+'.studio-draft',JSON.stringify(value)),getThumbnail:id=>sceneThumbnails.get(id),
-      applyImageComposition:(result,expected)=>settingsAction(()=>{if(expected&&JSON.stringify(readLibrary())!==JSON.stringify(normalizePresetLibrary(expected)))throw Error('이미지 적용 전에 다른 탭에서 재료가 바뀌었습니다. 다시 적용해 주세요.');const options=normalizeSettingsOptions({...savedOptions,api:{...apiOptions,...result.api}});atomicRecordWrite(localStorage,{[LIBRARY_KEY]:encodeLocalPresetLibrary(result.library),[OPTIONS_KEY]:JSON.stringify(options),[COMPOSE_DRAFT_KEY]:JSON.stringify(normalizeComposeDraft(result.recipe))},LIBRARY_KEY+'.before-image-import');fillOptions(options);}),
+      loadNavigation:()=>dataStorage.getItem(LIBRARY_KEY+'.navigation'),saveNavigation:value=>dataStorage.setItem(LIBRARY_KEY+'.navigation',value),
+      loadGroupView:name=>readGroupView(dataStorage,LIBRARY_KEY+'.view.'+name),saveGroupView:(name,value)=>dataStorage.setItem(LIBRARY_KEY+'.view.'+name,JSON.stringify(value)),loadStudioDraft:()=>JSON.parse(dataStorage.getItem(LIBRARY_KEY+'.studio-draft')||'null'),saveStudioDraft:value=>dataStorage.setItem(LIBRARY_KEY+'.studio-draft',JSON.stringify(value)),getThumbnail:id=>sceneThumbnails.get(id),
+      applyImageComposition:(result,expected)=>settingsAction(()=>{if(expected&&JSON.stringify(readLibrary())!==JSON.stringify(normalizePresetLibrary(expected)))throw Error('이미지 적용 전에 다른 탭에서 재료가 바뀌었습니다. 다시 적용해 주세요.');const options=normalizeSettingsOptions({...savedOptions,api:{...apiOptions,...result.api}});atomicRecordWrite(dataStorage,{[LIBRARY_KEY]:encodeLocalPresetLibrary(result.library),[OPTIONS_KEY]:JSON.stringify(options),[COMPOSE_DRAFT_KEY]:JSON.stringify(normalizeComposeDraft(result.recipe))},LIBRARY_KEY+'.before-image-import');fillOptions(options);}),
 
       isCompact:()=>(panel.getBoundingClientRect().width || document.documentElement?.clientWidth || window.innerWidth)<=760,
-      loadLayout:key=>JSON.parse(localStorage.getItem(`local.pixai-web-queue.layout.v1.${key}`) || 'null'),
-      saveLayout:(key,value)=>localStorage.setItem(`local.pixai-web-queue.layout.v1.${key}`,JSON.stringify(value)),
+      loadLayout:key=>JSON.parse(dataStorage.getItem(`local.pixai-web-queue.layout.v1.${key}`) || 'null'),
+      saveLayout:(key,value)=>dataStorage.setItem(`local.pixai-web-queue.layout.v1.${key}`,JSON.stringify(value)),
       notify:notifyAction,getImageOptions:()=>apiOptions,getBatchSize:()=>Number(imageCount.value) || 1,
       saveImageOptions:value=>{
         const {batchSize,...images}=normalizeReservationImageOptions(value);
         const options=normalizeSettingsOptions({...savedOptions,imageCount:batchSize ?? savedOptions.imageCount,api:{...apiOptions,...images}});
-        localStorage.setItem(OPTIONS_KEY,JSON.stringify(options));savedOptions=options;apiOptions=normalizeApiOptions(options.api);
+        dataStorage.setItem(OPTIONS_KEY,JSON.stringify(options));savedOptions=options;apiOptions=normalizeApiOptions(options.api);
         imageCount.value=String(options.imageCount);
       },imageOptionsChanged:render,
-      loadDraft:()=>JSON.parse(localStorage.getItem(COMPOSE_DRAFT_KEY) || 'null'),
-      saveDraft:draft=>localStorage.setItem(COMPOSE_DRAFT_KEY,JSON.stringify(normalizeComposeDraft(draft))),
-      loadComposeGroups:()=>JSON.parse(localStorage.getItem(COMPOSE_DRAFT_KEY+'.groups.v1')||'null'),
-      saveComposeGroups:value=>localStorage.setItem(COMPOSE_DRAFT_KEY+'.groups.v1',JSON.stringify(value)),
-      captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,readLoraTriggerWords),{readOnly:true}),
+      loadDraft:()=>JSON.parse(dataStorage.getItem(COMPOSE_DRAFT_KEY) || 'null'),
+      saveDraft:draft=>dataStorage.setItem(COMPOSE_DRAFT_KEY,JSON.stringify(normalizeComposeDraft(draft))),
+      loadComposeGroups:()=>JSON.parse(dataStorage.getItem(COMPOSE_DRAFT_KEY+'.groups.v1')||'null'),
+      saveComposeGroups:value=>dataStorage.setItem(COMPOSE_DRAFT_KEY+'.groups.v1',JSON.stringify(value)),
+      captureSettings:()=>settingsAction(()=>capturePresetSettings(settings,apiKey.has()?lora=>readOfficialLoraTriggerWords(lora,api):readLoraTriggerWords),{readOnly:true}),
       applySettings:value=>settingsAction(()=>settings.apply(value)),
       enqueue:(value,{fresh=false}={})=>queueEdit(()=>withLibraryLock(()=>{
         const added=expandPresetReservations(value,{maxCredits:budget.value.trim()||null,titlePrefix:title.value.trim()});
@@ -5288,8 +5870,8 @@ function mountPresetEditor(parent, io) {
         if (jobs.length+added.length>1000) throw new Error('대기열은 최대 1,000개까지 추가할 수 있습니다.');
         if (value.reservations.some(res=>jobs.some(job=>job.composition?.reservation?.id===res.id))) throw new Error('이미 등록된 예약이 있습니다. 해당 예약을 제외하고 새로 예약해 주세요.');
         const nextLibrary=subsetRegisteredLibrary(readLibrary(),normalizePresetLibrary(value),{fresh});
-        for(const job of added)job.embedMetadata=savedOptions.embedMetadata===true;
-        atomicRecordWrite(localStorage,{[KEY]:JSON.stringify({version:1,jobs:[...jobs,...added]}),[LIBRARY_KEY]:encodeLocalPresetLibrary(nextLibrary)},LIBRARY_KEY+'.before-registration');jobs.push(...added);let refreshWarning='';try{presetEditor.refresh();}catch{refreshWarning=' 화면 갱신을 다시 시도해 주세요.';}
+        for(const job of added){job.embedMetadata=savedOptions.embedMetadata===true;if(executionMode==='web-unlimited')Object.assign(job,{backend:'web-unlimited',apiBatchSize:1,expected:1,embedMetadata:false});}
+        atomicRecordWrite(dataStorage,{[KEY]:JSON.stringify({version:1,jobs:[...jobs,...added]}),[LIBRARY_KEY]:encodeLocalPresetLibrary(nextLibrary)},LIBRARY_KEY+'.before-registration');jobs.push(...added);let refreshWarning='';try{presetEditor.refresh();}catch{refreshWarning=' 화면 갱신을 다시 시도해 주세요.';}
         message=`조합 ${added.length}개를 대기열에 등록했습니다. 다른 미등록 예약과 작업별 설정은 유지합니다.${refreshWarning}${running ? (stopRequested ? ' 중지 요청 중이므로 다음 시작 때 실행합니다.' : oneJobRun ? ' 첫 작업만 실행 중이므로 이번에는 실행하지 않고 다음 시작 때 실행합니다.' : ' 실행 중인 작업이 끝나면 순서대로 이어서 실행합니다.') : ''}`;render();
       }))
     }); attachRuntimePages(); } catch(error) { message=`프리셋 라이브러리 읽기 실패: ${error.message}`; } }
@@ -5307,7 +5889,7 @@ function mountPresetEditor(parent, io) {
     panel.append(exportQueue);
     const backups=node('details');backups.append(node('summary','설정 내보내기 · 불러오기'));
     backups.append(node('small','공통문·프리셋·캐릭터·청크·폴더·목록 순서·예약 사본·최근 조합·즐겨찾기와 실행 옵션을 JSON으로 보관합니다. 편집한 항목은 먼저 저장해 주세요.'));
-    const settingsStore=createSettingsStore(localStorage,{library:LIBRARY_KEY,options:OPTIONS_KEY,previous:PREVIOUS_SETTINGS_KEY});
+    const settingsStore=createSettingsStore(dataStorage,{library:LIBRARY_KEY,options:OPTIONS_KEY,previous:PREVIOUS_SETTINGS_KEY});
     function idleSettings() {
       if (running || starting || settingsBusy || choosingFolder) throw new Error('진행 중인 작업이 끝난 뒤 설정을 불러오거나 내보내 주세요.');
     }
@@ -5324,7 +5906,7 @@ function mountPresetEditor(parent, io) {
       }
       render();
     }
-    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.6',exportedAt:new Date().toISOString()})));
+    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.20',exportedAt:new Date().toISOString()})));
     const exportPreview=node('div',null,{'data-export-preview':''});exportPreview.hidden=true;
     let pendingExport=null;
     function clearExport() {pendingExport=null;exportPreview.replaceChildren();exportPreview.hidden=true;}
@@ -5359,8 +5941,8 @@ function mountPresetEditor(parent, io) {
       const summary=node('div',null,{'data-backup-result':'','data-export-result':'',role:'status'});
       const folders=Object.fromEntries(Object.entries(p.folders).filter(([key])=>p.selection[key]));
       const save=backupButton('선택한 항목 파일 저장',()=>settingsAction(async()=>{
-        if(localStorage.getItem(LIBRARY_KEY)!==p.libraryBefore)throw new Error('백업 범위를 고르는 동안 자료가 바뀌었습니다. 선택 내보내기를 다시 열어 주세요.');
-        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.6',exportedAt:new Date().toISOString()},folders);
+        if(dataStorage.getItem(LIBRARY_KEY)!==p.libraryBefore)throw new Error('백업 범위를 고르는 동안 자료가 바뀌었습니다. 선택 내보내기를 다시 열어 주세요.');
+        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.20',exportedAt:new Date().toISOString()},folders);
         await downloadSettings(data,'선택_설정');
         if(pendingExport===p){clearExport();openExport.focus();}
       },{readOnly:true}));
@@ -5378,12 +5960,12 @@ function mountPresetEditor(parent, io) {
       if(focused)Array.from(exportPreview.querySelectorAll('[aria-label]')).find(control=>control.getAttribute('aria-label')===focused)?.focus();
     }
     const openExport=backupButton('선택 내보내기',()=>{
-      const libraryBefore=localStorage.getItem(LIBRARY_KEY),library=readLibrary();clearImport();compatibility.hidden=true;
+      const libraryBefore=dataStorage.getItem(LIBRARY_KEY),library=readLibrary();clearImport();compatibility.hidden=true;
       pendingExport={library,libraryBefore,selection:backupSelection(false),folders:{},openFolders:{}};
       drawExport();exportPreview.hidden=false;exportPreview.querySelector('input')?.focus();
     });
     const compatibility=node('div',null,{'data-compatibility-preview':'',role:'status'});compatibility.hidden=true;
-    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.6',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
+    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.20',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
     const input=node('input',null,{type:'file',accept:'.json,application/json','aria-label':'설정 백업 JSON 파일','data-edit':''});input.hidden=true;
     const preview=node('div',null,{'data-import-preview':'','aria-live':'polite'});preview.hidden=true;
     let pendingSettings=null;
@@ -5412,7 +5994,7 @@ function mountPresetEditor(parent, io) {
     const applyImport=backupButton('선택한 항목 가져오기',async()=>{
       if (!pendingSettings) throw new Error('설정 파일을 먼저 선택해 주세요.');
       await editSettings(()=>{
-        if (localStorage.getItem(LIBRARY_KEY)!==pendingSettings.libraryBefore || localStorage.getItem(OPTIONS_KEY)!==pendingSettings.optionsBefore) throw new Error('파일을 선택한 뒤 설정이 바뀌었습니다. 파일을 다시 선택해 주세요.');
+        if (dataStorage.getItem(LIBRARY_KEY)!==pendingSettings.libraryBefore || dataStorage.getItem(OPTIONS_KEY)!==pendingSettings.optionsBefore) throw new Error('파일을 선택한 뒤 설정이 바뀌었습니다. 파일을 다시 선택해 주세요.');
         const result=preparedImport();
         settingsStore.apply({library:result.library,options:result.options ?? null});
       });
@@ -5471,7 +6053,7 @@ function mountPresetEditor(parent, io) {
         idleSettings();
         await settingsAction(async()=>{
           if (file.size>5*1024*1024) throw new Error('설정 파일은 5MiB까지 불러올 수 있습니다.');
-          const libraryBefore=localStorage.getItem(LIBRARY_KEY),optionsBefore=localStorage.getItem(OPTIONS_KEY);
+          const libraryBefore=dataStorage.getItem(LIBRARY_KEY),optionsBefore=dataStorage.getItem(OPTIONS_KEY);
           const data=parseSettingsBackup(await file.text());
           if (stopRequested) throw new Error('설정 파일 읽기가 중지됐습니다.');
           const transfer=data.transfer||{format:'pixai-clack-helper-selection',version:1,selection:{...backupSelection(),options:!!data.options},backup:data};
@@ -5482,7 +6064,7 @@ function mountPresetEditor(parent, io) {
     });
     const undoSettings=backupButton('가져오기 전 설정 복구',async()=>{
       await editSettings(()=>{
-        const previous=JSON.parse(localStorage.getItem(PREVIOUS_SETTINGS_KEY) || 'null');
+        const previous=JSON.parse(dataStorage.getItem(PREVIOUS_SETTINGS_KEY) || 'null');
         try {
           if (previous?.library != null) decodeLocalPresetLibrary(previous.library);
           if (previous?.options != null) normalizeSettingsOptions(JSON.parse(previous.options));
@@ -5490,11 +6072,20 @@ function mountPresetEditor(parent, io) {
         settingsStore.undo();
       });message='가져오기 전 설정으로 복구했습니다.';render();
     });
+    if(typeof GM_getValue==='function' && typeof GM_setValue==='function')backups.append(node('small','자료는 저장할 때 이 브라우저의 Tampermonkey에 보관합니다. 스크립트·확장 프로그램을 삭제하기 전에 설정과 대기열을 백업하세요. 업데이트 후 다른 PixAI 탭도 새로고침해 주세요.'));
     backups.append(saveSettings,openExport,exportPreview,compatibilityButton('앱 호환 내보내기','app'),compatibilityButton('0.9.14 호환 내보내기','legacy'),compatibility,openSettings,input,preview,undoSettings);panel.append(backups);
     const footer=node('div',null,{class:'pq-footer'});
+    const executionSelect=node('select',null,{'aria-label':'대기열 실행 방식','data-edit':''});
+    executionSelect.append(node('option','공식 API',{value:'official-api'}),node('option','웹 무제한 · 1장씩',{value:'web-unlimited'}));executionSelect.value=executionMode;
+    const executionHelp=node('small',null,{'data-execution-help':'',id:'pq-execution-help'});
+    function showExecution(){executionSelect.title=executionHelp.textContent=executionMode==='web-unlimited'?'새 등록부터 웹 실행 · 키 불필요 · 1장/프로/사이트 고정 해상도 · API 스타일/시드/PNG 기록 미사용 · 실행 중 다른 탭 생성/사이트 조작 금지':'새 등록부터 공식 API 실행 · 기존 작업 방식은 유지';}
+    showExecution();executionSelect.addEventListener('change',()=>{try{if(running||starting||settingsBusy)throw Error('실행을 중지한 뒤 방식을 바꿔 주세요.');const next=executionSelect.value;if(!['official-api','web-unlimited'].includes(next))throw Error('지원하지 않는 실행 방식입니다.');dataStorage.setItem(EXECUTION_KEY,next);executionMode=next;showExecution();}catch(error){executionSelect.value=executionMode;notifyAction(error.message);}});
+    const executionDetails=node('details',null,{class:'pq-execution-details'}),executionSummary=node('summary','?',{'aria-label':'실행 방식 도움말','aria-controls':'pq-execution-help'});
+    executionDetails.append(executionSummary,executionHelp);executionDetails.addEventListener('keydown',event=>{if(event.key==='Escape'){executionDetails.open=false;executionSummary.focus();}});
+    const executionBar=node('div',null,{class:'pq-execution-bar'});executionBar.append(executionSelect,executionDetails);
     decorateIcon(run,'play_arrow');decorateIcon(stopButton,'stop');
     // Both run buttons sit together in the footer; the Settings tab is the only way to the settings page.
-    footer.append(node('span',null,{'data-queue-counts':'',role:'status'}),testRun,run,stopButton);
+    footer.append(executionBar,node('span',null,{'data-queue-counts':'',role:'status'}),testRun,run,stopButton);
     const folderStatus=panel.querySelector('[data-folder]'),jobsView=panel.querySelector('[data-jobs]');
     const intro=[...panel.children].find(child=>child.tagName.toLowerCase()==='small');
     const settingsContent=node('div',null,{class:'pq-settings-content'});
@@ -5513,12 +6104,23 @@ function mountPresetEditor(parent, io) {
     settingsMain.append(node('h3','공식 API 연결·생성 옵션'),apiContent);
     settingsSide.append(node('h3','저장 위치'),folderStatus,choose,chooseOther,node('h3','실행 옵션'),budgetLabel,budget,imageCountLabel,inFlightLabel,note('작업을 순서대로 미리 등록하고, 저장이 끝나면 다음 작업을 채웁니다 · 자세히','첫 작업만 실행은 1건만 처리합니다. 미리 등록할 작업 수만큼 생성 요청이 먼저 나갑니다.'),node('h3','업데이트 채널'),updateControls,node('h3','설정 백업'),backups);
     panel.append(node('style','#local-pixai-queue .pq-update-channel p{margin:8px 0;line-height:1.5}#local-pixai-queue .pq-update-channel .pq-actions{margin-top:10px}#local-pixai-queue .pq-update-channel [data-update-choice][aria-pressed="true"]{border-color:var(--pq-accent,#78cdb8);background:var(--pq-accent-soft,#2c3e40)}#local-pixai-queue .pq-update-channel a[data-update-install]{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;max-width:100%;padding:8px 12px;border:1px solid var(--pq-accent,#78cdb8);border-radius:6px;background:var(--pq-accent-soft,#2c3e40);color:var(--pq-text,#edf1f4);text-decoration:none;line-height:1.5}#local-pixai-queue .pq-update-channel a[data-update-install]:focus-visible{outline:2px solid var(--pq-accent,#78cdb8);outline-offset:2px}#local-pixai-queue .pq-update-channel a[aria-disabled="true"]{opacity:.45}#local-pixai-queue .pq-update-channel [data-update-feedback]:empty{display:none}'));
+    let syncPanel;
+    const syncClient=createLibrarySyncClient({
+      storage:typeof GM_info==='object'&&GM_info.scriptHandler==='Tampermonkey'&&typeof GM_getValue==='function'&&typeof GM_setValue==='function'&&typeof GM_deleteValue==='function'?{get:GM_getValue,set:GM_setValue,remove:GM_deleteValue}:null,
+      request:createLibrarySyncTransport(typeof GM_xmlhttpRequest==='function'?GM_xmlhttpRequest:null),
+      read:readLibrary,setTimeout:(run,ms)=>window.setTimeout(run,ms),clearTimeout:id=>window.clearTimeout(id),changed:state=>syncPanel?.render(state),
+      assertReady:()=>{if(running||starting||settingsBusy||choosingFolder)throw Error('생성·저장 작업이 끝난 뒤 동기화합니다.');if(!presetEditor||presetEditor.hasDirty())throw Error('저장하지 않은 라이브러리 편집 내용을 먼저 저장하거나 되돌려 주세요.');},
+      save:async(expected,next)=>{await settingsAction(()=>locked(()=>saveLibrary(next,expected,()=>{if(!presetEditor||presetEditor.hasDirty())throw Error('저장하지 않은 편집 내용이 있어 동기화를 멈췄습니다.');})),{readOnly:true});presetEditor.refreshSynced();}
+    });
+    syncPanel=mountLibrarySyncPanel(settingsSide,{node,button,client:syncClient,isBusy:()=>running||starting||settingsBusy||choosingFolder});syncClient.start();
+    window.addEventListener('pagehide',()=>syncClient.stop());
     settingsContent.append(settingsMain,settingsSide);
     backups.open=true;
     const queueContent=node('div',null,{class:'pq-queue-content'});queueContent.append(node('h3','등록된 대기열'),jobsView,simple,exportQueue);
     attachRuntimePages=()=>{
       presetEditor.addPage('queue','대기열',queueContent);presetEditor.addPage('settings','설정',settingsContent);presetEditor.addImageActions(imageActions);
       editorSlot.replaceChildren(presetEditor.root);
+      presetEditor.restoreNavigation();
     };
     if (presetEditor) attachRuntimePages();else editorSlot.append(settingsContent,queueContent);
     const resizeHandle=node('div',null,{class:'pq-window-resize',role:'button',tabindex:'0','aria-label':'작업창 크기 조절',title:'드래그해 작업창 크기 조절 · 방향키로 조절'});resizeHandle.append(materialIcon('open_in_full'));
@@ -5678,7 +6280,7 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue [data-primary]:not(:disabled):hover{background:#75ccbe;border-color:#75ccbe;color:#0d2723}
 #local-pixai-queue [data-message]{background:var(--pq-surface);border-color:var(--pq-line);margin:6px 12px;max-height:48px;font-size:12px}
 #local-pixai-queue [data-message]:empty{display:none}
-#local-pixai-queue [data-toast]{position:absolute;bottom:112px;left:14px;right:14px;z-index:8;border:1px solid var(--pq-accent);border-radius:8px;background:#20312e;box-shadow:0 6px 24px #0006;padding:9px 12px;max-height:108px;overflow:auto;white-space:pre-wrap;font-size:13px}
+#local-pixai-queue [data-toast]{position:static;flex:none;margin:0 12px 6px;border:1px solid var(--pq-accent);border-radius:7px;background:#20312e;padding:6px 10px;max-height:48px;overflow:auto;overflow-wrap:anywhere;white-space:pre-wrap;font-size:12px}
 #local-pixai-queue .pq-tabs{background:var(--pq-bg);border-color:var(--pq-line)}
 #local-pixai-queue .pq-tabs button[aria-selected="true"]{background:transparent;color:var(--pq-text);border-bottom-color:var(--pq-accent)}
 #local-pixai-queue .pq-presets .pq-preset-body[data-page="library"]{display:flex;flex-direction:column;overflow:hidden;padding:0}
@@ -5725,7 +6327,9 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-choice-list button[aria-pressed="true"]{background:var(--pq-accent-soft);border-color:var(--pq-accent);color:var(--pq-text)}
 #local-pixai-queue .pq-presets .pq-chunk-option{padding:7px 9px;align-items:center;font-size:14px;border-color:var(--pq-line)}
 #local-pixai-queue .pq-selection-number{flex:none!important;min-width:22px;text-align:center;font-size:12px;color:var(--pq-accent)}
-#local-pixai-queue .pq-sequence-list{flex:1;min-height:120px;overflow:auto}
+#local-pixai-queue .pq-sequence-list{flex:1;min-height:200px;overflow:auto}
+#local-pixai-queue [data-final-loras]>summary{cursor:pointer;font-size:13px}
+#local-pixai-queue .pq-final-loras{font-size:13px;color:#d0d7df;padding:2px 0 6px;overflow-wrap:anywhere}
 #local-pixai-queue .pq-fixed-material{padding:7px 9px;border-left:3px solid #76889e;background:#242a31;margin-bottom:5px}
 #local-pixai-queue .pq-fixed-material:nth-child(2){border-color:var(--pq-manage);background:#302b20}
 #local-pixai-queue .pq-fixed-material:nth-child(3){border-color:#6fc47c;background:#202d25}
@@ -5747,10 +6351,29 @@ function mountPresetEditor(parent, io) {
 #local-pixai-queue .pq-reservation strong,#local-pixai-queue .pq-history-card strong{display:block;font-size:14px}
 #local-pixai-queue .pq-registration-bar{display:flex;align-items:center;gap:12px;justify-content:space-between;border-top:1px solid var(--pq-line);padding:8px 12px;flex:none;background:var(--pq-surface)}
 #local-pixai-queue .pq-registration-bar button{margin:0;font-size:13px}#local-pixai-queue .pq-registration-bar span{font-size:12px;color:var(--pq-muted)}
-#local-pixai-queue .pq-footer{background:var(--pq-bg);border-color:var(--pq-line)}
-#local-pixai-queue .pq-job-menu{display:inline-block;margin:4px 0;border:0;position:relative}#local-pixai-queue .pq-job-menu summary{cursor:pointer;font-size:22px;padding:0 10px;list-style:none}
+#local-pixai-queue .pq-footer{background:var(--pq-bg);border-color:var(--pq-line);flex-wrap:wrap;position:relative;gap:6px}
+#local-pixai-queue .pq-footer>[data-queue-counts]{flex:1;min-width:180px}
+#local-pixai-queue .pq-execution-bar{display:flex;align-items:center;gap:5px;flex:none;padding:0;max-width:100%}
+#local-pixai-queue .pq-execution-bar select{width:auto;max-width:100%;padding:6px;border:1px solid var(--pq-line);border-radius:6px;background:var(--pq-bg);color:var(--pq-text)}
+#local-pixai-queue .pq-execution-details{position:static;margin:0;border:0;padding:0}
+#local-pixai-queue .pq-execution-details>summary{display:grid;place-items:center;list-style:none;cursor:pointer;width:30px;height:32px;border:1px solid var(--pq-line);border-radius:6px;font-weight:700}
+#local-pixai-queue .pq-execution-details>summary::-webkit-details-marker{display:none}
+#local-pixai-queue .pq-execution-details[open]>summary{border-color:var(--pq-accent);background:var(--pq-accent-soft)}
+#local-pixai-queue .pq-execution-details>small{position:absolute;bottom:calc(100% + 6px);left:8px;max-width:calc(100% - 16px);width:440px;max-height:160px;overflow:auto;padding:12px;border:1px solid var(--pq-line);border-radius:8px;background:var(--pq-surface);box-shadow:0 5px 24px #0006;font-size:13px;line-height:1.5;z-index:25}
+#local-pixai-queue .pq-library-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;align-items:center;flex:none}
+#local-pixai-queue .pq-library-tools>label{margin:0}
+#local-pixai-queue .pq-library-tools>details{margin:0;padding:0;border:0}
+#local-pixai-queue .pq-library-tools>details>summary{padding:7px;cursor:pointer}
+#local-pixai-queue .pq-library-tools>details[open]{grid-column:1/-1;max-height:34vh;overflow:auto;padding:6px;border:1px solid var(--pq-line)}
+#local-pixai-queue .pq-presets .pq-inline-library>.pq-library-browse>.pq-chunk-list{margin:4px 0}
+#local-pixai-queue [data-library-sync] pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;padding:8px;background:var(--pq-bg)}
+#local-pixai-queue [data-library-sync] select{max-width:100%;width:100%}
+#local-pixai-queue[data-short="true"] .pq-footer{padding:5px 14px}
+#local-pixai-queue[data-short="true"] [data-message]{margin:4px 0;padding:4px 9px}
+#local-pixai-queue .pq-job{padding:7px 0}
+#local-pixai-queue .pq-job>.pq-check-label{margin:4px 0}
 #local-pixai-queue *{scrollbar-width:thin;scrollbar-color:#4a525c #1d2024}#local-pixai-queue *::-webkit-scrollbar{width:7px;height:7px}#local-pixai-queue *::-webkit-scrollbar-thumb{background:#4a525c;border-radius:4px}#local-pixai-queue *::-webkit-scrollbar-track{background:#1d2024}
-#local-pixai-queue .pq-job-timeline{display:flex;gap:6px;margin:7px 0;flex-wrap:wrap;font-size:12px}#local-pixai-queue .pq-job-timeline span{padding:3px 7px;border-radius:5px;background:var(--pq-raised)}#local-pixai-queue .pq-job-timeline [data-complete="true"]{color:var(--pq-accent)}
+#local-pixai-queue .pq-job-timeline{display:flex;gap:6px;margin:4px 0;flex-wrap:wrap;font-size:12px}#local-pixai-queue .pq-job-timeline span{padding:2px 7px;border-radius:5px;background:var(--pq-raised)}#local-pixai-queue .pq-job-timeline [data-complete="true"]{color:var(--pq-accent)}
 #local-pixai-queue .pq-job-detail{margin:7px 0}#local-pixai-queue .pq-job-detail summary{cursor:pointer;font-size:13px}#local-pixai-queue .pq-job-prompt{white-space:pre-wrap;overflow-wrap:anywhere;padding:8px;background:var(--pq-surface);border-radius:5px;font-size:13px;max-height:180px;overflow:auto}
 #local-pixai-queue [data-queue-counts]{font-size:12px;color:var(--pq-muted)}
 #local-pixai-queue .pq-pane-handle{background:var(--pq-bg)}#local-pixai-queue .pq-pane-handle:before{background:var(--pq-line)}#local-pixai-queue .pq-pane-handle:after{background:#4a525c}
@@ -5787,8 +6410,8 @@ function mountPresetEditor(parent, io) {
     panelDrag=bindPanelDrag(panel, dragHandle, {
       launcher, open:() => minimize(false),
       viewport:() => ({width:document.documentElement?.clientWidth || window.innerWidth,height:document.documentElement?.clientHeight || window.innerHeight}),
-      load:() => JSON.parse(localStorage.getItem('local.pixai-web-queue.position.v1') || 'null'),
-      save:position => localStorage.setItem('local.pixai-web-queue.position.v1', JSON.stringify(position)),
+      load:() => JSON.parse(dataStorage.getItem('local.pixai-web-queue.position.v1') || 'null'),
+      save:position => dataStorage.setItem('local.pixai-web-queue.position.v1', JSON.stringify(position)),
       onResize:action => {
         window.addEventListener('resize', action);
         new ResizeObserver(action).observe(panel);
@@ -5796,8 +6419,8 @@ function mountPresetEditor(parent, io) {
     });
     bindWindowResize(panel,resizeHandle,{
       viewport:()=>({width:document.documentElement?.clientWidth || window.innerWidth,height:document.documentElement?.clientHeight || window.innerHeight}),
-      load:()=>JSON.parse(localStorage.getItem('local.pixai-web-queue.size.v1') || 'null'),
-      save:value=>localStorage.setItem('local.pixai-web-queue.size.v1',JSON.stringify(value)),
+      load:()=>JSON.parse(dataStorage.getItem('local.pixai-web-queue.size.v1') || 'null'),
+      save:value=>dataStorage.setItem('local.pixai-web-queue.size.v1',JSON.stringify(value)),
       onResize:listener=>window.addEventListener('resize',listener)
     });
     if (storage.mode === 'folder' && typeof indexedDB !== 'undefined') folderRestoration=restoreSelectedFolder();
@@ -5834,7 +6457,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.6', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.20', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
