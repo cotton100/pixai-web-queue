@@ -697,7 +697,27 @@ test('runtime workbench puts storage and backup in Settings, jobs in Queue, and 
   panel.querySelector('#pq-tab-settings').fire('click',{detail:0});
   assert.equal(settings.hidden,false);assert.equal(compose.hidden,true);
   assert.equal(settings.querySelectorAll('[class="pq-settings-column"]').length,2);
-  assert.equal(f.storageMutations.length,0);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+  assert.deepEqual(f.storageMutations,[{method:'set',key:'local.pixai-web-queue.presets.v1.navigation',value:'settings'}]);assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);
+});
+test('last runtime or library tab restores after reload without rewriting library, queue or settings',()=>{
+  const f=panelFixture(null,{records:runtimeSettingsRecords()});
+  for(const id of ['queue','characters','studio','settings']){
+    f.panel.querySelector('#pq-tab-'+id).fire('click',{detail:0});
+    assert.equal(f.records.get('local.pixai-web-queue.presets.v1.navigation'),id);
+    const fresh=panelFixture(null,{records:new Map(f.records)});
+    assert.equal(fresh.panel.querySelector('[data-page="'+id+'"]').hidden,false);
+    assert.equal(fresh.storageMutations.length,0);assert.equal(fresh.networkCalls,0);assert.equal(fresh.generateCalls,0);
+  }
+  assert(f.storageMutations.every(item=>item.key==='local.pixai-web-queue.presets.v1.navigation'));
+  const bad=panelFixture(null,{records:new Map([['local.pixai-web-queue.presets.v1.navigation','missing-page']])});
+  assert.equal(bad.panel.querySelector('[data-page="compose"]').hidden,false);
+});
+test('execution mode shares the footer and its help stays keyboard operable without starting a job',()=>{
+  const f=panelFixture(),footer=f.panel.querySelector('[class="pq-footer"]'),help=footer.querySelector('[class="pq-execution-details"]');
+  assert(footer.contains(runtimeField(f,'대기열 실행 방식')));assert(help.querySelector('[aria-label="실행 방식 도움말"]'));
+  assert(!help.open);help.open=true;help.fire('keydown',{key:'Escape'});assert.equal(help.open,false);
+  assert.equal(f.panel.querySelector('[data-start]').getAttribute('aria-label'),'시작 / 같은 작업 재개');
+  assert.equal(f.generateCalls,0);assert.equal(f.networkCalls,0);assert.equal(f.storageMutations.length,0);
 });
 test('footer groups both run buttons, the legacy prompt box starts folded, and an empty queue offers a jump to compose',()=>{
   const f=panelFixture(),panel=f.panel;
@@ -1717,7 +1737,8 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   click() { this.onClick?.(); }
   dispatchEvent(event) { this.events.push(event.type);this.onEvent?.(event);return true; }
-  blur() { this.blurred=true; }
+  focus() { this.focused=true; }
+  blur() { this.blurred=true;this.onBlur?.(); }
 }
 class Input extends Element {
   constructor(attrs={},value='') { super('input',attrs);this._value=String(value); }
@@ -1752,7 +1773,8 @@ function fixture(options={}) {
       const row=new Element('div',{'data-testid':'selected-entity-card'}),link=new Element('a',{href:`/en/model/${lora.id}/${lora.versionId}`},lora.name);
       const imageLink=new Element('a',{href:`/en/model/${lora.id}/${lora.versionId}`});
       const input=new Input({type:'number','aria-label':options.english?'Weight':'비중',min:options.min??'-2',max:options.max??'2',step:options.step??'0.1'},lora.weight);
-      input.disabled=!!options.disabledLora;input.onEvent=event=>{if(event.type==='input')lora.weight=Number(input.value);};
+      input.disabled=!!options.disabledLora;input.onEvent=event=>{if(event.type==='input'&&!options.commitOnBlur&&!options.dropWeightCommit)lora.weight=Number(input.value);};
+      input.onBlur=()=>{if(options.commitOnBlur&&input.focused&&!options.dropWeightCommit)lora.weight=Number(input.value);};
       const remove=button('',{'aria-label':options.english?'Remove':'제거'},()=>{state.loras=state.loras.filter(item=>item.id!==lora.id);renderRows();});
       // The input is nested one level deeper than the link/remove controls.
       row.append(imageLink,link,new Element('div').append(input),remove);
@@ -1784,15 +1806,28 @@ function fixture(options={}) {
     }
   }
   function openLora() {
-    opened=new Element('div',{role:'dialog'});doc.append(opened);opened.append(button('',{'aria-label':options.english?'Close':'닫기'},close),new Input({type:'search'}));
+    const search=new Input({type:'search'}),cards=[];
+    let activeTab=options.initialLoraTab||'mine';
+    const filterCards=()=>{for(const {label,lora} of cards)label.hidden=!!options.loraTabs&&((lora.scope||'market')!==activeTab||!lora.name.toLowerCase().includes(search.value.toLowerCase()));};
+    search.onEvent=()=>filterCards();
+    opened=new Element('div',{role:'dialog'});doc.append(opened);opened.append(button('',{'aria-label':options.english?'Close':'닫기'},close),search);
+    if(options.loraTabs){
+      const tabs=[];
+      for(const [key,name] of [['market',options.english?'Market':'마켓'],['mine',options.english?'My LoRAs':'내 LoRA']]){
+        const tab=button(name,{role:'tab','aria-selected':String(activeTab===key)},()=>{activeTab=key;for(const entry of tabs)entry.node.setAttribute('aria-selected',String(entry.key===key));filterCards();});
+        tabs.push({key,node:tab});opened.append(tab);
+        if(options.duplicateSearchTab&&key==='market')opened.append(button(name,{role:'tab','aria-selected':'false'}));
+      }
+    }
     let pending=null;
     for(const lora of catalogs.loras) {
       const label=new Element('label',{title:lora.name}),checkbox=new Input({type:'checkbox'});
       label.append(checkbox,new Element('a',{href:`/ko/model/${lora.id}/${lora.versionId}`},lora.name));
       checkbox.onClick=()=>{state.clicks.push(`checkbox:${lora.id}`);pending=lora;opened.append(new Element('span',{id:`weight-slider-${lora.id}`}));};
-      opened.append(label);
+      opened.append(label);cards.push({label,lora});
     }
-    opened.append(button(options.loraConfirmLabel || (options.english?'Confirm selection':'확인'),{},()=>{if(pending)state.loras.push({...pending});renderRows();close();}));
+    filterCards();
+    const confirm=button(options.loraConfirmLabel || (options.english?'Confirm selection':'확인'),{},()=>{if(pending)state.loras.push({...pending});renderRows();close();});confirm.disabled=!!options.delayLoraConfirm;opened.append(confirm);
     if(options.duplicateLoraConfirm)opened.append(button('Confirm',{},()=>{state.paidClicks++;}));
   }
   const tab=button(options.english?'Model':'모델',{role:'tab','aria-selected':options.modelTabHidden?'false':'true'},()=>{tab.setAttribute('aria-selected','true');allModel.hidden=false;allLora.hidden=false;modelCard.hidden=false;rows.hidden=false;});
@@ -1809,7 +1844,7 @@ function fixture(options={}) {
     const advanced=button(options.english?'Advanced':'고급',{'aria-expanded':'false'},()=>{advanced.setAttribute('aria-expanded','true');attachNegative();});settingsSection.append(advanced);
   }
   if(options.openDialog){opened=new Element('div',{role:'dialog'});doc.append(opened);}
-  const io={win,check(){state.checks++;if(options.cancelled)throw new Error('중단됨');},mutate(action){state.mutations++;return action();},sleep:async()=>{}};
+  const io={win,check(){state.checks++;if(options.cancelled)throw new Error('중단됨');},mutate(action){state.mutations++;return action();},sleep:async()=>{if(options.delayLoraConfirm)for(const b of doc.querySelectorAll('button'))b.disabled=false;}};
   return {doc,main,state,modelSection,stylesSection,settingsSection,modelCard,modelLink,rows,negative:()=>negative,adapter:core.createPixaiSettingsAdapter(doc,io)};
 }
 
@@ -1924,9 +1959,9 @@ test('apply changes model version, removes extra LoRA, adds target, and sets zer
   const expected=configuration({id:'2',versionId:'22',name:'대상 모델'},[{id:'20',versionId:'201',name:'대상 LoRA',weight:0}]);
   const result=await f.adapter.apply(expected);
   assert.deepEqual(plain(result),expected);assert.equal(f.state.paidClicks,0);
-  assert.deepEqual(f.state.clicks,['전체 모델 보기','radio:2','이 모델 사용','제거','전체 LoRA 보기','checkbox:20','확인']);
+  assert.deepEqual(f.state.clicks,['전체 모델 보기','radio:2','이 모델 사용','제거','전체 LoRA 보기','checkbox:20','확인','전체 LoRA 보기','확인']);
   assert.equal(f.doc.querySelector('[role="dialog"]'),null);
-  assert.deepEqual(f.rows.querySelector('input').events,['input','change']);
+  assert.equal(f.rows.querySelector('input').value,'0');
 });
 
 test('English site controls apply exact model/LoRA settings and negatives without submitting',async()=>{
@@ -1934,7 +1969,7 @@ test('English site controls apply exact model/LoRA settings and negatives withou
   const expected=configuration({id:'2',versionId:'22',name:'대상 모델'},[{id:'20',versionId:'201',name:'대상 LoRA',weight:0}]);
   assert.deepEqual(plain(await f.adapter.apply(expected)),expected);
   await f.adapter.setNegative('lowres');f.adapter.verifyNegative('lowres');
-  assert.deepEqual(f.state.clicks,['Model','See All Models','radio:2','Use this model','Remove','See All LoRAs','checkbox:20','Confirm selection','Advanced']);
+  assert.deepEqual(f.state.clicks,['Model','See All Models','radio:2','Use this model','Remove','See All LoRAs','checkbox:20','Confirm selection','See All LoRAs','Confirm selection','Advanced']);
   assert.equal(f.negative().value,'lowres');assert.equal(f.state.paidClicks,0);
 });
 
@@ -1947,7 +1982,7 @@ test('legacy English Confirm label still applies the exact LoRA without generati
   const f=fixture({english:true,loraConfirmLabel:'Confirm'});
   const expected=configuration(undefined,[{id:'20',versionId:'201',name:'대상 LoRA',weight:0.5}]);
   assert.deepEqual(plain(await f.adapter.apply(expected)),expected);
-  assert.deepEqual(f.state.clicks,['See All LoRAs','checkbox:20','Confirm']);
+  assert.deepEqual(f.state.clicks,['See All LoRAs','checkbox:20','Confirm','See All LoRAs','Confirm']);
   assert.equal(f.state.paidClicks,0);
 });
 
@@ -1956,6 +1991,34 @@ test('ambiguous English LoRA confirmation controls stop and close the dialog wit
   await assert.rejects(f.adapter.apply(configuration(undefined,[{id:'20',versionId:'201',name:'대상 LoRA',weight:0.5}])),/LoRA 확인 버튼/);
   assert.equal(f.state.paidClicks,0);assert.equal(f.state.loras.length,0);
   assert.equal(f.doc.querySelector('[role="dialog"]'),null);
+});
+test('LoRA application waits for enabled confirmation and commits focused values across selector rerender',async()=>{
+  const f=fixture({delayLoraConfirm:true,commitOnBlur:true,loras:[{id:'20',versionId:'201',name:'A',weight:0.7},{id:'30',versionId:'301',name:'B',weight:0.7}]});
+  const expected=configuration(undefined,[{id:'20',versionId:'201',name:'A',weight:1.2},{id:'30',versionId:'301',name:'B',weight:0.1}]);
+  assert.deepEqual(plain(await f.adapter.apply(expected)),expected);assert.deepEqual(f.state.loras.map(x=>x.weight),[1.2,0.1]);assert.equal(f.state.paidClicks,0);
+});
+test('lost weight commit fails after selector round trip instead of accepting transient input values',async()=>{
+  const f=fixture({dropWeightCommit:true});await assert.rejects(f.adapter.apply(configuration(undefined,[{id:'20',versionId:'201',name:'대상 LoRA',weight:0.2}])),/LoRA|수치|설정/);assert.equal(f.state.paidClicks,0);
+});
+
+test('LoRA lookup switches inherited My LoRAs to Market and selects the exact public ID',async()=>{
+  const f=fixture({loraTabs:true,loras:[{id:'20',versionId:'201',name:'Public style',weight:0.7},{id:'21',versionId:'211',name:'Public style',weight:0.7,scope:'mine'}]});
+  await f.adapter.apply(configuration(undefined,[{id:'20',versionId:'201',name:'Public style',weight:1.2}]));
+  assert.deepEqual(f.state.loras.map(x=>x.id),['20']);assert.equal(f.state.loras[0].weight,1.2);assert.ok(f.state.clicks.includes('마켓'));assert.equal(f.state.paidClicks,0);
+});
+
+test('English LoRA lookup searches My LoRAs after Market for an owned private card',async()=>{
+  const f=fixture({english:true,loraTabs:true,initialLoraTab:'market',loras:[{id:'20',versionId:'201',name:'Private face',weight:0.7,scope:'mine'}]});
+  await f.adapter.apply(configuration(undefined,[{id:'20',versionId:'201',name:'Private face',weight:0.3}]));
+  assert.ok(f.state.clicks.includes('My LoRAs'));assert.equal(f.state.loras[0].weight,0.3);assert.equal(f.state.paidClicks,0);
+});
+
+test('LoRA search does not accept a same-name different ID or ambiguous search tabs',async()=>{
+  for(const duplicateSearchTab of [false,true]){
+    const f=fixture({loraTabs:true,duplicateSearchTab,loras:[{id:'21',versionId:'211',name:'Missing style',weight:0.7}]});
+    await assert.rejects(f.adapter.apply(configuration(undefined,[{id:'20',versionId:'201',name:'Missing style',weight:0.3}])),/찾지 못|하나로/);
+    assert.equal(f.state.loras.length,0);assert.equal(f.state.paidClicks,0);assert.equal(f.doc.querySelector('[role="dialog"]'),null);
+  }
 });
 test('exact-version selection failure stops after settings changes without submission',async()=>{
   const f=fixture({models:[{id:'2',versionId:'22',defaultVersion:'21',name:'대상 모델'}]});
@@ -2039,7 +2102,7 @@ function startFixture(options = {}) {
     loadStored:() => copy(stored),saveStored:value => {stored=copy(value);},
     baseline:copy(baseline),buildApiPayload:sandbox.module.exports.buildApiPayload};
   vm.runInNewContext(`
-    let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false,oneJobRun=false;
+    let running=false,starting=false,settingsBusy=false,choosingFolder=false,stopRequested=false,oneJobRun=false,executionMode=options.executionMode||'official-api';
     let initialModel=null,runImageCount=null,baselineSettings=null,baselineNegative=null,message='';
     const apiKey={get:()=> 'fixture-key'},apiOptions={modelVersionId:''},crypto={getRandomValues:array=>array.fill(42)};
     const currentApiOptions=()=>apiOptions;
@@ -2288,7 +2351,7 @@ function settingsWrapper(storageValue) {
   const begin=mainSource.indexOf('  async function settingsAction(');
   const end=mainSource.indexOf('  async function getTask(',begin);
   assert.ok(begin>=0&&end>begin,'settingsAction wrapper not found');
-  const ctx={navigator:{locks:{request:async(_name,_options,run)=>run({})}},localStorage:{getItem:()=>storageValue,setItem(){}},recover:core.recover};
+  const ctx={navigator:{locks:{request:async(_name,_options,run)=>run({})}},dataStorage:{getItem:()=>storageValue,setItem(){}},recover:core.recover};
   vm.runInNewContext(`let running=false,starting=false,settingsBusy=false,stopRequested=false,jobs=[];const KEY='test-queue',LOCK='test-lock';function render(){}\n${mainSource.slice(begin,end)}\nthis.run=settingsAction;`,ctx);
   return ctx.run;
 }
@@ -2313,7 +2376,7 @@ function uiButton(action) {
   assert.ok(begin>=0&&end>begin,'runtime button factory not found');
   const doc=new Element('document'),panel=new Element('aside'),status=new Element('div',{'data-message':''}),toast=new Element('div',{'data-toast':''});toast.hidden=true;doc.append(panel);panel.append(status,toast);
   status.getBoundingClientRect=()=>({top:-260,bottom:-210,left:0,right:300});
-  const ctx={KEY:'fixture-queue',readGroupView:()=>({}),localStorage:{getItem:()=>null},bindFolderActivation:core.bindFolderActivation,panel,node:(tag,text,attrs)=>new Element(tag,attrs,text),setTimeout:()=>0,clearTimeout(){}};
+  const ctx={KEY:'fixture-queue',readGroupView:()=>({}),dataStorage:{getItem:()=>null},bindFolderActivation:core.bindFolderActivation,panel,node:(tag,text,attrs)=>new Element(tag,attrs,text),setTimeout:()=>0,clearTimeout(){}};
   vm.runInNewContext(`let message='';function render(){panel.querySelector('[data-message]').textContent=message;const feedback=panel.querySelector('[data-action-message]');if(feedback)feedback.textContent=message;}\n${mainSource.slice(begin,end)}\nthis.make=button;`,ctx);
   const button=ctx.make('사이트의 현재 설정 읽기',action);
   panel.append(button);

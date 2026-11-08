@@ -6,6 +6,68 @@ const path=require('node:path');
 const core=require(path.join(__dirname,'pixai-web-queue.user.js'));
 const copy=value=>JSON.parse(JSON.stringify(value));
 
+test('library sync guard detects unsaved common, preset, character, chunk, folder and parity editors',async t=>{
+  const f=fixture(t);assert.equal(f.ui.hasDirty(),false);
+  f.field('공통 프롬프트').value='unsaved common';assert.equal(f.ui.hasDirty(),true);await f.press('공통문 저장');assert.equal(f.ui.hasDirty(),false);
+  await f.select('저장한 설정 프리셋','p1');assert.equal(f.ui.hasDirty(),false);f.field('프리셋 이름').value='Edited';assert.equal(f.ui.hasDirty(),true);await f.press('프리셋 저장');assert.equal(f.ui.hasDirty(),false);
+  await f.select('저장한 캐릭터','c1');assert.equal(f.ui.hasDirty(),false);f.field('캐릭터 프롬프트').value='edited character';assert.equal(f.ui.hasDirty(),true);await f.press('캐릭터 저장');assert.equal(f.ui.hasDirty(),false);
+  await f.select('저장한 청크','s1');f.field('청크 프롬프트').value='edited chunk';assert.equal(f.ui.hasDirty(),true);await f.press('청크 저장');assert.equal(f.ui.hasDirty(),false);
+  f.field('청크 폴더 이름').value='Pending folder';assert.equal(f.ui.hasDirty(),true);f.field('청크 폴더 이름').value='';assert.equal(f.ui.hasDirty(),false);
+  f.field('세트 포지').value='unsaved set';assert.equal(f.ui.hasDirty(),true);f.field('세트 포지').value='';assert.equal(f.ui.hasDirty(),false);
+  await f.select('저장한 설정 프리셋','p1');await f.press('LoRA 추가');assert.equal(f.ui.hasDirty(),true);
+});
+
+test('sync refresh updates clean saved editors and preserves compose choices, local history, and image settings',async t=>{
+  const f=fixture(t);await f.choose('표정');await f.select('조합 이미지 비율','5:3');await f.select('저장한 청크','s1');
+  const draft=copy(f.preferences.draft),next=f.library();next.common.prompt='synced common';next.scenes[0].prompt='synced chunk';f.setLibrary(next);f.ui.refreshSynced();
+  assert.equal(f.field('공통 프롬프트').value,'synced common');assert.equal(f.field('청크 프롬프트').value,'synced chunk');assert.deepEqual(f.preferences.draft,draft);assert.equal(f.ui.hasDirty(),false);assert.equal(f.jobs.length,0);
+});
+
+for(const [label,folderKey,itemKey,itemId] of [['캐릭터','characterFolders','characters','c1'],['청크','chunkFolders','scenes','s1']]) {
+  for(const operation of ['rename','delete'])test('sync '+label+' selected folder '+operation+' refreshes clean draft and remains safe to save',async t=>{
+    const initial=seed();initial[folderKey]=[{id:'selected-folder',name:'Before'}];initial[itemKey][0].folderId='selected-folder';
+    const f=fixture(t,initial);await f.select('저장한 '+label,itemId);await f.select('관리할 '+label+' 폴더','selected-folder');assert.equal(f.ui.hasDirty(),false);
+    const incoming=f.library();if(operation==='rename')incoming[folderKey][0].name='From app';else {incoming[folderKey]=[];delete incoming[itemKey][0].folderId;}
+    let sent=false;const calls=[];
+    const client=core.createLibrarySyncClient({storage:{get:()=>({token:'synthetic-'.repeat(4),automatic:false})},read:f.library,
+      assertReady:()=>{if(f.ui.hasDirty())throw Error('unsaved folder draft');},
+      request:async path=>{calls.push(path);if(path==='exchange'&&!sent){sent=true;return {state:'apply',transactionId:'folder-update',library:core.projectSyncLibrary(incoming),expectedScriptHash:await core.syncLibraryHash(core.projectSyncLibrary(f.library()))};}return {state:'idle'};},
+      save:async(expected,next)=>{assert.equal(f.ui.hasDirty(),false);assert.deepEqual(f.library(),expected);f.setLibrary(next);f.ui.refreshSynced();},setTimeout:()=>1,clearTimeout:()=>{}});
+    client.start();t.after(()=>client.stop());await client.sync();
+    assert.equal(f.field('관리할 '+label+' 폴더').value,operation==='rename'?'selected-folder':'');
+    assert.equal(f.field(label+' 폴더 이름').value,operation==='rename'?'From app':'');assert.equal(f.ui.hasDirty(),false);
+    await client.sync();assert.deepEqual(calls,['exchange','ack','exchange']);
+    const saved=f.library();await f.press(label==='캐릭터'?'캐릭터 폴더 저장':'폴더 저장');assert.deepEqual(f.library(),saved);
+    if(operation==='delete')assert.equal(f.saves.length,0,'blank deleted folder must not be recreated');
+    assert.equal(f.ui.hasDirty(),false);assert.equal(f.jobs.length,0);
+  });
+  test('sync preserves real '+label+' folder draft entered while inbound request is pending',async t=>{
+    const initial=seed();initial[folderKey]=[{id:'selected-folder',name:'Before'}];const f=fixture(t,initial);await f.select('관리할 '+label+' 폴더','selected-folder');
+    const before=f.library(),incoming=f.library();incoming[folderKey][0].name='From app';let saves=0;
+    const client=core.createLibrarySyncClient({storage:{get:()=>({token:'synthetic-'.repeat(4),automatic:false})},read:f.library,
+      assertReady:()=>{if(f.ui.hasDirty())throw Error('unsaved folder draft');},
+      request:async()=>{f.field(label+' 폴더 이름').value='My unsaved rename';return {state:'apply',transactionId:'folder-update',library:core.projectSyncLibrary(incoming),expectedScriptHash:await core.syncLibraryHash(core.projectSyncLibrary(before))};},
+      save:async()=>{saves++;},setTimeout:()=>1,clearTimeout:()=>{}});
+    client.start();t.after(()=>client.stop());await assert.rejects(client.sync(),/unsaved folder draft/);f.ui.refresh();
+    assert.equal(f.field(label+' 폴더 이름').value,'My unsaved rename');assert.equal(f.ui.hasDirty(),true);assert.deepEqual(f.library(),before);assert.equal(saves,0);
+  });
+}
+
+test('sync panel clears pairing code before awaiting, renders conflict text safely, and preserves choices during polling',async()=>{
+  const parent=new Element('div'),actions=new Map(),calls=[];let state={supported:true,linked:false,automatic:false,busy:false,exchange:{state:'idle'},message:'연결 안 됨'},busy=false;
+  const node=(tag,text,attrs={})=>{const element=new Element(tag);if(text!=null)element.textContent=text;for(const [key,value] of Object.entries(attrs))element.setAttribute(key,value);return element;};
+  const button=(label,run)=>{const element=node('button',label);actions.set(label,run);return element;};
+  const client={state:()=>state,pair:async value=>{assert.equal(parent.querySelector('input').value,'');calls.push({pair:value});},sync(){},disconnect(){},setAutomatic(){},approve:async(id,choices)=>calls.push({id,choices:copy(choices)}),cancel:async id=>calls.push({cancel:id})};
+  const panel=core.mountLibrarySyncPanel(parent,{node,button,client,isBusy:()=>busy});
+  parent.querySelector('input').value='one-time-secret';await actions.get('앱 연결')();assert.deepEqual(calls[0],{pair:'one-time-secret'});assert(!parent.textContent.includes('one-time-secret'));
+  const proposal={id:'p',initial:true,appCount:2,scriptCount:2,mergedCount:2,library:core.projectSyncLibrary(seed()),conflicts:[{key:'common',label:'공통문',app:'</pre><img src=x>',script:'different'}]};
+  state={...state,linked:true,exchange:{state:'preview',proposal}};panel.render(state);
+  assert.match(parent.textContent,/충돌 선택 후 확정/);assert.match(parent.textContent,/<img src=x>/);assert.equal(parent.querySelectorAll('img').length,0);assert.throws(()=>actions.get('미리보기 적용')(),/충돌 항목/);
+  const select=parent.querySelector('select');select.value='app';await select.emit('change');state={...state,busy:true};panel.render(state);assert.equal(select.disabled,true);state={...state,busy:false};panel.render(state);assert.equal(select.value,'app');assert.equal(select.disabled,false);
+  await actions.get('미리보기 적용')();assert.deepEqual(calls.at(-1),{id:'p',choices:{common:'app'}});
+  busy=true;panel.render(state);assert.equal(parent.querySelector('select').disabled,true);
+});
+
 test('visible compose image controls preserve different reservation choices without changing earlier recipes',async t=>{
   const f=fixture(t);await f.choose('표정');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');
   await f.press('이 조합 예약 추가');const first=copy(f.library().reservations[0]);
@@ -127,6 +189,39 @@ test('frozen reservations retain prompts and model evidence after library edits 
   assert.deepEqual(f.jobs[0].composition.common,snapshot.common);assert.deepEqual(f.jobs[0].composition.preset,snapshot.preset);assert.deepEqual(f.jobs[0].composition.character,snapshot.character);assert.deepEqual(f.jobs[0].composition.chunks,snapshot.chunks);
 });
 
+for(const count of [10,15,16])test(`compose and studio reserve ${count} combined LoRAs with chosen chunk order and immutable snapshots`,async t=>{
+  const initial=seed(),make=(id)=>({id:String(id),versionId:String(id+1000),name:'Synthetic LoRA '+id,weight:.5,triggerWords:'trigger-'+id});
+  initial.presets[0].loras=Array.from({length:9},(_,index)=>make(1000+index));initial.characters[0].loras=Array.from({length:count-9},(_,index)=>make(1100+index));initial.characters[0].defaultPresetId='p1';
+  initial.sceneCards=[core.makeSceneCard(initial,{id:'card',name:'Reversed scene',sceneIds:['s2','s1']})];
+  const f=fixture(t,initial);await f.choose('표정');await f.choose('행동');assert.equal(f.button('이 조합 예약 추가').disabled,false);
+  await f.press('조합 행동 위로');await f.press('이 조합 예약 추가');
+  for(const name of ['일괄 행 선택: Alice','일괄 씬 선택: Reversed scene']){const choice=f.field(name);choice.checked=true;await choice.emit('change');}
+  await f.press('선택 조합 전부 예약');const saved=f.library().reservations;assert.equal(saved.length,2,f.messages.join(' / '));
+  for(const entry of saved){assert.deepEqual(entry.sceneIds,['s2','s1']);assert.deepEqual(entry.snapshot.chunks.map(item=>item.id),['s2','s1']);assert.equal(entry.snapshot.preset.loras.length,count);assert.equal(Object.hasOwn(entry.snapshot.character,'loras'),false);}
+  const originalJobs=core.expandPresetReservations(f.library()).map(job=>({prompt:job.prompt,configuration:job.configuration}));
+  const edited=f.library();edited.presets[0].loras[0].weight=.1;edited.characters[0].loras[0].triggerWords='changed-character-trigger';edited.scenes[0].prompt='changed-live-chunk';f.setLibrary(edited);f.ui.refresh();
+  assert.deepEqual(f.library().reservations,saved);await f.press('예약 전부를 대기열에 등록');assert.deepEqual(f.jobs.map(job=>({prompt:job.prompt,configuration:job.configuration})),originalJobs);
+});
+
+test('LoRA conflicts block reservation but keep chunk arrows, drag, removal and draft persistence usable with a visible notification',async t=>{
+  const initial=seed();initial.characters[0].loras=[{...initial.presets[0].loras[0],weight:.2}];const f=fixture(t,initial);
+  await f.choose('표정');await f.choose('행동');assert.equal(f.button('이 조합 예약 추가').disabled,true);assert.match(f.preview(),/LoRA.*다릅니다/);assert(f.messages.some(message=>/LoRA.*다릅니다/.test(message)));
+  const order=()=>f.preferences.draft.sceneIds,row=id=>f.ui.root.querySelectorAll('[data-recipe-chunk]').find(item=>item.dataset.recipeChunk===id);
+  assert.deepEqual(order(),['s1','s2']);await f.press('조합 행동 위로');assert.deepEqual(order(),['s2','s1']);await f.press('조합 행동 아래로');assert.deepEqual(order(),['s1','s2']);
+  const data=transfer();await f.field('조합 청크 이동: 행동').emit('dragstart',{dataTransfer:data});await row('s1').emit('drop',{dataTransfer:data,clientY:104});assert.deepEqual(order(),['s2','s1']);
+  document.elementFromPoint=()=>({closest:()=>row('s1')});const handle=f.field('조합 청크 이동: 행동'),pointer={button:0,isPrimary:true,pointerId:9,clientX:10,clientY:100};
+  await handle.emit('pointerdown',pointer);await handle.emit('pointermove',{...pointer,clientY:148});await handle.emit('pointerup',{...pointer,clientY:148});assert.deepEqual(order(),['s1','s2']);
+  await f.press('조합에서 제외: 행동');assert.deepEqual(order(),['s1']);assert.equal(f.field('청크 선택: 행동').checked,false);assert.equal(f.button('이 조합 예약 추가').disabled,true);await f.press('이 조합 예약 추가');assert.equal(f.library().reservations.length,0);assert.equal(f.jobs.length,0);
+  const reopened=fixture(t,f.library(),f.preferences);assert.deepEqual(reopened.preferences.draft.sceneIds,['s1']);assert.equal(reopened.field('청크 선택: 표정').checked,true);assert(reopened.ui.root.querySelectorAll('[data-recipe-chunk]').some(item=>item.dataset.recipeChunk==='s1'));
+});
+
+test('a missing common-text link reports the error without erasing selected chunk order or blocking its edits',async t=>{
+  const initial=seed();initial.presets[0].commonPresetId='missing-common';const f=fixture(t,initial);await f.choose('표정');await f.choose('행동');
+  assert.equal(f.button('이 조합 예약 추가').disabled,true);assert.match(f.preview(),/공통문/);assert(f.messages.some(message=>/공통문/.test(message)));
+  await f.press('조합 행동 위로');assert.deepEqual(f.preferences.draft.sceneIds,['s2','s1']);await f.press('조합에서 제외: 표정');assert.deepEqual(f.preferences.draft.sceneIds,['s2']);
+  assert(f.ui.root.querySelectorAll('[data-recipe-chunk]').some(item=>item.dataset.recipeChunk==='s2'));assert.equal(f.library().reservations.length,0);
+});
+
 test('manual combination order updates numbering and previews without altering library order or old reservations',async t=>{
   const f=fixture(t);await f.choose('표정');await f.choose('행동');await f.press('이 조합 예약 추가');const old=f.library().reservations[0];
   await f.press('조합 행동 위로');assert.match(f.preview(),/waving, smiling/);assert.equal(f.ui.root.querySelectorAll('[data-selection-id]').find(item=>item.dataset.selectionId==='s2').textContent,'1');
@@ -194,7 +289,7 @@ function seed() {
     characters:[{id:'c1',name:'Alice',prompt:'character tags',negativePrompt:'character bad'}],
     scenes:[{id:'s1',name:'표정',prompt:'smiling',negativePrompt:'sad'},{id:'s2',name:'행동',prompt:'waving',negativePrompt:'standing still'}],reservations:[]};
 }
-function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOptions(),draft:null}) {
+function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOptions(),draft:null},persistence=null) {
   let library=core.normalizePresetLibrary(copy(initial)),captured=copy({model:library.presets[0].model,loras:library.presets[0].loras});
   let loadResult,saveFailure,imageSaveFailure,busy=false;
   const messages=[],jobs=[],saves=[],composeGroupSaves=[];let sequence=0;
@@ -202,12 +297,12 @@ function fixture(t,initial=seed(),preferences={imageOptions:core.normalizeApiOpt
   globalThis.document={createElement:tag=>new Element(tag),createElementNS:(_namespace,tag)=>new Element(tag)};
   t.after(()=>{if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument;});
   const ui=core.mountPresetEditor(parent,{
-    load:()=>copy(loadResult===undefined?library:loadResult),save:value=>{if(saveFailure)throw new Error(saveFailure);library=core.normalizePresetLibrary(copy(value));saves.push(copy(library));},
+    load:()=>copy(loadResult===undefined?(persistence?persistence.load():library):loadResult),save:async(value,expected)=>{if(saveFailure)throw new Error(saveFailure);if(persistence)await persistence.save(value,expected);library=core.normalizePresetLibrary(copy(value));saves.push(copy(library));},
     isBusy:()=>busy,getImageOptions:()=>preferences.imageOptions,getBatchSize:()=>preferences.batchSize || 4,
     saveImageOptions:value=>{if(imageSaveFailure)throw new Error(imageSaveFailure);const {batchSize,...images}=value;preferences.imageOptions=core.normalizeApiOptions(images);preferences.batchSize=batchSize;},
     loadDraft:()=>copy(preferences.draft),saveDraft:value=>{preferences.draft=copy(value);},loadStudioDraft:()=>copy(preferences.studio??null),saveStudioDraft:value=>{if(preferences.studioFailure)throw Error(preferences.studioFailure);preferences.studio=copy(value);},
     loadComposeGroups:()=>{if(preferences.composeGroupReadFailure)throw Error(preferences.composeGroupReadFailure);return copy(preferences.composeGroups??null);},saveComposeGroups:value=>{if(preferences.composeGroupSaveFailure)throw Error(preferences.composeGroupSaveFailure);preferences.composeGroups=copy(value);composeGroupSaves.push(copy(value));},
-    captureSettings:async()=>copy(captured),applySettings:async()=>{},notify:message=>messages.push(message),
+    captureSettings:preferences.captureSettings || (async()=>copy(captured)),applySettings:async()=>{},notify:message=>messages.push(message),
     enqueue:async value=>{jobs.push(...core.expandPresetReservations(value,{idFactory:()=>`job-${++sequence}`,maxCredits:7800}));},
     button:(text,action)=>{const element=new Element('button');element.textContent=text;element.press=async()=>{if(element.disabled)return;try{await action();}catch(error){messages.push(error.message);}};return element;}
   });
@@ -322,7 +417,8 @@ test('character LoRA editor saves an attached model, previews its source, and fr
   await f.press('캐릭터 저장');assert.equal(count(),'캐릭터 전용 LoRA · 1개');
   assert.deepEqual(f.library().characters[0].loras,[{id:'302',versionId:'402',name:'Alice 얼굴',weight:0.6,triggerWords:'alice_trigger'}]);
   await f.select('예약 프리셋','p1');await f.select('예약 캐릭터','c1');
-  assert.match(f.field('최종 적용 LoRA').textContent,/2\/5.*프리셋.*Alice 얼굴.*캐릭터/);
+  assert.match(f.field('최종 적용 LoRA').textContent,/최종 LoRA 2개.*프리셋.*Alice 얼굴.*캐릭터/);
+  assert.equal(f.field('최종 적용 LoRA').tagName.toLowerCase(),'details');assert.equal(f.field('최종 적용 LoRA').querySelector('summary').textContent,'최종 LoRA 2개');
   assert.match(f.preview(),/alice_trigger/);
   await f.press('이 조합 예약 추가');
   const first=f.library().reservations[0];
@@ -607,6 +703,30 @@ test('capture fills blank triggers automatically, preserves manual text, and rep
   assert.equal(f.field('LoRA 가중치').value,'0.8');assert.match(f.messages.at(-1),/트리거 자동 읽기 실패: LoRA/);
 });
 
+test('the capture button uses the connected official API, falls back to public pages only without a key, and keeps manual triggers on denial',async t=>{
+  const source=require('node:fs').readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8');
+  const line=source.split('\n').find(line=>line.trim().startsWith('captureSettings:()=>settingsAction('));assert.ok(line);
+  const config={model:seed().presets[0].model,loras:[{id:'301',versionId:'401',name:'Own LoRA',weight:0.8}]};
+  let connected=false,denied=false,publicCalls=0,apiCalls=0;
+  const captureSettings=require('node:vm').runInNewContext('({'+line.trim()+'}).captureSettings',{
+    settingsAction:(run,options)=>{assert.equal(options.readOnly,true);return run();},
+    settings:{capture:async()=>copy(config)},apiKey:{has:()=>connected},
+    capturePresetSettings:core.capturePresetSettings,readOfficialLoraTriggerWords:core.readOfficialLoraTriggerWords,
+    readLoraTriggerWords:async()=>{publicCalls++;return 'public trigger';},
+    api:{modelVersion:async id=>{apiCalls++;assert.equal(id,'401');if(denied)throw Object.assign(new Error('denied'),{status:404});return {id,modelId:'301',extra:{triggerWords:'private trigger'}};}}
+  });
+  const f=fixture(t,seed(),{imageOptions:core.normalizeApiOptions(),draft:null,captureSettings});
+  await f.select('저장한 설정 프리셋','p1');f.field('LoRA 트리거 키워드').value='';
+  await f.press('사이트의 현재 설정 읽기');assert.equal(f.field('LoRA 트리거 키워드').value,'public trigger');assert.equal(publicCalls,1);assert.equal(apiCalls,0);
+  connected=true;f.field('LoRA 트리거 키워드').value='';
+  await f.press('사이트의 현재 설정 읽기');assert.equal(f.field('LoRA 트리거 키워드').value,'private trigger');assert.equal(publicCalls,1);assert.equal(apiCalls,1);
+  assert.equal(f.library().presets[0].loras[0].triggerWords,'trigger one, trigger two');
+  await f.press('프리셋 저장');assert.equal(f.library().presets[0].loras[0].triggerWords,'private trigger');
+  f.field('LoRA 트리거 키워드').value='manual correction';denied=true;
+  await f.press('사이트의 현재 설정 읽기');assert.equal(f.field('LoRA 트리거 키워드').value,'manual correction');assert.equal(f.field('LoRA 가중치').value,'0.8');
+  assert.match(f.messages.at(-1),/트리거 자동 읽기 실패: Own LoRA/);assert.equal(publicCalls,1);assert.equal(apiCalls,2);assert.equal(f.jobs.length,0);
+});
+
 test('checkbox reservations compose common, LoRA triggers, character and chunks in selection order',async t=>{
   const f=fixture(t);await f.choose('행동');await f.choose('표정');
   assert.match(f.preview(),/quality, trigger one, trigger two, character tags, waving, smiling/);
@@ -848,4 +968,27 @@ test('trigger native and pointer drag target fixed materials, reject foreign or 
   data=transfer();await f.field('LoRA 트리거 이동').emit('dragstart',{dataTransfer:data});await row('common').emit('drop',{dataTransfer:data,clientY:104});assert.match(f.preview(),/trigger one, trigger two, quality, character tags, smiling/);assert.equal(f.button('LoRA 트리거 위로').disabled,true);
   document.elementFromPoint=()=>({closest:()=>row('character')});const event={button:0,isPrimary:true,pointerId:1,clientX:10,clientY:180};let handle=f.field('LoRA 트리거 이동');await handle.emit('pointerdown',event);await handle.emit('pointermove',{...event,clientY:148});await handle.emit('pointercancel',event);await handle.emit('pointerup',{...event,clientY:148});assert.match(f.preview(),/trigger one, trigger two, quality/);
   await handle.emit('pointerdown',event);await handle.emit('pointermove',{...event,clientY:148});await handle.emit('pointerup',{...event,clientY:148});assert.match(f.preview(),/quality, character tags, trigger one, trigger two, smiling/);assert.deepEqual(f.library(),before);assert.equal(f.jobs.length,0);
+});
+
+
+test('full site storage still saves common sets and presets through the actual runtime persistence and reloads them',async t=>{
+  const key='local.pixai-web-queue.presets.v1',initial=seed(),raw=core.encodeLocalPresetLibrary(initial);
+  const local=new Map([[key,raw],['pixai-site-data','x'.repeat(5*1024*1024-raw.length-key.length-15)]]),managed=new Map();
+  const size=entries=>[...entries].reduce((sum,[k,v])=>sum+k.length+v.length,0),limit=size(local);
+  const native={getItem:k=>local.get(k)??null,setItem(k,v){const next=new Map(local);next.set(k,String(v));if(size(next)>limit)throw Object.assign(Error('quota'),{name:'QuotaExceededError'});local.set(k,String(v));},removeItem:k=>local.delete(k)};
+  let fail=false;
+  const manager={get:(k,d)=>managed.get(k)??d,set(k,v){if(fail&&v.value?.includes('unsaved sentinel'))throw Error('manager save failed');managed.set(k,copy(v));},remove:k=>managed.delete(k)};
+  const storage=core.createUserscriptStorage(native,manager),load=()=>core.decodeLocalPresetLibrary(storage.getItem(key));
+  const source=require('node:fs').readFileSync(path.join(__dirname,'pixai-web-queue.user.js'),'utf8');
+  const actual=source.split('\n').find(line=>line.trimStart().startsWith('function saveLibrary(value,expected,validate)'));
+  assert.ok(actual);const save=new Function('dataStorage','LIBRARY_KEY','withLibraryLock','readLibrary','normalizePresetLibrary','encodeLocalPresetLibrary',actual+';return saveLibrary;')(storage,key,run=>Promise.resolve().then(run),load,core.normalizePresetLibrary,core.encodeLocalPresetLibrary);
+  const io={load,save},f=fixture(t,initial,undefined,io);
+  f.field('공통문 세트 이름').value='Quota test';f.field('세트 포지').value='new quality';await f.press('공통문 세트 저장');
+  assert.match(f.messages.at(-1),/공통문 세트를 저장/);assert.equal(load().commonPresets.find(v=>v.name==='Quota test').prompt,'new quality');
+  await f.select('저장한 설정 프리셋','p1');f.field('프리셋 이름').value='Saved preset';await f.press('프리셋 저장');
+  assert.equal(load().presets[0].name,'Saved preset');assert.deepEqual(load().characters,core.normalizePresetLibrary(initial).characters);
+  assert.equal(local.get('pixai-site-data').length,5*1024*1024-raw.length-key.length-15);assert.ok(size(local)<limit);assert.equal(storage.getItem(key+'.pre-0.10'),raw);
+  fail=true;f.field('세트 포지').value='unsaved sentinel';await f.press('공통문 세트 저장');
+  assert.match(f.messages.at(-1),/manager save failed/);assert.equal(f.field('세트 포지').value,'unsaved sentinel');assert.equal(load().commonPresets.find(v=>v.name==='Quota test').prompt,'new quality');
+  const freshStorage=core.createUserscriptStorage(native,manager);assert.deepEqual(core.decodeLocalPresetLibrary(freshStorage.getItem(key)),load());assert.equal(f.jobs.length,0);
 });

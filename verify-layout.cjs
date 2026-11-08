@@ -58,3 +58,12 @@ test('window keyboard resize remains usable when storage fails and does not shri
   const f=windowFixture(null,true);for(let index=0;index<15;index++)f.handle.fire('keydown',{key:'ArrowLeft'});
   assert.equal(f.panel.style.width,'560px');f.handle.fire('keydown',{key:'ArrowDown'});assert.equal(f.panel.style.height,'524px');assert.equal(f.writes.length,0);
 });
+test('studio schedule lists and compose sequence list keep their height inside flex columns (0.10.19 regression)',()=>{
+  const source=require('node:fs').readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8');
+  const rule=name=>{const match=source.match(new RegExp((name.startsWith('#')?'':'#local-pixai-queue ')+name.replace(/[.[\]]/g,'\\$&')+'\\{([^}]*)\\}'));assert(match,'missing rule '+name);return match[1];};
+  assert.match(rule('.pq-studio-selected'),/flex:none/);assert.match(rule('.pq-studio-schedule .pq-preview'),/flex:none/);
+  assert.match(rule('.pq-studio-material-panel>.pq-studio-list'),/flex:1 1 0;min-height:0;max-height:none;overflow:auto/);
+  assert.match(rule('.pq-studio-layout>.pq-studio-materials'),/overflow:hidden/);
+  assert.match(rule('.pq-studio-material-management .pq-studio-list'),/min-height:0;max-height:none;overflow:visible/);
+  assert.match(rule('.pq-sequence-list'),/min-height:200px/);
+});

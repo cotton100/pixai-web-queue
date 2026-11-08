@@ -9,7 +9,7 @@ const job=()=>({id:'job',title:'asset',prompt:'1girl, smile, hero',negativePromp
 test('image-imported seed and style synchronize visible fields and survive unrelated settings edits and backup',async()=>{
  const fs=require('node:fs'),vm=require('node:vm'),source=fs.readFileSync(require('node:path').join(__dirname,'pixai-web-queue.user.js'),'utf8'),begin=source.indexOf('      applyImageComposition:(result,expected)=>'),end=source.indexOf('\n',begin);assert(begin>=0&&end>begin);
  const library=core.normalizePresetLibrary({...core.makePresetLibrary(),presets:[{id:'p',name:'fixture',...config()}],characters:[{id:'c',name:'fixture',prompt:'',negativePrompt:''}]}),records=new Map(),control=value=>({value:String(value)});
- const context={...core,LIBRARY_KEY:'library',OPTIONS_KEY:'options',COMPOSE_DRAFT_KEY:'draft',savedOptions:core.normalizeSettingsOptions({maxCredits:null,filePrefix:'before',repeat:1,api:{seed:1,style:''}}),apiOptions:core.normalizeApiOptions({seed:1,style:''}),apiFields:{seed:control(1),style:control('')},embedMetadata:{checked:false},budget:control(''),title:control('before'),repeat:control(1),imageCount:control(4),maxInFlight:control(3),settingsAction:run=>run(),readLibrary:()=>library,localStorage:{getItem:key=>records.get(key)??null,setItem:(key,value)=>records.set(key,value),removeItem:key=>records.delete(key)}};
+ const context={...core,LIBRARY_KEY:'library',OPTIONS_KEY:'options',COMPOSE_DRAFT_KEY:'draft',savedOptions:core.normalizeSettingsOptions({maxCredits:null,filePrefix:'before',repeat:1,api:{seed:1,style:''}}),apiOptions:core.normalizeApiOptions({seed:1,style:''}),apiFields:{seed:control(1),style:control('')},embedMetadata:{checked:false},budget:control(''),title:control('before'),repeat:control(1),imageCount:control(4),maxInFlight:control(3),settingsAction:run=>run(),readLibrary:()=>library,dataStorage:{getItem:key=>records.get(key)??null,setItem:(key,value)=>records.set(key,value),removeItem:key=>records.delete(key)}};
  const readStart=source.indexOf('    function readApiFields()'),readEnd=source.indexOf('    let savedOptions=',readStart),fillStart=source.indexOf('    function fillOptions(value)'),fillEnd=source.indexOf('    function loadOptions()',fillStart);
  vm.runInNewContext(`${source.slice(readStart,readEnd)}\n${source.slice(fillStart,fillEnd)}\nconst io={${source.slice(begin,end).trim()}};this.apply=io.applyImageComposition;this.readCurrent=readOptions;`,context);
  await context.apply({library,recipe:{presetId:'p',characterId:'c',sceneIds:[],count:1,triggerPosition:1,imageOptions:{aspectRatio:'1:1',size:'1k',batchSize:4}},api:{seed:77,style:'chibi'}},library);assert.equal(context.apiFields.seed.value,'77');assert.equal(context.apiFields.style.value,'chibi');context.title.value='after';const edited=context.readCurrent(),backup=core.makeSettingsBackup(library,edited,{appVersion:'0.10.0',exportedAt:'2026-10-13T00:00:00.000Z'});assert.equal(edited.api.seed,77);assert.equal(edited.api.style,'chibi');assert.equal(edited.filePrefix,'after');assert.equal(backup.options.api.seed,77);assert.equal(backup.options.api.style,'chibi');
@@ -31,10 +31,28 @@ test('public v2 payload uses version IDs, frozen seed, four images and exact com
   assert.deepEqual(payload.loras,[{modelId:'201',weight:0.7,triggerWords:''}]);assert.deepEqual(payload.style,{type:'preset',key:'chibi'});
   assert.equal(payload.seed,42);assert.equal(payload.batchSize,4);assert.equal(payload.promptHelper,'disable');assert.deepEqual(j,before);
 });
-test('invalid LoRA API weights, missing version IDs and excess adapters stop without silent alteration',()=>{
+test('invalid LoRA API weights, missing version IDs and malformed lists stop without silent alteration',()=>{
   for (const weight of [-0.1,1.1,' ',null]) {const j=job();j.configuration.loras[0].weight=weight;assert.throws(()=>core.buildApiPayload(j,{},4,42),/0~1/);assert.equal(j.configuration.loras[0].weight,weight);}
   const j=job();delete j.configuration.loras[0].versionId;assert.throws(()=>core.buildApiPayload(j,{},1,42),/LoRA 버전/);
-  j.configuration.loras=Array.from({length:6},(_,i)=>({versionId:String(i+1),weight:1}));assert.throws(()=>core.buildApiPayload(j,{},1,42),/최대 5개/);
+  j.configuration.loras={length:16};assert.throws(()=>core.buildApiPayload(j,{},1,42),/목록 형식/);
+});
+
+test('a plan-specific LoRA rejection is explained without echoing server data or dropping adapters',async()=>{
+  const f=transport(()=>({status:403,responseText:JSON.stringify({code:'LORA_NUM_EXCEEDED',message:'fixture-secret private prompt',data:{limit:5}})}));
+  const j=job();j.configuration.loras=Array.from({length:10},(_,i)=>({versionId:String(300+i),weight:.5}));const before=copy(j),payload=core.buildApiPayload(j,{},1,42);
+  await assert.rejects(f.api.create(payload),error=>{assert.match(error.message,/가입 플랜.*허용 개수/);assert.equal(error.notSubmitted,true);assert(!error.message.includes('fixture-secret'));assert(!error.message.includes('private prompt'));return true;});
+  assert.deepEqual(j,before);assert.equal(payload.loras.length,10);assert.equal(f.calls.length,1);
+  assert.match(core.apiHttpError(403,'GET','{"code":"OTHER"}').message,/접근 권한/);
+});
+
+test('the server receives all selected adapters and its rejection stops the queue without another submission',async()=>{
+  for(const status of [400,403,422,500]){
+    const jobs=[job(),{...job(),id:'next'}];jobs[0].configuration.loras=Array.from({length:16},(_,i)=>({versionId:String(300+i),weight:.5}));const original=copy(jobs[0].configuration),nextBefore=copy(jobs[1]);
+    const f=transport(()=>({status,responseText:JSON.stringify({code:status===403?'LORA_NUM_EXCEEDED':'INVALID_ARGUMENT'})}));let waits=0;
+    const io={persist(){},prepare:async j=>({apiPayload:core.buildApiPayload(j,{},1,42),expected:1}),submit:j=>f.api.create(j.apiPayload),waitTask:async()=>{waits++;throw Error('unexpected wait');}};
+    await assert.rejects(core.runQueue(jobs,io,{limit:3}),error=>error.status===status);
+    assert.equal(f.calls.length,1);assert.equal(JSON.parse(f.calls[0].data).loras.length,16);assert.deepEqual(jobs[0].configuration,original);assert.deepEqual(jobs[1],nextBefore);assert.equal(waits,0);assert.equal(jobs[0].state,status===500?'unknown':'queued');assert.match(jobs[0].error,/공식 API 오류/);
+  }
 });
 test('explicit zero seed is preserved; non-Tsubaki mode can be omitted; unknown trigger uses documented defaults',()=>{
   const j=job();delete j.composition;delete j.configuration.loras[0].triggerWords;
@@ -123,6 +141,53 @@ test('official transport uses fixed REST routes, anonymous fetch and blocked red
 test('unauthenticated key access prevents network and 404 never proves valid authentication',async()=>{
   const f=transport(()=>({status:404,responseText:'{"token":"fixture-secret"}'}));f.vault.clear();await assert.rejects(f.api.task('900'),/키/);assert.equal(f.calls.length,0);
   f.vault.set('fixture-secret');await assert.rejects(f.api.task('900'),error=>error.status===404&&!error.message.includes('fixture-secret'));
+});
+
+test('official model-version metadata uses one fixed authenticated GET without cookies or request body',async()=>{
+  const response={id:'201',modelId:'20',extra:{triggerWords:'private character'}},f=transport(()=>({responseText:JSON.stringify(response)}));
+  assert.deepEqual(await f.api.modelVersion('201'),response);assert.equal(f.calls.length,1);
+  const d=f.calls[0];assert.equal(d.method,'GET');assert.equal(d.url,'https://api.pixai.art/v2/generation-model-version/201');
+  assert.equal(d.headers.Authorization,'Bearer fixture-secret');assert.equal(d.anonymous,true);assert.equal(d.fetch,true);assert.equal(d.redirect,'error');
+  assert.equal(d.cookie,undefined);assert.equal(d.data,undefined);assert.equal(d.responseType,'text');assert(!d.url.includes('fixture-secret'));
+});
+
+test('invalid model-version IDs and a missing API key cause no metadata request',async()=>{
+  const f=transport(()=>({responseText:'{}'}));
+  for(const id of ['',201,null,'201/../secret','201?token=fixture-secret','201#suffix','https://other.example/201']) {
+    await assert.rejects(Promise.resolve().then(()=>f.api.modelVersion(id)));
+  }
+  assert.equal(f.calls.length,0);f.vault.clear();await assert.rejects(f.api.modelVersion('201'),/키/);assert.equal(f.calls.length,0);
+});
+
+test('model-version metadata rejects redirects and malformed responses without exposing server secrets or retrying',async()=>{
+  for(const answer of [{finalUrl:'https://other.example/fixture-secret',responseText:'{}'},
+    {finalUrl:'https://api.pixai.art/v2/generation-model-version/202',responseText:'{}'},
+    ...['fixture-secret','null','[]','"fixture-secret"'].map(responseText=>({responseText})),'network']) {
+    const f=transport(()=>answer);
+    await assert.rejects(f.api.modelVersion('201'),error=>!error.message.includes('fixture-secret')&&!error.message.includes('SENSITIVE'));
+    assert.equal(f.calls.length,1);assert.equal(f.calls[0].method,'GET');
+  }
+});
+
+test('private model metadata access failures preserve HTTP status and never imply valid authentication or generate',async()=>{
+  for(const status of [401,403,404]) {
+    const f=transport(()=>({status,responseText:JSON.stringify({message:'fixture-secret private prompt',data:{token:'fixture-secret'}})}));
+    await assert.rejects(f.api.modelVersion('201'),error=>{
+      assert.equal(error.status,status);assert.equal(error.notSubmitted,false);
+      assert(!error.message.includes('fixture-secret'));assert(!error.message.includes('private prompt'));return true;
+    });
+    assert.equal(f.calls.length,1);assert.equal(f.calls[0].method,'GET');
+  }
+});
+
+test('model-version metadata timeout aborts only that GET and never retries',async()=>{
+  let deadline,details,aborts=0,cleared=0;
+  const api=core.createOfficialApiClient(d=>{details=d;return {abort(){aborts++;}};},()=> 'fixture-secret',{
+    set(fn,ms){deadline=fn;assert.equal(ms,30000);return 1;},clear(){cleared++;}
+  });
+  const pending=api.modelVersion('201');deadline();await assert.rejects(pending,/시간 초과/);
+  assert.equal(aborts,1);assert.equal(cleared,1);assert.equal(details.method,'GET');
+  details.onload({status:200,responseText:'{"id":"201","modelId":"20"}'});assert.equal(cleared,1);
 });
 test('lost or malformed POST response freezes unknown job; no automatic second paid request',async()=>{
   for (const answer of ['network',{status:201,responseText:'invalid'},{status:201,responseText:'{"id":900}'},{status:500,responseText:'fixture-secret'}]) {
@@ -220,6 +285,35 @@ test('officially observed image CDN is exact-host only and never receives authen
 test('CDN redirect to another origin stops saving even if both origins are otherwise permitted',async()=>{
   const f=transport(()=>({response:new Blob(['img']),finalUrl:'https://images.pixai.art/test.webp'}));
   await assert.rejects(f.api.image('https://d2doj8oszwtcqy.cloudfront.net/test.webp'),/서버 이동/);
+});
+test('both installers declare documented connect domains for actual image origins',()=>{
+  for(const file of ['pixai-web-queue.user.js','pixai-web-queue.dev.user.js']) {
+    const source=fs.readFileSync(require('node:path').join(__dirname,file),'utf8');
+    const header=source.slice(0,source.indexOf('// ==/UserScript=='));
+    const hosts=[...header.matchAll(/^\/\/ @connect\s+(\S+)$/gm)].map(match=>match[1]);
+    assert(!hosts.some(host=>host.includes('*')),'Use documented domain names; a domain includes subdomains');
+    for(const host of ['api.pixai.art','images-ng.pixai.art','images.pixai.art','d2doj8oszwtcqy.cloudfront.net'])
+      assert(hosts.some(allowed=>host===allowed||host.endsWith('.'+allowed)),`${file}: ${host}`);
+    assert(!hosts.some(host=>'attacker.example'.endsWith('.'+host)));
+  }
+});
+test('image network errors identify save recovery without exposing transport contents or accessing a key',async()=>{
+  const calls=[];let keyReads=0;
+  const api=core.createOfficialApiClient(details=>{calls.push(details);queueMicrotask(()=>details.onerror({error:'SENSITIVE'}));return {abort(){}};},()=>{keyReads++;throw Error('KEY');});
+  await assert.rejects(api.image('https://images-ng.pixai.art/images/orig/test'),error=>{
+    assert.match(error.message,/이미지 다운로드/);assert.match(error.message,/재생성 없이 저장만/);
+    assert(!/SENSITIVE|공식 API/.test(error.message));return true;
+  });
+  assert.equal(keyReads,0);assert.equal(calls.length,1);assert.equal(calls[0].headers,undefined);
+  assert.equal(calls[0].anonymous,true);assert.equal(calls[0].redirect,'error');
+});
+test('image HTTP failures preserve image-specific recovery guidance',async()=>{
+  const f=transport(()=>({status:403,responseText:'SENSITIVE'}));
+  await assert.rejects(f.api.image('https://images-ng.pixai.art/images/orig/test'),error=>{
+    assert.match(error.message,/이미지 다운로드 오류 \(403\)/);assert.match(error.message,/재생성 없이 저장만/);
+    assert(!/SENSITIVE|API 키/.test(error.message));return true;
+  });
+  assert.equal(f.calls.length,1);
 });
 test('deadline ignores late responses and never reports an unknown submission as successful',async()=>{
   let deadline,details,aborts=0;
