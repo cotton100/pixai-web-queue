@@ -12,6 +12,55 @@ const source=()=>copy(fixture.library);
 const options={maxCredits:null,filePrefix:'',repeat:1};
 const prompts=library=>core.expandPresetReservations(library).map(({prompt,negativePrompt})=>({prompt,negativePrompt}));
 
+function materialFolderLibrary(){
+ const library=core.makePresetLibrary();
+ library.presetFolders=[{id:'pf2',name:'Second'},{id:'pf1',name:'First'},{id:'pf-empty',name:'Empty'}];
+ library.commonPresetFolders=[{id:'cf',name:'Common group'}];
+ library.commonPresets=[{id:'cp',name:'Common set',prompt:'quality',negativePrompt:'bad quality',folderId:'cf'}];
+ library.presets=[{id:'p',name:'Preset',model:{id:'101',versionId:'201',name:'Model'},loras:[],commonPresetId:'cp',folderId:'pf2'}];
+ library.characters=[{id:'c',name:'Character',prompt:'character',negativePrompt:'bad character'}];
+ library.scenes=[{id:'s',name:'Chunk',prompt:'smile',negativePrompt:'sad'}];
+ library.reservations=[{id:'r',presetId:'p',characterId:'c',sceneIds:['s'],count:1}];
+ return library;
+}
+
+test('preset and common folder imports preserve references order local storage and frozen prompts',()=>{
+ const original=materialFolderLibrary(),normalized=core.normalizePresetLibrary(original),snapshot=core.snapshotCombination(original,original.reservations[0]);
+ assert.equal(snapshot.preset.folderId,undefined);assert.equal(snapshot.common.prompt,'quality');
+ assert.deepEqual(core.decodeLocalPresetLibrary(core.encodeLocalPresetLibrary(normalized)),normalized);
+ assert.equal(JSON.parse(core.encodeLocalPresetLibrary(normalized)).version,3);
+ assert.throws(()=>core.normalizePresetLibrary(JSON.parse(core.encodeLocalPresetLibrary(normalized))),/버전/);
+ const frozen=core.normalizePresetLibrary({...original,reservations:[{...original.reservations[0],snapshot:{...snapshot,preset:{...snapshot.preset,folderId:'deleted-live-folder'}}}]}).reservations[0].snapshot;assert.equal(frozen.preset.folderId,undefined);
+ const meta={appVersion:'0.10.22',exportedAt:'2026-11-08T00:00:00.000Z'},file=core.makeSettingsBackup(normalized,options,meta);
+ assert.deepEqual(core.parseSettingsBackup(JSON.stringify(file)).library,normalized);
+ for(const mutate of [v=>v.presets[0].folderId='missing',v=>v.commonPresets[0].folderId='missing',v=>v.presetFolders[0].apiKey='forbidden',v=>v.commonPresets[0].token='forbidden']){const bad=copy(original);mutate(bad);assert.throws(()=>core.makeSettingsBackup(bad,options,meta));}
+ const moved=copy(normalized);moved.reservations[0].snapshot=snapshot;moved.presetFolders.reverse();moved.presets[0].folderId='pf1';assert.deepEqual(prompts(moved),prompts(normalized));
+});
+
+test('selected preset folders include linked common folders and remap both on append',()=>{
+ const library=materialFolderLibrary(),meta={appVersion:'0.1.25',exportedAt:'2026-11-08T00:00:00.000Z'};
+ const file=core.makeTransferBackup(library,options,select('presets'),meta,{presets:['pf2','pf-empty']});
+ assert.deepEqual(file.backup.library.presetFolders.map(x=>x.id),['pf2','pf-empty']);
+ assert.deepEqual(file.backup.library.commonPresetFolders,library.commonPresetFolders);
+ const parsed=core.parseTransferBackup(JSON.stringify(file));
+ const appended=core.prepareBackupImport(core.makePresetLibrary(),parsed,parsed.selection,'append',ids()).library;
+ assert.equal(appended.presets[0].folderId,appended.presetFolders[0].id);
+ assert.equal(appended.presets[0].commonPresetId,appended.commonPresets[0].id);
+ assert.equal(appended.commonPresets[0].folderId,appended.commonPresetFolders[0].id);
+ assert.notEqual(appended.presetFolders[0].id,'pf2');assert.notEqual(appended.commonPresetFolders[0].id,'cf');
+ assert.equal(appended.presetFolders[1].name,'Empty');
+});
+
+test('scoped preset/common folder replacement retains other folders and pending reservation text',()=>{
+ const original=materialFolderLibrary(),changed=copy(original);changed.presets[0].name='Replacement';changed.commonPresets[0].prompt='new quality';
+ const meta={appVersion:'0.1.25',exportedAt:'2026-11-08T00:00:00.000Z'};
+ const file=core.makeTransferBackup(changed,options,select('presets','commonPresets'),meta,{presets:['pf2'],commonPresets:['cf']});
+ const replaced=core.prepareBackupImport(original,file,file.selection,'replace',ids()).library;
+ assert.deepEqual(replaced.presetFolders.map(x=>x.id),['pf2','pf1','pf-empty']);assert.equal(replaced.presets[0].name,'Replacement');assert.equal(replaced.commonPresets[0].prompt,'new quality');
+ assert.deepEqual(prompts(replaced),prompts(original));assert.equal(replaced.reservations[0].snapshot.preset.folderId,undefined);
+ const legacy=core.compatibleSettings(original,options,meta,'legacy');assert.equal(legacy.backup.library.presetFolders,undefined);assert.equal(legacy.backup.library.presets[0].folderId,undefined);assert(legacy.warnings.some(x=>x.includes('presetFolders')));
+});
+
 test('app fixture records public source identity and actual full/category/folder formats',()=>{
  assert.equal(fixture.provenance.head,'be258addbb29ad0aa171d627db4ac26add950b27');
  assert.match(fixture.provenance.fixtureKind,/public synthetic/);

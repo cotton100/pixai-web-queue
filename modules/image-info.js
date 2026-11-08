@@ -135,7 +135,7 @@ function importImageComposition(library,recipe,value,selected,options={}){
     let current={};
     if(!selected.prompt||!selected.negativePrompt){
       const chunks=recipe.sceneIds.map(key=>next.scenes.find(v=>v.id===key));if(chunks.some(v=>!v))throw Error('현재 조합의 청크 연결을 먼저 확인해 주세요.');
-      current=composePresetPrompts(resolvePresetCommon(next,oldPreset),oldCharacter||{},chunks,oldPreset||{loras:[]},recipe.triggerPosition);
+      current=composePresetPrompts(resolvePresetCommon(next,oldPreset),oldCharacter||{},chunks,oldPreset||{loras:[]},recipe.triggerPosition,{}, {materialOrder:recipe.materialOrder,sceneIds:recipe.sceneIds});
     }
     if(selected.prompt&&fields.prompt===undefined||selected.negativePrompt&&fields.negativePrompt===undefined)throw Error('선택한 문구가 파일에 없습니다.');
     const effective=!selected.model&&oldPreset?effectiveCharacterPreset(oldPreset,oldCharacter||{}):null;

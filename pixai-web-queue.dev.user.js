@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.10.21-dev.1
+// @version      0.10.22-dev.1
 // @license      GPL-3.0-only
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js
@@ -29,6 +29,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Same-PC library transport. No PixAI credentials, job submission, or page fetch.
 const SYNC_COLLECTIONS=Object.freeze(['commonPresets','presets','characters','characterFolders','chunkFolders','scenes','sceneFolders','sceneCards','casts','batchPlans']);
+const SYNC_FOLDER_COLLECTIONS=Object.freeze(['presetFolders','commonPresetFolders']);
 const LIBRARY_SYNC_URL='http://127.0.0.1:50321/v1/library-sync/';
 const LIBRARY_SYNC_KEY='local.pixai-web-queue.library-sync.v1';
 const LIBRARY_SYNC_MAX_BYTES=20*1024*1024;
@@ -45,11 +46,12 @@ function canonicalSync(value) {
     }
     const text=JSON.stringify(sorted(value,0));if(new TextEncoder().encode(text).byteLength>LIBRARY_SYNC_MAX_BYTES)throw Error('동기화 자료는 20MiB까지 처리할 수 있습니다.');return text;
 }
-function syncProjection(library) {return {version:1,common:library.common,...Object.fromEntries(SYNC_COLLECTIONS.map(key=>[key,library[key]||[]]))};}
+function syncProjection(library) {return {version:1,common:library.common,...Object.fromEntries(SYNC_COLLECTIONS.map(key=>[key,library[key]||[]])),...Object.fromEntries(SYNC_FOLDER_COLLECTIONS.filter(key=>library[key]?.length).map(key=>[key,library[key]]))};}
 function parseSyncLibrary(value) {
     canonicalSync(value);
-    settingsBackupKeys(value,'동기화 라이브러리',['version','common',...SYNC_COLLECTIONS]);
+    settingsBackupKeys(value,'동기화 라이브러리',['version','common',...SYNC_COLLECTIONS],['version','common',...SYNC_COLLECTIONS,...SYNC_FOLDER_COLLECTIONS]);
     for(const key of SYNC_COLLECTIONS)if(!Array.isArray(value[key]))throw Error('동기화 목록 형식이 맞지 않습니다.');
+    for(const key of SYNC_FOLDER_COLLECTIONS)if(Object.hasOwn(value,key)&&!Array.isArray(value[key]))throw Error('동기화 폴더 목록 형식이 맞지 않습니다.');
     // Keep the existing schema's frozen-copy and saved-plan semantics. The app
     // merger rejects newly broken references; an already missing live source is preserved.
     return syncProjection(settingsBackupLibrary({...value,reservations:[]}));
@@ -57,6 +59,7 @@ function parseSyncLibrary(value) {
 function projectSyncLibrary(library) {return parseSyncLibrary(syncProjection(normalizePresetLibrary(library)));}
 function applySyncLibrary(current,incoming) {
     const next=parseSyncLibrary(incoming),old=normalizePresetLibrary(current);
+    for(const key of SYNC_FOLDER_COLLECTIONS)if(Object.hasOwn(old,key)||Object.hasOwn(next,key))next[key]=next[key]||[];
     return normalizePresetLibrary({...old,...next,reservations:old.reservations.map(item=>freezeBackupReservation(old,item))});
 }
 async function syncLibraryHash(value) {
@@ -73,7 +76,7 @@ function createLibrarySyncTransport(request,timers={setTimeout,clearTimeout}) {
         const offline=()=>finish(Object.assign(Error('앱 오프라인 · 앱의 같은 PC 연결을 켠 뒤 다시 시도하세요.'),{offline:true}));
         // Tampermonkey fetch-mode timeouts vary by browser. Always own a deadline.
         const deadline=timers.setTimeout(()=>{offline();handle?.abort?.();},5000);
-        try {handle=request({method:'POST',url,data,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},anonymous:true,redirect:'error',timeout:5000,
+        try {handle=request({method:'POST',url,data,headers:{'Content-Type':'application/json','X-Pixai-Library-Features':'material-folders-v1',...(token?{Authorization:'Bearer '+token}:{})},anonymous:true,redirect:'error',timeout:5000,
             onerror:offline,ontimeout:offline,onabort:offline,
             onprogress:progress=>{if(progress.loaded>limit){finish(Error('앱의 동기화 응답이 너무 큽니다.'));handle?.abort?.();}},
             onload:response=>{
@@ -104,7 +107,7 @@ function createLibrarySyncClient(io) {
             for(const item of p.conflicts)if(!item||typeof item.key!=='string'||typeof item.label!=='string')throw Error('동기화 충돌 형식을 확인하지 못했습니다.');
         }
         exchange=value;
-        if(value.state!=='apply'){message=value.state==='preview'?'미리보기를 확인하고 적용해 주세요.':value.state==='blocked'?'자료가 변경되었거나 앱 편집 중입니다. 확인한 뒤 지금 동기화를 누르세요.':'연결됨 · 라이브러리 확인 완료';return value;}
+        if(value.state!=='apply'){message=value.state==='preview'?'미리보기를 확인하고 적용해 주세요.':value.state==='blocked'?(typeof value.message==='string'?value.message:'자료가 변경되었거나 앱 편집 중입니다. 확인한 뒤 지금 동기화를 누르세요.'):'연결됨 · 라이브러리 확인 완료';return value;}
         if(typeof value.transactionId!=='string'||!value.transactionId||!/^[a-f0-9]{64}$/.test(value.expectedScriptHash||''))throw Error('동기화 전송 정보를 확인하지 못했습니다.');
         const incoming=parseSyncLibrary(value.library),current=io.read(),projection=projectSyncLibrary(current);
         if(canonicalSync(projection)!==canonicalSync(incoming)){
@@ -389,16 +392,20 @@ function createWebUnlimitedAdapter(doc,io) {
   // END WEB UNLIMITED
   // BEGIN CHARACTER LORA
 // SPDX-License-Identifier: GPL-3.0-only
-// Browser-only envelope: older userscripts reject version 2 instead of dropping
-// character LoRAs on save. Transfer files still use the shared version 1 library.
+// Browser-only envelope: older userscripts reject version 2/3 instead of dropping
+// character LoRAs, material folders or composition order. Transfers still use version 1.
 function encodeLocalPresetLibrary(library) {
+    const folders = (library.presetFolders?.length || library.commonPresetFolders?.length ||
+        library.presets.some(preset => preset.folderId) || library.commonPresets?.some(preset => preset.folderId));
+    const ordered = [...library.reservations,...(library.combinations||[])].some(item=>Object.hasOwn(item,'materialOrder'));
+    if (folders || ordered) return JSON.stringify({ version: 3, library });
     return JSON.stringify(library.characters.some(character => character.loras?.length)
         ? { version: 2, library }
         : library);
 }
 function decodeLocalPresetLibrary(raw) {
     const value = raw === null ? makePresetLibrary() : JSON.parse(raw);
-    if (value?.version === 2) {
+    if (value?.version === 2 || value?.version === 3) {
         settingsBackupKeys(value, '브라우저 라이브러리', ['version', 'library']);
         return normalizePresetLibrary(value.library);
     }
@@ -453,7 +460,7 @@ function effectiveCharacterPreset(preset, character = {}, options = {}) {
 }
   // END CHARACTER LORA
   const UPDATE_CHANNEL = 'development';
-  const UPDATE_BUILD_VERSION = '0.10.21-dev.1';
+  const UPDATE_BUILD_VERSION = '0.10.22-dev.1';
   const UPDATE_URLS = Object.freeze({stable:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js',development:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js'});
   function updateChannelUrl(channel) {
     if (!Object.hasOwn(UPDATE_URLS,channel)) throw new Error('업데이트 채널을 다시 선택해 주세요.');
@@ -1283,7 +1290,7 @@ function importImageComposition(library,recipe,value,selected,options={}){
     let current={};
     if(!selected.prompt||!selected.negativePrompt){
       const chunks=recipe.sceneIds.map(key=>next.scenes.find(v=>v.id===key));if(chunks.some(v=>!v))throw Error('현재 조합의 청크 연결을 먼저 확인해 주세요.');
-      current=composePresetPrompts(resolvePresetCommon(next,oldPreset),oldCharacter||{},chunks,oldPreset||{loras:[]},recipe.triggerPosition);
+      current=composePresetPrompts(resolvePresetCommon(next,oldPreset),oldCharacter||{},chunks,oldPreset||{loras:[]},recipe.triggerPosition,{}, {materialOrder:recipe.materialOrder,sceneIds:recipe.sceneIds});
     }
     if(selected.prompt&&fields.prompt===undefined||selected.negativePrompt&&fields.negativePrompt===undefined)throw Error('선택한 문구가 파일에 없습니다.');
     const effective=!selected.model&&oldPreset?effectiveCharacterPreset(oldPreset,oldCharacter||{}):null;
@@ -1325,6 +1332,7 @@ function mountCommonPresetSets(ctx) {
     function fill(value){selected=value?.id||'';baseline=value?copy(value):null;name.input.value=value?.name||'';prompt.input.value=value?.prompt||'';negative.input.value=value?.negativePrompt||'';conflict=false;refresh();}
     async function save(){if(conflict)throw Error('편집 중 저장된 세트가 바뀌었습니다. 새 값 다시 읽기 또는 복제 저장을 선택해 주세요.');
         const item={id:selected||crypto.randomUUID(),name:name.input.value.trim(),prompt:prompt.input.value.trim(),negativePrompt:negative.input.value.trim()};if(!item.name)throw Error('공통문 세트 이름을 입력해 주세요.');
+        const folderId=ctx.getLibrary().commonPresets?.find(v=>v.id===selected)?.folderId;if(folderId)item.folderId=folderId;
         if(selected&&!ctx.getLibrary().commonPresets?.some(v=>v.id===selected))throw Error('이 세트는 삭제됐습니다. 새 세트 또는 복제 저장으로 만드세요.');
         const next=copy(ctx.getLibrary());next.commonPresets=next.commonPresets||[];const at=next.commonPresets.findIndex(v=>v.id===item.id);if(at<0)next.commonPresets.push(item);else next.commonPresets[at]=item;
         await ctx.commit(next,'공통문 세트를 저장했습니다. 기존 예약 사본은 유지됩니다.');fill(item);
@@ -1337,7 +1345,7 @@ function mountCommonPresetSets(ctx) {
         ctx.refreshCommonChoices();
     }
     const saveButton=action('공통문 세트 저장',save),create=action('새 공통문 세트',()=>ctx.confirmDraft(dirty(),save,()=>fill(baseline),()=>fill(null)));
-    const duplicate=action('공통문 복제 저장',async()=>{const next=copy(ctx.getLibrary()),item={id:crypto.randomUUID(),name:(name.input.value.trim()||'공통문')+' (복사본)',prompt:prompt.input.value,negativePrompt:negative.input.value};next.commonPresets=[...(next.commonPresets||[]),item];await ctx.commit(next,'새 공통문 세트로 복제했습니다.');fill(item);});
+    const duplicate=action('공통문 복제 저장',async()=>{const next=copy(ctx.getLibrary()),item={id:crypto.randomUUID(),name:(name.input.value.trim()||'공통문')+' (복사본)',prompt:prompt.input.value,negativePrompt:negative.input.value},folderId=next.commonPresets?.find(v=>v.id===selected)?.folderId;if(folderId)item.folderId=folderId;next.commonPresets=[...(next.commonPresets||[]),item];await ctx.commit(next,'새 공통문 세트로 복제했습니다.');fill(item);});
     const remove=action('공통문 세트 삭제',()=>{if(!selected)throw Error('삭제할 저장 세트를 골라 주세요.');const count=ctx.getLibrary().presets.filter(v=>v.commonPresetId===selected).length;ctx.confirm(`연결 프리셋 ${count}개는 기본 공통문으로 돌아갑니다. 기존 예약 사본은 유지합니다.`,async()=>{await ctx.commit(deleteCommonPreset(ctx.getLibrary(),selected),'공통문 세트를 삭제하고 연결을 해제했습니다.');fill(null);});});
     form.append(status,name.wrap,prompt.wrap,negative.wrap,saveButton,duplicate,remove,action('새 값 다시 읽기',()=>fill(ctx.getLibrary().commonPresets?.find(v=>v.id===selected))));
     for(const control of [name.input,prompt.input,negative.input])control.addEventListener('input',()=>{status.textContent=dirty()?'저장 안 됨':'저장됨';});
@@ -1556,7 +1564,7 @@ function mountSceneStudio(ctx) {
     const materialTabs=el('div',null,{class:'pq-studio-material-tabs',role:'group','aria-label':'재료 목록 전환'}),materialPanels={rows:el('div',null,{class:'pq-studio-material-panel','data-studio-material':'rows'}),scenes:el('div',null,{class:'pq-studio-material-panel','data-studio-material':'scenes'}),manage:el('div',null,{class:'pq-studio-material-panel pq-studio-material-management','data-studio-material':'manage'})},materialButtons={};
     for(const [id,label] of [['rows','캐릭터·출연'],['scenes','씬'],['manage','관리']]){const control=action(label,()=>{materialMode=id;renderMaterialMode();persist();});control.setAttribute('aria-label',`${label} 목록 보기`);control.setAttribute('data-view-only','');materialButtons[id]=control;materialTabs.append(control);}
     function renderMaterialMode(){for(const [id,pane] of Object.entries(materialPanels)){pane.hidden=id!==materialMode;materialButtons[id].setAttribute('aria-pressed',String(id===materialMode));}materialButtons.rows.textContent=`캐릭터·출연 ${plan.rows.length}`;materialButtons.scenes.textContent=`씬 ${plan.columns.length}`;materialButtons.manage.textContent=checked.size?`관리 ${checked.size}`:'관리';materialButtons.rows.title=`예약에 선택한 캐릭터·출연 ${plan.rows.length}개`;materialButtons.scenes.title=`예약에 선택한 씬 ${plan.columns.length}개`;}
-    const sceneActions=el('div',null,{class:'pq-studio-material-actions'}),newScene=action('새 씬',()=>editCard(null)),fromRecipe=action('조합에서 만들기',async()=>{const recipe=ctx.getRecipe(),lib=ctx.getLibrary(),card={id:crypto.randomUUID(),name:recipe.sceneIds.map(id=>lib.scenes.find(v=>v.id===id)?.name).filter(Boolean).join(' · ')||'새 씬',sceneIds:[...recipe.sceneIds],chunks:recipe.sceneIds.map(id=>stripFolder(lib.scenes.find(v=>v.id===id))),imageOptions:recipe.imageOptions,triggerPosition:recipe.triggerPosition};const next=copy(lib);next.sceneCards=[...(next.sceneCards||[]),card];await ctx.commit(next,'현재 청크 조합을 씬 사본으로 저장했습니다.');editCard(card);});
+    const sceneActions=el('div',null,{class:'pq-studio-material-actions'}),newScene=action('새 씬',()=>editCard(null)),fromRecipe=action('조합에서 만들기',async()=>{const recipe=ctx.getRecipe();const save=async()=>{const lib=ctx.getLibrary(),card={id:crypto.randomUUID(),name:recipe.sceneIds.map(id=>lib.scenes.find(v=>v.id===id)?.name).filter(Boolean).join(' · ')||'새 씬',sceneIds:[...recipe.sceneIds],chunks:recipe.sceneIds.map(id=>stripFolder(lib.scenes.find(v=>v.id===id))),imageOptions:recipe.imageOptions,triggerPosition:recipe.triggerPosition};const next=copy(lib);next.sceneCards=[...(next.sceneCards||[]),card];await ctx.commit(next,'현재 청크 조합을 씬 사본으로 저장했습니다.');editCard(card);};if(recipe.materialOrder)ctx.confirm('씬에는 청크끼리의 순서와 사본을 저장합니다. 공통문·캐릭터를 포함한 전체 재료 순서는 씬에 저장되지 않습니다. 전체 순서는 최근 조합·즐겨찾기에 보관해 주세요. 청크로 씬을 만들까요?',save);else await save();});
     newScene.setAttribute('aria-label','새 씬 만들기');fromRecipe.setAttribute('aria-label','현재 조합으로 씬 만들기');newScene.title='새 씬 만들기';fromRecipe.title='현재 조합으로 씬 만들기';sceneActions.append(newScene,fromRecipe);
     materialPanels.rows.append(searchRows.input,rowList,el('strong','추가 청크 · 모든 선택 조합에 적용'),searchExtraChunks.input,extraChunkList);materialPanels.scenes.append(sceneActions,searchScenes.input,sceneList);materialPanels.manage.append(castTools,management);materials.append(materialTabs,...Object.values(materialPanels));
     schedule.append(el('strong','예약 구성·순서'),selectedRows,selectedColumns,el('strong','선택한 추가 청크'),selectedExtraChunks,el('strong','문구 합치는 순서 · 끌어서 변경'),promptOrder,images.wrap,order,count.wrap,batchName.wrap,summary,notice,preview,exceptions,action('선택 조합 전부 예약',()=>reserve(false)),action('예약 후 바로 등록',()=>reserve(true)),action('구성 저장',async()=>{const next=copy(ctx.getLibrary()),saved=normalizeBatchPlan(plan,plan.id||crypto.randomUUID());saved.name=plan.name||defaultBatchName(plan.rows.length,plan.columns.length);next.batchPlans=next.batchPlans||[];const at=next.batchPlans.findIndex(v=>v.id===saved.id);if(at<0)next.batchPlans.push(saved);else next.batchPlans[at]=saved;await ctx.commit(next,'일괄 구성을 저장했습니다.');}),action('새 구성',()=>{plan={id:crypto.randomUUID(),name:'',rows:[],columns:[],count:1,exceptions:{},order:'byRow',imageOptions:ctx.getImages()};count.input.value='1';batchName.input.value='';images.set(plan.imageOptions);persist();renderSchedule();renderMaterials();}),el('strong','저장한 구성'),plans);
@@ -1613,21 +1621,26 @@ function compatibleSettings(library,options,meta,target='app') {
     if(Object.hasOwn(preferences,'embedMetadata')){delete preferences.embedMetadata;warnings.push('브라우저 PNG 기록 선택은 대상 앱/구형 스크립트 옵션에서 제외합니다.');}
     if(target==='legacy') {
         if(out.characters.some(character=>character.loras?.length))throw Error('구형 내보내기는 캐릭터 LoRA를 보존할 수 없습니다. 최신 전체 또는 선택 백업을 사용해 주세요.');
-        for(const key of ['commonPresets','sceneCards','sceneFolders','casts','batchPlans'])if(Object.hasOwn(out,key)){delete out[key];warnings.push(`${key}는 0.9.14에서 편집할 수 없어 제외합니다.`);}
-        const cleanPreset=preset=>{const next={...preset};delete next.prompt;delete next.negativePrompt;delete next.commonPresetId;return next;};
+        for(const key of ['commonPresets','sceneCards','sceneFolders','casts','batchPlans','presetFolders','commonPresetFolders'])if(Object.hasOwn(out,key)){delete out[key];warnings.push(`${key}는 0.9.14에서 편집할 수 없어 제외합니다.`);}
+        const cleanPreset=preset=>{const next={...preset};delete next.prompt;delete next.negativePrompt;delete next.commonPresetId;delete next.folderId;return next;};
         if(out.presets.some(item=>item.prompt||item.negativePrompt||item.commonPresetId))warnings.push('프리셋 문구·공통문 연결은 새 조합에서 제외합니다. 이미 예약한 문구는 사본에 합쳐 보존합니다.');
-        const omitted=out.reservations.filter(res=>res.snapshot?.extraChunks?.length||res.snapshot?.promptOrder?.some((block,index)=>block!==DEFAULT_BATCH_PROMPT_ORDER[index]));
+        const omitted=out.reservations.filter(res=>hasCustomMaterialOrder(res)||res.snapshot?.extraChunks?.length||res.snapshot?.promptOrder?.some((block,index)=>block!==DEFAULT_BATCH_PROMPT_ORDER[index]));
         if(omitted.length)warnings.push(`추가 청크 또는 문구 순서가 있는 예약 ${omitted.length}개는 0.9.14에서 보존할 수 없어 제외합니다. 최신 전체 또는 선택 백업을 사용해 주세요.`);
         out.reservations=out.reservations.filter(res=>!omitted.includes(res)).map(res=>{
             const next={...res},frozen=res.snapshot || snapshotCombination(library,res),p=frozen.preset,join=(...parts)=>parts.map(presetText).filter(Boolean).join(', ');
             const chunks=frozen.chunks.map(item=>({...item})),extras=frozen.extras||{};
             if(extras.scene&&(extras.scene.prompt||extras.scene.negativePrompt))chunks.push({id:`${res.id}:scene-extra`,name:'씬 추가 문구',...extras.scene});
             next.sceneIds=chunks.map(item=>item.id);next.snapshot={common:{prompt:join(frozen.common.prompt,p.prompt),negativePrompt:join(frozen.common.negativePrompt,p.negativePrompt)},preset:cleanPreset(p),character:{...frozen.character,prompt:join(frozen.character.prompt,extras.cast?.prompt),negativePrompt:join(frozen.character.negativePrompt,extras.cast?.negativePrompt)},chunks};
-            delete next.snapshot.character.defaultPresetId;delete next.snapshot.character.folderId;delete next.batch;delete next.sourceSceneId;return next;
+            delete next.snapshot.character.defaultPresetId;delete next.snapshot.character.folderId;delete next.batch;delete next.sourceSceneId;delete next.materialOrder;return next;
         });
+        const omittedHistory=(out.combinations||[]).filter(hasCustomMaterialOrder);
+        if(omittedHistory.length)warnings.push(`재료 순서가 있는 최근 조합·즐겨찾기 ${omittedHistory.length}개는 0.9.14에서 보존할 수 없어 제외합니다. 최신 전체 또는 선택 백업을 사용해 주세요.`);
+        if(out.combinations)out.combinations=out.combinations.filter(item=>!hasCustomMaterialOrder(item)).map(item=>omitKey(item,'materialOrder'));
         out.presets=out.presets.map(cleanPreset);out.characters=out.characters.map(item=>{delete item.defaultPresetId;delete item.loras;return item;});
     }
     if(target==='app'&&out.characters.some(character=>character.loras?.length))warnings.push('캐릭터 LoRA를 지원하는 최신 앱에서 불러오세요. 구버전 앱에서는 새 캐릭터 항목을 읽을 수 없습니다.');
+    if(target==='app'&&(out.presetFolders?.length||out.commonPresetFolders?.length))warnings.push('프리셋·공통문 폴더를 보존하려면 앱 0.1.25 이상에서 불러오세요.');
+    if(target==='app'&&[...out.reservations,...(out.combinations||[])].some(item=>Object.hasOwn(item,'materialOrder')))warnings.push('공통문·캐릭터·청크의 재료 순서를 보존하려면 앱 0.1.25 이상에서 불러오세요.');
     return {backup:{format:'pixai-web-queue-settings',version:1,...settingsBackupMeta(meta),library:out,options:preferences},warnings};
 }
 /** Resolve only live compositions. Frozen reservations already contain the selected text. */
@@ -2199,7 +2212,7 @@ const BACKUP_CATEGORIES = [
     'reservations',
     'combinations'
 ];
-const BACKUP_FOLDER_CATEGORIES = ['sceneCards', 'scenes'];
+const BACKUP_FOLDER_CATEGORIES = ['sceneCards', 'scenes', 'presets', 'commonPresets'];
 const BACKUP_LABELS = {
     sceneCards: '씬',
     scenes: '청크',
@@ -2214,6 +2227,8 @@ const BACKUP_LABELS = {
     options: '생성·화면 설정'
 };
 const TRANSFER_FOLDERS = {
+    presets: 'presetFolders',
+    commonPresets: 'commonPresetFolders',
     characters: 'characterFolders',
     scenes: 'chunkFolders',
     sceneCards: 'sceneFolders'
@@ -2331,8 +2346,11 @@ function selectBackupLibrary(value, selection, folderSelection = {}) {
     }
     for (let cursor = 0; cursor < pending.length; cursor++) {
         const [key, id] = pending[cursor];
-        if (key === 'presets')
+        if (key === 'presets') {
             add('commonPresets', index.presets.get(id).commonPresetId);
+            add('presetFolders', index.presets.get(id).folderId);
+        }
+        if (key === 'commonPresets') add('commonPresetFolders', index.commonPresets.get(id).folderId);
         if (key === 'characters') {
             const item = index.characters.get(id);
             add('presets', item.defaultPresetId);
@@ -2371,8 +2389,10 @@ function selectBackupLibrary(value, selection, folderSelection = {}) {
         }
     }
     const library = makePresetLibrary();
-    for (const key of TRANSFER_COLLECTIONS)
+    for (const key of TRANSFER_COLLECTIONS) {
+        if (['presetFolders', 'commonPresetFolders'].includes(key) && !Object.hasOwn(source, key)) continue;
         Object.assign(library, { [key]: (source[key] ?? []).filter((x) => ids[key].has(x.id)) });
+    }
     // A preset without a linked set needs the source default, even when it is not
     // a replacement target. No key or path setting travels with these materials.
     if (selection.common || library.presets.some((x) => !x.commonPresetId) || selection.reservations)
@@ -2558,8 +2578,12 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         if (p.commonPresetId)
             p.commonPresetId = remap('commonPresets', p.commonPresetId);
     };
-    for (const preset of incoming.presets)
+    for (const preset of incoming.presets) {
         presetRef(preset);
+        if (preset.folderId) preset.folderId = remap('presetFolders', preset.folderId);
+    }
+    for (const preset of incoming.commonPresets ?? [])
+        if (preset.folderId) preset.folderId = remap('commonPresetFolders', preset.folderId);
     for (const character of incoming.characters) {
         if (character.defaultPresetId)
             character.defaultPresetId = remap('presets', character.defaultPresetId);
@@ -2604,6 +2628,8 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         item.presetId = remap('presets', item.presetId);
         item.characterId = remap('characters', item.characterId);
         item.sceneIds = item.sceneIds.map((id) => remap('scenes', id));
+        if (item.materialOrder)
+            item.materialOrder = item.materialOrder.map(part => part.startsWith('chunk:') ? `chunk:${remap('scenes', part.slice(6))}` : part);
         if ('snapshot' in item && item.snapshot) {
             item.snapshot.preset.id = item.presetId;
             // Frozen common is authoritative; a deleted live set must not bind elsewhere.
@@ -2622,6 +2648,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
             item.batch.id = remap('batch', item.batch.id);
     }
     for (const key of TRANSFER_COLLECTIONS) {
+        if (['presetFolders', 'commonPresetFolders'].includes(key) && !Object.hasOwn(result, key) && !Object.hasOwn(incoming, key)) continue;
         const merged = [...retained[key], ...(incoming[key] ?? [])];
         const category = Object.entries(TRANSFER_FOLDERS).find(([, folder]) => folder === key)?.[0];
         if (mode === 'replace' && category && folders[category]) {
@@ -3062,11 +3089,14 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     return result;
   }
   function normalizeComposeDraft(value) {
-    const source=settingsBackupKeys(value,'조합 편집 상태',['presetId','characterId','sceneIds','triggerPosition','count','imageOptions']);
+    const source=settingsBackupKeys(value,'조합 편집 상태',['presetId','characterId','sceneIds','triggerPosition','count','imageOptions'],['presetId','characterId','sceneIds','triggerPosition','count','imageOptions','materialOrder']);
     if (!Array.isArray(source.sceneIds) || source.sceneIds.length>1000 || new Set(source.sceneIds).size!==source.sceneIds.length) throw new Error('조합 편집 청크 목록을 확인해 주세요.');
+    const sceneIds=source.sceneIds.map(id=>presetIdentifier(id,'편집 청크'));
+    if(new Set(sceneIds).size!==sceneIds.length)throw new Error('조합 편집 청크 목록을 확인해 주세요.');
     return {presetId:source.presetId==='' ? '' : presetIdentifier(source.presetId,'편집 프리셋'),characterId:source.characterId==='' ? '' : presetIdentifier(source.characterId,'편집 캐릭터'),
-      sceneIds:source.sceneIds.map(id=>presetIdentifier(id,'편집 청크')),triggerPosition:normalizeTriggerPosition(source.triggerPosition,source.sceneIds.length),
-      count:presetInteger(source.count,'편집 횟수',1,100),imageOptions:normalizeReservationImageOptions(source.imageOptions)};
+      sceneIds,triggerPosition:normalizeTriggerPosition(source.triggerPosition,sceneIds.length),
+      count:presetInteger(source.count,'편집 횟수',1,100),imageOptions:normalizeReservationImageOptions(source.imageOptions),
+      ...(Object.hasOwn(source,'materialOrder')?{materialOrder:normalizeMaterialOrder(source.materialOrder,sceneIds)}:{})};
   }
   function normalizePresetLibrary(value, options = {}) {
     const source = presetObject(value, '프리셋 라이브러리');
@@ -3093,10 +3123,14 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
       if (typeof item.name!=='string' || !presetText(item.name)) throw new Error('캐릭터 폴더 이름을 입력해 주세요.');
       return {id,name:presetText(item.name)};
     },true),characterFolderIds=new Set(characterFolders.map(item=>item.id));
+    const materialFolders={};
+    for(const [key,label] of [['presetFolders','프리셋'],['commonPresetFolders','공통문']])if(Object.hasOwn(source,key))materialFolders[key]=entries(key,(item,id)=>{const name=presetText(item.name);if(!name)throw Error(`${label} 폴더 이름을 입력해 주세요.`);return {id,name};});
+    function materialFolder(item,key){if(!Object.hasOwn(item,'folderId'))return {};const folderId=presetIdentifier(item.folderId,'재료 폴더');if(!materialFolders[key]?.some(folder=>folder.id===folderId))throw Error(`재료 ${item.id}의 폴더가 없습니다: ${folderId}`);return {folderId};}
     const library = {
       version:1,
       common:{prompt:presetText(common.prompt), negativePrompt:presetText(common.negativePrompt)},
-      presets:entries('presets', (item,id)=>{const preset={id,name:presetText(item.name),...validatePresetConfiguration(item,options)};for(const key of ['prompt','negativePrompt'])if(Object.hasOwn(item,key))preset[key]=presetText(item[key]);if(item.commonPresetId!=null&&presetText(item.commonPresetId))preset.commonPresetId=presetIdentifier(item.commonPresetId,'공통문 세트');return preset;}),
+      ...materialFolders,
+      presets:entries('presets', (item,id)=>{const preset={id,name:presetText(item.name),...validatePresetConfiguration(item,options),...materialFolder(item,'presetFolders')};for(const key of ['prompt','negativePrompt'])if(Object.hasOwn(item,key))preset[key]=presetText(item[key]);if(item.commonPresetId!=null&&presetText(item.commonPresetId))preset.commonPresetId=presetIdentifier(item.commonPresetId,'공통문 세트');return preset;}),
       characters:entries('characters', (item, id) => {
         const character={id,name:presetText(item.name),prompt:presetText(item.prompt),negativePrompt:presetText(item.negativePrompt)};
         if(item.defaultPresetId!=null&&presetText(item.defaultPresetId))character.defaultPresetId=presetIdentifier(item.defaultPresetId,'기본 프리셋');
@@ -3125,12 +3159,14 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
           characterId:presetIdentifier(item.characterId, '캐릭터'), sceneIds,
           count:presetInteger(item.count, '예약 반복 횟수', 1, 100)};
         if (Object.hasOwn(item,'triggerPosition')) reservation.triggerPosition=normalizeTriggerPosition(item.triggerPosition,sceneIds.length);
+        if (Object.hasOwn(item,'materialOrder')) reservation.materialOrder=normalizeMaterialOrder(item.materialOrder,sceneIds);
         if (Object.hasOwn(item,'imageOptions')) reservation.imageOptions=normalizeReservationImageOptions(item.imageOptions);
         if(Object.hasOwn(item,'sourceSceneId'))reservation.sourceSceneId=presetIdentifier(item.sourceSceneId,'원본 씬');
         if(Object.hasOwn(item,'batch'))reservation.batch=normalizeBatchTag(item.batch);
         if (Object.hasOwn(item,'snapshot')) {
           reservation.snapshot = normalizeCombinationSnapshot(item.snapshot);
           const frozen=reservation.snapshot;
+          if (reservation.materialOrder!==undefined && frozen.promptOrder!==undefined) throw new Error('조합 재료 순서와 씬 일괄 블록 순서는 동시에 적용할 수 없습니다.');
           if (frozen.preset.id!==reservation.presetId || frozen.character.id!==reservation.characterId || JSON.stringify(frozen.chunks.map(chunk=>chunk.id))!==JSON.stringify(sceneIds)) throw new Error('예약 사본과 재료 ID가 다릅니다.');
         }
         return reservation;
@@ -3140,16 +3176,19 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
       library.combinations=entries('combinations',(item,id)=>{
         const sceneIds=item.sceneIds;
         if (!Array.isArray(sceneIds) || new Set(sceneIds).size!==sceneIds.length) throw new Error('조합 기록의 청크 순서를 확인해 주세요.');
+        const normalizedSceneIds=sceneIds.map(id=>presetIdentifier(id,'기록 청크'));
+        if(new Set(normalizedSceneIds).size!==normalizedSceneIds.length)throw new Error('조합 기록의 청크 순서를 확인해 주세요.');
         if (typeof item.favorite!=='boolean') throw new Error('조합 즐겨찾기 형식을 확인해 주세요.');
         return {id,presetId:presetIdentifier(item.presetId,'기록 프리셋'),characterId:presetIdentifier(item.characterId,'기록 캐릭터'),
-          sceneIds:sceneIds.map(id=>presetIdentifier(id,'기록 청크')),count:presetInteger(item.count,'기록 횟수',1,100),
+          sceneIds:normalizedSceneIds,count:presetInteger(item.count,'기록 횟수',1,100),
           ...(Object.hasOwn(item,'triggerPosition') ? {triggerPosition:normalizeTriggerPosition(item.triggerPosition,sceneIds.length)} : {}),
+          ...(Object.hasOwn(item,'materialOrder') ? {materialOrder:normalizeMaterialOrder(item.materialOrder,normalizedSceneIds)} : {}),
           ...(Object.hasOwn(item,'imageOptions') ? {imageOptions:normalizeReservationImageOptions(item.imageOptions)} : {}),
           favorite:item.favorite,name:presetText(item.name),at:presetInteger(item.at,'기록 시각',0,Number.MAX_SAFE_INTEGER)};
       });
       if (library.combinations.filter(item=>!item.favorite).length>50 || library.combinations.filter(item=>item.favorite).length>1000) throw new Error('최근 조합은 50개, 즐겨찾기는 1,000개까지 저장할 수 있습니다.');
     }
-    if(Object.hasOwn(source,'commonPresets'))library.commonPresets=entries('commonPresets',(item,id)=>{const name=presetText(item.name);if(!name)throw Error('공통문 세트 이름을 입력해 주세요.');return {id,name,...normalizeExtraText({prompt:item.prompt,negativePrompt:item.negativePrompt},'공통문 세트')};});
+    if(Object.hasOwn(source,'commonPresets'))library.commonPresets=entries('commonPresets',(item,id)=>{const name=presetText(item.name);if(!name)throw Error('공통문 세트 이름을 입력해 주세요.');return {id,name,...normalizeExtraText({prompt:item.prompt,negativePrompt:item.negativePrompt},'공통문 세트'),...materialFolder(item,'commonPresetFolders')};});
     if(Object.hasOwn(source,'sceneFolders'))library.sceneFolders=entries('sceneFolders',(item,id)=>{const name=presetText(item.name);if(!name)throw Error('씬 그룹 이름을 입력해 주세요.');return {id,name};});
     if(Object.hasOwn(source,'sceneCards'))library.sceneCards=entries('sceneCards',(item,id)=>normalizeSceneCard(item,id,new Set((library.sceneFolders||[]).map(folder=>folder.id))));
     if(Object.hasOwn(source,'casts'))library.casts=entries('casts',normalizeCast);
@@ -3181,9 +3220,24 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     if (!preset) missing.push('프리셋');if (!character) missing.push('캐릭터');
     const sceneIds=[];
     for (const id of combination.sceneIds) {if (library.scenes.some(item=>item.id===id)) sceneIds.push(id);else missing.push(`청크 ${id}`);}
+    const originalOrder=normalizeMaterialOrder(combination.materialOrder,combination.sceneIds);
+    const retained=key=>!key.startsWith('chunk:')||sceneIds.includes(key.slice(6));
+    let triggerPosition;
+    if(Object.hasOwn(combination,'triggerPosition')){
+      const originalPosition=normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length);
+      if(originalPosition==='end')triggerPosition='end';
+      else{
+        // Remove missing chunks from the visible sequence, not from the anchor's numeric index.
+        const anchor=originalPosition===1?'common':originalPosition===2?'character':originalPosition>2?`chunk:${combination.sceneIds[originalPosition-3]}`:null;
+        const sequence=[...originalOrder];sequence.splice(anchor?sequence.indexOf(anchor)+1:0,0,'trigger');
+        const filtered=sequence.filter(retained),position=filtered.indexOf('trigger'),previous=filtered[position-1];
+        triggerPosition=position===0?0:previous==='common'?1:previous==='character'?2:sceneIds.indexOf(previous.slice(6))+3;
+      }
+    }
     return {presetId:preset?.id || '',characterId:character?.id || '',sceneIds,count:combination.count,missing,
+      ...(Object.hasOwn(combination,'materialOrder') ? {materialOrder:originalOrder.filter(retained)} : {}),
       ...(Object.hasOwn(combination,'imageOptions') ? {imageOptions:normalizeReservationImageOptions(combination.imageOptions)} : {}),
-      ...(Object.hasOwn(combination,'triggerPosition') ? {triggerPosition:combination.triggerPosition==='end' ? 'end' : Math.min(normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length),sceneIds.length+2)} : {})};
+      ...(Object.hasOwn(combination,'triggerPosition') ? {triggerPosition} : {})};
   }
   function snapshotCombination(value, combination) {
     const library=normalizePresetLibrary(value),resolved=resolveCombination(library,combination);
@@ -3196,9 +3250,10 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
   function rememberCombination(value, combination, options={}) {
     const library=normalizePresetLibrary(value),entries=library.combinations || [];
     const imageOptions=Object.hasOwn(combination,'imageOptions') ? normalizeReservationImageOptions(combination.imageOptions) : undefined;
-    const previous=entries.find(item=>item.presetId===combination.presetId && item.characterId===combination.characterId && JSON.stringify(item.sceneIds)===JSON.stringify(combination.sceneIds) && normalizeTriggerPosition(item.triggerPosition,item.sceneIds.length)===normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length) && JSON.stringify(item.imageOptions || null)===JSON.stringify(imageOptions || null));
+    const previous=entries.find(item=>item.presetId===combination.presetId && item.characterId===combination.characterId && JSON.stringify(item.sceneIds)===JSON.stringify(combination.sceneIds) && JSON.stringify(normalizeMaterialOrder(item.materialOrder,item.sceneIds))===JSON.stringify(normalizeMaterialOrder(combination.materialOrder,combination.sceneIds)) && normalizeTriggerPosition(item.triggerPosition,item.sceneIds.length)===normalizeTriggerPosition(combination.triggerPosition,combination.sceneIds.length) && JSON.stringify(item.imageOptions || null)===JSON.stringify(imageOptions || null));
     const entry={id:previous?.id || (options.idFactory || (()=>globalThis.crypto.randomUUID()))(),presetId:combination.presetId,characterId:combination.characterId,sceneIds:[...combination.sceneIds],count:combination.count,
       ...(Object.hasOwn(combination,'triggerPosition') ? {triggerPosition:combination.triggerPosition} : {}),
+      ...(Object.hasOwn(combination,'materialOrder') ? {materialOrder:normalizeMaterialOrder(combination.materialOrder,combination.sceneIds)} : {}),
       ...(imageOptions ? {imageOptions} : {}),
       favorite:!!options.favorite || !!previous?.favorite,name:previous?.name || '',at:options.now ?? Date.now()};
     let recent=0;
@@ -3412,16 +3467,17 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
   }
   function settingsBackupLibrary(value,{frozen=false}={}) {
     const source = settingsBackupKeys(value, '프리셋 라이브러리', ['version','common','presets','characters','scenes','reservations'],
-      ['version','common','presets','characters','characterFolders','chunkFolders','scenes','reservations','combinations','commonPresets','sceneCards','sceneFolders','casts','batchPlans']);
+      ['version','common','presets','characters','characterFolders','chunkFolders','scenes','reservations','combinations','commonPresets','sceneCards','sceneFolders','casts','batchPlans','presetFolders','commonPresetFolders']);
     settingsBackupKeys(source.common, '공통 프롬프트', ['prompt','negativePrompt']);
     settingsBackupStrings(source.common, ['prompt','negativePrompt'], '공통 프롬프트');
-    const library = normalizePresetLibrary(source);
-    for (const folder of [...(source.chunkFolders || []),...(source.characterFolders || []),...(source.sceneFolders || [])]) {
+    const library = normalizePresetLibrary(frozen?{...source,presets:source.presets.map(item=>omitKey(item,'folderId'))}:source);
+    for (const folder of [...(source.chunkFolders || []),...(source.characterFolders || []),...(source.sceneFolders || []),...(source.presetFolders||[]),...(source.commonPresetFolders||[])]) {
       settingsBackupKeys(folder, '프롬프트 폴더', ['id','name']);
       settingsBackupStrings(folder, ['name'], '프롬프트 폴더 이름');
     }
     for (const item of source.presets) {
-      settingsBackupKeys(item, '설정 프리셋', ['id','name','model','loras'],['id','name','model','loras','prompt','negativePrompt','commonPresetId']);
+      settingsBackupKeys(item, '설정 프리셋', ['id','name','model','loras'],['id','name','model','loras','prompt','negativePrompt','commonPresetId','folderId']);
+      if(Object.hasOwn(item,'folderId'))presetIdentifier(item.folderId,'프리셋 폴더');
       settingsBackupStrings(item, ['name','prompt','negativePrompt'], '프리셋 이름·문구');
       settingsBackupKeys(item.model, '모델', ['id','name','versionId'], ['id','name','versionId','family']);
       settingsBackupStrings(item.model, ['name','family'], '모델 이름');
@@ -3436,9 +3492,9 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
       settingsBackupStrings(item, ['name','prompt','negativePrompt'], '캐릭터·청크 프롬프트');
       if(key==='characters'&&Object.hasOwn(item,'loras'))normalizeCharacterLoras(item.loras);
     }
-    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition','imageOptions','sourceSceneId','batch']);
-    for (const item of source.combinations || []) settingsBackupKeys(item,'조합 기록',['id','presetId','characterId','sceneIds','count','favorite','name','at'],['id','presetId','characterId','sceneIds','count','favorite','name','at','triggerPosition','imageOptions']);
-    for(const item of source.commonPresets||[]) {settingsBackupKeys(item,'공통문 세트',['id','name','prompt','negativePrompt']);settingsBackupStrings(item,['name','prompt','negativePrompt'],'공통문 세트');}
+    for (const item of source.reservations) settingsBackupKeys(item, '조합 예약', ['id','presetId','characterId','count'], ['id','presetId','characterId','count','sceneId','sceneIds','snapshot','triggerPosition','imageOptions','sourceSceneId','batch','materialOrder']);
+    for (const item of source.combinations || []) settingsBackupKeys(item,'조합 기록',['id','presetId','characterId','sceneIds','count','favorite','name','at'],['id','presetId','characterId','sceneIds','count','favorite','name','at','triggerPosition','imageOptions','materialOrder']);
+    for(const item of source.commonPresets||[]) {settingsBackupKeys(item,'공통문 세트',['id','name','prompt','negativePrompt'],['id','name','prompt','negativePrompt','folderId']);settingsBackupStrings(item,['name','prompt','negativePrompt'],'공통문 세트');}
     for(const item of source.sceneCards||[]) {settingsBackupKeys(item,'씬',['id','name','sceneIds','chunks'],['id','name','sceneIds','chunks','extra','imageOptions','triggerPosition','folderId']);for(const chunk of item.chunks)settingsBackupKeys(chunk,'씬 청크 사본',['id','name','prompt','negativePrompt']);}
     for(const item of source.casts||[])settingsBackupKeys(item,'출연',['id','name','characterId','presetId'],['id','name','characterId','presetId','extra','triggerPosition']);
     for(const item of source.batchPlans||[])normalizeBatchPlan(item,item.id);
@@ -3500,6 +3556,15 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     if (!Number.isInteger(value) || value<0 || value>chunkCount+2) throw new Error('LoRA 트리거 위치를 확인해 주세요.');
     return value;
   }
+  function normalizeMaterialOrder(value,sceneIds) {
+    const expected=['common','character',...sceneIds.map(id=>`chunk:${id}`)];
+    if(value===undefined)return expected;
+    if(!Array.isArray(value)||value.length!==expected.length||new Set(value).size!==expected.length||!expected.every(item=>value.includes(item))||JSON.stringify(value.filter(item=>typeof item==='string'&&item.startsWith('chunk:')))!==JSON.stringify(expected.slice(2)))throw new Error('재료 순서는 공통문·캐릭터·선택한 청크를 한 번씩 포함하고 청크 순서가 일치해야 합니다.');
+    return [...value];
+  }
+  function hasCustomMaterialOrder(item) {
+    return item.materialOrder!==undefined && JSON.stringify(item.materialOrder)!==JSON.stringify(normalizeMaterialOrder(undefined,item.sceneIds));
+  }
   function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}, triggerPosition=1, extras={}, options={}) {
     const commonPart = presetObject(common, '공통');
     const characterPart = presetObject(character, '캐릭터');
@@ -3515,6 +3580,24 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     });
     const join=(...parts)=>parts.map(presetText).filter(Boolean).join(', ');
     const position=normalizeTriggerPosition(triggerPosition,chunks.length);
+    if(options.materialOrder!==undefined){
+      if(options.promptOrder!==undefined)throw new Error('조합 재료 순서와 씬 일괄 블록 순서는 동시에 적용할 수 없습니다.');
+      const ids=options.sceneIds;
+      if(!ids||ids.length!==chunks.length||new Set(ids).size!==ids.length)throw new Error('재료 순서에 사용할 청크 ID를 확인해 주세요.');
+      const materialOrder=normalizeMaterialOrder(options.materialOrder,ids),promptParts=position===0?[...triggers]:[],negativeParts=[];
+      for(const item of materialOrder){
+        if(item==='common'){
+          promptParts.push(join(commonPart.prompt,configuration.prompt));negativeParts.push(join(commonPart.negativePrompt,configuration.negativePrompt));if(position===1)promptParts.push(...triggers);
+        }else if(item==='character'){
+          promptParts.push(join(characterPart.prompt,extras.cast?.prompt));negativeParts.push(join(characterPart.negativePrompt,extras.cast?.negativePrompt));if(position===2)promptParts.push(...triggers);
+        }else{
+          const index=ids.indexOf(item.slice(6));promptParts.push(chunks[index].prompt);negativeParts.push(chunks[index].negativePrompt);if(position===index+3)promptParts.push(...triggers);
+        }
+      }
+      promptParts.push(extras.scene?.prompt??'',...(options.extraChunks??[]).map(chunk=>chunk.prompt));negativeParts.push(extras.scene?.negativePrompt??'',...(options.extraChunks??[]).map(chunk=>chunk.negativePrompt));
+      if(position==='end')promptParts.push(...triggers);
+      return {prompt:join(...promptParts),negativePrompt:join(...negativeParts)};
+    }
     const order=options.promptOrder ? normalizeBatchPromptOrder(options.promptOrder) : DEFAULT_BATCH_PROMPT_ORDER;
     const promptParts=position===0 ? [...triggers] : [];
     promptParts.push(join(commonPart.prompt,configuration.prompt));
@@ -3560,7 +3643,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         if (!chunk) throw new Error(`예약 ${reservation.id}의 프롬프트 청크가 없습니다: ${sceneId}`);
         return chunk;
       });
-      const prompts = composePresetPrompts(common,compositionCharacter,chunks,preset,reservation.triggerPosition,frozen?.extras,{extraChunks:frozen?.extraChunks,promptOrder:frozen?.promptOrder});
+      const prompts = composePresetPrompts(common,compositionCharacter,chunks,preset,reservation.triggerPosition,frozen?.extras,{extraChunks:frozen?.extraChunks,promptOrder:frozen?.promptOrder,materialOrder:reservation.materialOrder,sceneIds:reservation.sceneIds});
       if (!prompts.prompt) throw new Error(`예약 ${reservation.id}의 조합 프롬프트가 비어 있습니다.`);
       for (let repeat = 1; repeat <= reservation.count; repeat++) {
         const id = presetIdentifier(idFactory(), '작업');
@@ -4320,6 +4403,7 @@ function mountPresetEditor(parent, io) {
   presetBody.append(action('프리셋 저장',async () => {
     const value = {...readPreset(),id:presetSelect.input.value || crypto.randomUUID(),name:nameValue(presetName.input)};
     const next = copy(library); const index = next.presets.findIndex(item => item.id === value.id);
+    if(index>=0&&next.presets[index].folderId)value.folderId=next.presets[index].folderId;
     if (index < 0) next.presets.push(value); else next.presets[index] = value;
     await commit(next,'모델·LoRA 프리셋을 저장했습니다.');
     presetSelect.input.value = value.id;renderPresetList();for (const refresh of orderRefreshers) refresh();
@@ -4654,7 +4738,7 @@ function mountPresetEditor(parent, io) {
   const pickerOpened = new Set(['']);
   let groupSummaries = new Map();
   let selectedChunkIds = new Set();
-  let missingMaterials=[],loadedCombination=false,recipeDrag=null,triggerPosition=1,draftReady=false,lastDraftText='',draftSaveError='';
+  let missingMaterials=[],loadedCombination=false,recipeDrag=null,triggerPosition=1,materialOrder,draftReady=false,lastDraftText='',draftSaveError='';
   const reserveCount = field('이 조합의 생성 횟수','input',{type:'number',min:'1',max:'100',value:'1'});
   const reserveRatio=field('조합 이미지 비율','select'),reserveSize=field('조합 이미지 크기','select'),reserveBatch=field('생성당 이미지 수','select'),reserveMode=field('조합 생성 모드','select');
   for (const ratio of API_RATIOS) {
@@ -4693,12 +4777,14 @@ function mountPresetEditor(parent, io) {
   const combined = el('div',null,{class:'pq-preview','aria-label':'저장한 프롬프트 조합 미리보기'});
   const finalLoras=el('details',null,{'aria-label':'최종 적용 LoRA','data-final-loras':''}),finalLorasSummary=el('summary'),finalLorasBody=el('div',null,{class:'pq-final-loras'});finalLoras.append(finalLorasSummary,finalLorasBody);
   const sequenceList=el('div',null,{class:'pq-sequence-list','aria-label':'합쳐지는 순서'});
+  const triggerAnchor=field('LoRA 트리거 위치','select');
+  triggerAnchor.input.addEventListener('change',()=>{if(io.isBusy?.())return;triggerPosition=triggerAnchor.input.value==='end'?'end':Number(triggerAnchor.input.value);preview();});
   const missingNotice=el('div',null,{class:'pq-missing-notice',role:'status'});
   const conflictActions=el('div',null,{class:'pq-actions','aria-label':'조합 오류 수정'});conflictActions.hidden=true;
   for(const [id,label] of [['presets','프리셋 확인'],['characters','캐릭터 LoRA 확인'],['common','공통문 확인']]){const control=el('button',label,{type:'button'});control.addEventListener('click',()=>showPage(id,true));conflictActions.append(control);}
   const acknowledgeMissing=action('누락 재료 제외하고 계속',()=>{missingMaterials=[];preview();});
   const selectedChunksInOrder=()=>[...selectedChunkIds].map(id=>library.scenes.find(chunk=>chunk.id===id)).filter(Boolean);
-  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,count:repeatValue(reserveCount.input),imageOptions:{...recipeImages}});
+  const recipe=()=>({presetId:reservePreset.input.value,characterId:reserveCharacter.input.value,sceneIds:[...selectedChunkIds],triggerPosition,...(materialOrder?{materialOrder:[...materialOrder]}:{}),count:repeatValue(reserveCount.input),imageOptions:{...recipeImages}});
   function saveComposeDraft() {
     if (!draftReady || !io.saveDraft) return;
     let draft;try {draft=normalizeComposeDraft(recipe());} catch {return;} // An unfinished count must not erase the last valid draft.
@@ -4707,19 +4793,31 @@ function mountPresetEditor(parent, io) {
     catch(error) {const message=`조합 편집 상태 저장 실패: ${error.message}`;if (message!==draftSaveError) io.notify(message);draftSaveError=message;}
   }
   function sequenceKeys() {
-    const keys=['common','character',...[...selectedChunkIds].map(id=>'chunk:'+id)];
-    keys.splice(triggerPosition==='end' ? keys.length : Math.min(triggerPosition,keys.length),0,'trigger');return keys;
+    const ids=[...selectedChunkIds],keys=materialOrder?[...materialOrder]:['common','character',...ids.map(id=>'chunk:'+id)];
+    const anchor=triggerPosition===1?'common':triggerPosition===2?'character':triggerPosition!=='end'&&triggerPosition>2?'chunk:'+ids[triggerPosition-3]:null;
+    keys.splice(triggerPosition==='end'?keys.length:anchor?keys.indexOf(anchor)+1:0,0,'trigger');return keys;
+  }
+  function applySequence(keys) {
+    const materials=keys.filter(key=>key!=='trigger'),ids=materials.filter(key=>key.startsWith('chunk:')).map(key=>key.slice(6));
+    const order=normalizeMaterialOrder(materials,ids),defaults=['common','character',...ids.map(id=>'chunk:'+id)];
+    const position=keys.indexOf('trigger'),previous=keys[position-1];
+    triggerPosition=triggerPosition==='end'&&position===keys.length-1?'end':position===0?0:previous==='common'?1:previous==='character'?2:ids.indexOf(previous.slice(6))+3;
+    selectedChunkIds=new Set(ids);materialOrder=order.every((key,index)=>key===defaults[index])?undefined:order;
+  }
+  function selectRecipeChunks(ids) {
+    const selected=new Set(ids),keys=sequenceKeys().filter(key=>!key.startsWith('chunk:')||selected.has(key.slice(6)));
+    for(const id of selected)if(!keys.includes('chunk:'+id))keys.splice(triggerPosition==='end'?keys.length-1:keys.length,0,'chunk:'+id);
+    applySequence(keys);
   }
   function movedSequence(id,target,after=false) {
-    const keys=sequenceKeys();if (id===target || !keys.includes(id) || !keys.includes(target) || !['trigger',...keys.filter(key=>key.startsWith('chunk:'))].includes(id)) return null;
+    const keys=sequenceKeys();if (id===target || !keys.includes(id) || !keys.includes(target)) return null;
     keys.splice(keys.indexOf(id),1);keys.splice(keys.indexOf(target)+(after ? 1 : 0),0,id);
-    const fixed=keys.filter(key=>key!=='trigger');if (fixed[0]!=='common' || fixed[1]!=='character') return null;return keys;
+    return keys;
   }
   function moveRecipe(id,target,after=false) {
     if (io.isBusy?.()) return;
     const keys=movedSequence(id,target,after);if (!keys) return;
-    selectedChunkIds=new Set(keys.filter(key=>key.startsWith('chunk:')).map(key=>key.slice(6)));
-    const position=keys.indexOf('trigger');triggerPosition=position===keys.length-1 ? 'end' : position;preview();
+    applySequence(keys);preview();
   }
   function renderSequence(preset,character,chunks) {
     sequenceList.replaceChildren();
@@ -4731,11 +4829,13 @@ function mountPresetEditor(parent, io) {
       {id:'trigger',name:'LoRA 트리거',text:triggerText},
       ...chunks.map((chunk,index)=>({id:'chunk:'+chunk.id,name:chunk.name,text:chunk.prompt || chunk.negativePrompt,chunk,index}))];
     const keys=sequenceKeys();
+    triggerAnchor.input.replaceChildren(...[[0,'맨 앞'],[1,'공통문 뒤'],[2,'캐릭터 뒤'],...chunks.map((chunk,index)=>[index+3,`${chunk.name} 뒤${index===chunks.length-1?' · 씬 추가 문구 앞':''}`]),['end','맨 끝 · 씬 추가 문구까지 포함']].map(([id,name])=>el('option',name,{value:String(id)})));
+    triggerAnchor.input.value=String(triggerPosition);
     for (const [order,key] of keys.entries()) {
-      const item=materials.find(material=>material.id===key),movable=item.id==='trigger' || !!item.chunk;
+      const item=materials.find(material=>material.id===key),movable=true;
       const row=el('div',null,{class:movable ? 'pq-recipe-row' : 'pq-fixed-material','data-recipe-material':item.id});
       if (item.chunk) row.dataset.recipeChunk=item.chunk.id;
-      const handle=movable ? el('button',null,{type:'button','data-edit':'',draggable:'true','aria-label':item.chunk ? '조합 청크 이동: '+item.name : 'LoRA 트리거 이동',title:'끌어서 조합 순서 변경'}) : null;
+      const handle=movable ? el('button',null,{type:'button','data-edit':'',draggable:'true','aria-label':item.chunk ? '조합 청크 이동: '+item.name : item.id==='trigger'?'LoRA 트리거 이동':'조합 '+item.name+' 이동',title:'끌어서 조합 순서 변경'}) : null;
       if (handle) {decorateIcon(handle,'drag_indicator');handle.disabled=!!io.isBusy?.();
         handle.style.touchAction='none';
         let pointerDrag=null;
@@ -4771,8 +4871,8 @@ function mountPresetEditor(parent, io) {
       const title=el('div',null,{class:'pq-recipe-title'});title.append(el('strong',item.chunk ? (item.index+1)+'. '+item.name : item.name),el('small',item.text || '없음'));
       if (!movable) {row.append(title);sequenceList.append(row);continue;}
       const controls=el('div',null,{class:'pq-actions'});
-      for (const direction of [-1,1]) {const target=keys[order+direction],control=action(direction<0 ? '↑' : '↓',()=>{if (target) moveRecipe(item.id,target,direction>0);});control.setAttribute('aria-label',item.chunk ? '조합 '+item.name+' '+(direction<0 ? '위로' : '아래로') : 'LoRA 트리거 '+(direction<0 ? '위로' : '아래로'));available(control,!!target && !!movedSequence(item.id,target,direction>0));controls.append(control);}
-      if (item.chunk) {const remove=action('×',()=>{selectedChunkIds.delete(item.chunk.id);renderChunkChoices();preview();});remove.setAttribute('aria-label','조합에서 제외: '+item.name);controls.append(remove);}
+      for (const direction of [-1,1]) {const target=keys[order+direction],control=action(direction<0 ? '↑' : '↓',()=>{if (target) moveRecipe(item.id,target,direction>0);});control.setAttribute('aria-label',(item.id==='trigger'?'LoRA 트리거':'조합 '+item.name)+' '+(direction<0 ? '위로' : '아래로'));available(control,!!target && !!movedSequence(item.id,target,direction>0));controls.append(control);}
+      if (item.chunk) {const remove=action('×',()=>{selectRecipeChunks([...selectedChunkIds].filter(id=>id!==item.chunk.id));renderChunkChoices();preview();});remove.setAttribute('aria-label','조합에서 제외: '+item.name);controls.append(remove);}
       row.append(handle,title,controls);sequenceList.append(row);
     }
     if (!chunks.length) sequenceList.append(el('small','왼쪽에서 청크를 체크하면 선택한 순서대로 쌓입니다.',{class:'pq-empty'}));
@@ -4780,8 +4880,8 @@ function mountPresetEditor(parent, io) {
   }
   const reservations = el('div',null,{class:'pq-reservation-list'});
   const visibleChunks = () => filterChunks(chunkSearch.input.value,chunkFilter.input.value).filter(chunk=>pickerOpened.has(chunk.folderId || ''));
-  const selectVisible = action('보이는 청크 모두 선택',()=>{for (const chunk of visibleChunks()) selectedChunkIds.add(chunk.id);renderChunkChoices();preview();});
-  const clearSelected = action('청크 선택 전부 해제',()=>{selectedChunkIds.clear();renderChunkChoices();preview();});
+  const selectVisible = action('보이는 청크 모두 선택',()=>{selectRecipeChunks([...selectedChunkIds,...visibleChunks().map(chunk=>chunk.id)]);renderChunkChoices();preview();});
+  const clearSelected = action('청크 선택 전부 해제',()=>{selectRecipeChunks([]);renderChunkChoices();preview();});
   selectVisible.setAttribute('aria-label','보이는 청크 모두 선택');selectVisible.textContent='모두 선택';decorateIcon(selectVisible,'playlist_add');
   clearSelected.setAttribute('aria-label','청크 선택 전부 해제');clearSelected.textContent='선택 해제';decorateIcon(clearSelected,'close');
   const choiceActions=el('div',null,{class:'pq-actions'});choiceActions.append(selectVisible,clearSelected);
@@ -4806,7 +4906,7 @@ function mountPresetEditor(parent, io) {
       const sourceNames={preset:'프리셋',character:'캐릭터',both:'양쪽'};
       const labels=merged.loras.map((lora,index)=>(lora.name||lora.id)+' ('+lora.weight+' · '+sourceNames[merged.sources[index]]+')');
       finalLorasSummary.textContent=labels.length?'최종 LoRA '+labels.length+'개':'적용 LoRA 없음';finalLorasBody.textContent=labels.length?' · '+labels.join(' · '):'';
-      prompts=composePresetPrompts(effectiveCommon,character||{},chunks,preset||{loras:[]},triggerPosition);
+      prompts=composePresetPrompts(effectiveCommon,character||{},chunks,preset||{loras:[]},triggerPosition,{}, {materialOrder,sceneIds:[...selectedChunkIds]});
     } catch(error){errorMessage=error.message;finalLorasSummary.textContent='LoRA·재료 설정 확인 필요';finalLorasBody.textContent='';}
     const {prompt='',negativePrompt=''}=prompts||{};
     const visible=visibleChunks(),visibleIds=new Set(visible.map(chunk=>chunk.id)),hidden=chunks.filter(chunk=>!visibleIds.has(chunk.id)).length;
@@ -4833,7 +4933,8 @@ function mountPresetEditor(parent, io) {
   for (const event of ['input','change']) reserveCount.input.addEventListener(event,preview);
   for (const select of [reservePreset.input,reserveCharacter.input]) select.addEventListener('change',preview);
   function renderChunkChoices() {
-    for (const id of selectedChunkIds) if (!library.scenes.some(item=>item.id===id)) {missingMaterials.push(`청크 ${id}`);selectedChunkIds.delete(id);}
+    const missing=[...selectedChunkIds].filter(id=>!library.scenes.some(item=>item.id===id));
+    if(missing.length){missingMaterials.push(...missing.map(id=>`청크 ${id}`));selectRecipeChunks([...selectedChunkIds].filter(id=>!missing.includes(id)));}
     missingMaterials=[...new Set(missingMaterials)];
     chunkList.replaceChildren();groupSummaries=new Map();
     const visible=filterChunks(chunkSearch.input.value,chunkFilter.input.value);
@@ -4850,7 +4951,7 @@ function mountPresetEditor(parent, io) {
         checkbox.checked = selectedChunkIds.has(chunk.id);
         checkbox.addEventListener('change',()=>{
           if (io.isBusy?.()) {checkbox.checked=selectedChunkIds.has(chunk.id);return;}
-          if (checkbox.checked) selectedChunkIds.add(chunk.id); else selectedChunkIds.delete(chunk.id);
+          selectRecipeChunks(checkbox.checked?[...selectedChunkIds,chunk.id]:[...selectedChunkIds].filter(id=>id!==chunk.id));
           preview();
         });
         const name = el('span',chunk.name);name.append(previewMaterial(el,chunk));
@@ -4905,7 +5006,7 @@ function mountPresetEditor(parent, io) {
     if (io.isBusy?.()) return;
     const resolved=resolveCombination(library,entry);
     loadedCombination=true;missingMaterials=resolved.missing;
-    reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);triggerPosition=resolved.triggerPosition ?? 1;
+    reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);triggerPosition=resolved.triggerPosition ?? 1;materialOrder=resolved.materialOrder?[...resolved.materialOrder]:undefined;
     setRecipeImages(resolved.imageOptions);
     reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();
     io.notify(resolved.missing.length ? `조합을 불러왔지만 없는 재료가 있습니다: ${resolved.missing.join(', ')}. 확인 전에는 예약하지 않습니다.` : '조합을 불러왔습니다. 현재 라이브러리 내용으로 미리보기를 확인해 주세요.');
@@ -4983,7 +5084,7 @@ function mountPresetEditor(parent, io) {
       if (!library.reservations.length) throw new Error('조합 예약을 먼저 추가해 주세요.');
       await io.enqueue(copy(library));
     });register.dataset.headerFeedback='';
-  review.append(el('strong','합쳐지는 순서'),sequenceList,el('strong','전송 미리보기'),finalLoras,combined,conflictActions,missingNotice);
+  review.append(el('strong','합쳐지는 순서'),sequenceList,triggerAnchor.wrap,el('strong','전송 미리보기'),finalLoras,combined,conflictActions,missingNotice);
   schedule.append(reserveCount.wrap,reservationActions,scheduleTabs,reservations,recentList,favoritesList);
   const composeMode=el('div',null,{class:'pq-compose-mode'});
   for (const [id,name] of [['choices','재료'],['review','순서·미리보기'],['schedule','예약·기록']]) {const button=el('button',name,{type:'button','data-compose-mode':id});button.addEventListener('click',()=>{reserveBody.dataset.composeMode=id;for (const control of composeMode.children) control.setAttribute('aria-pressed',String(control===button));});composeMode.append(button);}
@@ -4997,7 +5098,7 @@ function mountPresetEditor(parent, io) {
   for (const id of libraryIds) {const view=views.find(item=>item.id===id);libraryNavigation.append(view.tab);libraryPage.append(view.body);}
   libraryPage.replaceChildren(libraryNavigation,...libraryIds.map(id=>views.find(item=>item.id===id).body));
   navigation.replaceChildren(...['compose','library'].map(id=>views.find(item=>item.id===id).tab));
-  parityUI=mountParityWorkspace({root,el,action,field,commonBody,resizable,getLibrary:()=>library,commit,refreshCommonChoices,getRecipe:recipe,getImages:()=>({...recipeImages}),reloadLibrary:()=>{library=normalizePresetLibrary(io.load());refreshLists();renderReservations();preview();},loadRecipe:value=>{reservePreset.input.value=value.presetId;reserveCharacter.input.value=value.characterId;reserveCount.input.value=String(value.count||1);selectedChunkIds=new Set(value.sceneIds);triggerPosition=value.triggerPosition??1;setRecipeImages(value.imageOptions);reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();showPage('compose',false,true);},addPage:(id,title)=>{const body=section(title,false,id);navigation.append(views.find(v=>v.id===id).tab);return body;},enqueue:(value,options)=>io.enqueue(value,options),getThumbnail:id=>io.getThumbnail?.(id),io});
+  parityUI=mountParityWorkspace({root,el,action,field,commonBody,resizable,getLibrary:()=>library,commit,refreshCommonChoices,getRecipe:recipe,getImages:()=>({...recipeImages}),reloadLibrary:()=>{library=normalizePresetLibrary(io.load());refreshLists();renderReservations();preview();},loadRecipe:value=>{reservePreset.input.value=value.presetId;reserveCharacter.input.value=value.characterId;reserveCount.input.value=String(value.count||1);selectedChunkIds=new Set(value.sceneIds);triggerPosition=value.triggerPosition??1;materialOrder=value.materialOrder?[...value.materialOrder]:undefined;setRecipeImages(value.imageOptions);reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();showPage('compose',false,true);},addPage:(id,title)=>{const body=section(title,false,id);navigation.append(views.find(v=>v.id===id).tab);return body;},enqueue:(value,options)=>io.enqueue(value,options),getThumbnail:id=>io.getThumbnail?.(id),io});
   root.append(el('style','#local-pixai-queue .pq-material-preview p{margin:4px 0;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;font-size:13px;line-height:1.4}#local-pixai-queue .pq-preview-positive{-webkit-line-clamp:2}#local-pixai-queue .pq-preview-negative{-webkit-line-clamp:1;color:#a9b4bc}#local-pixai-queue .pq-ratio-mark{display:inline-block;flex:none;border:1.5px solid currentColor;border-radius:2px;margin-right:7px}#local-pixai-queue .pq-confirm{position:absolute;inset:15% 12% auto;background:#252b2f;border:1px solid #8bb8b0;padding:16px;z-index:20;border-radius:10px;box-shadow:0 8px 40px #0008}#local-pixai-queue .pq-common-default{flex:none}#local-pixai-queue .pq-common-editor{display:flex;flex-direction:column;gap:6px;padding:8px;overflow:auto}#local-pixai-queue .pq-parity-card{border-bottom:1px solid #455059;padding:8px}'));
   libraryTab='chunks';
   showPage('compose',false,false,false);
@@ -5007,7 +5108,7 @@ function mountPresetEditor(parent, io) {
     if (saved) {
       const draft=normalizeComposeDraft(saved),resolved=resolveCombination(library,draft);loadedCombination=true;
       missingMaterials=resolved.missing.filter(item=>!(item==='프리셋' && !draft.presetId) && !(item==='캐릭터' && !draft.characterId));
-      reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);triggerPosition=resolved.triggerPosition;
+      reservePreset.input.value=resolved.presetId;reserveCharacter.input.value=resolved.characterId;reserveCount.input.value=String(resolved.count);selectedChunkIds=new Set(resolved.sceneIds);triggerPosition=resolved.triggerPosition;materialOrder=resolved.materialOrder?[...resolved.materialOrder]:undefined;
       setRecipeImages(resolved.imageOptions);reservePresetPicker.render();reserveCharacterPicker.render();renderChunkChoices();preview();
     }
   } catch(error) {io.notify(`조합 편집 상태 복원 실패: ${error.message}`);}
@@ -5027,7 +5128,7 @@ function mountPresetEditor(parent, io) {
     refresh:() => {library = normalizePresetLibrary(io.load() || makePresetLibrary());refreshLists();renderReservations();preview();parityUI?.refresh();},
     reload:() => {
       const next=normalizePresetLibrary(io.load() || makePresetLibrary());
-      library=next;selectedChunkIds=new Set();missingMaterials=[];loadedCombination=false;triggerPosition=1;
+      library=next;selectedChunkIds=new Set();missingMaterials=[];loadedCombination=false;triggerPosition=1;materialOrder=undefined;
       setRecipeImages();parityUI?.refresh();
       presetSearch.input.value='';
       chunkSearch.input.value='';chunkFilter.input.value='';pickerOpened.clear();pickerOpened.add('');
@@ -5294,6 +5395,7 @@ function mountPresetEditor(parent, io) {
   const core = {encodeLocalPresetLibrary,decodeLocalPresetLibrary,normalizeCharacterLoras,mergeCharacterLoras,effectiveCharacterPreset,BACKUP_CATEGORIES,BACKUP_LABELS,backupSelection,backupFolderChoices,backupSelectionLabels,selectBackupLibrary,makeTransferBackup,parseTransferBackup,prepareBackupImport,filterQueueJobs,jobBatch,readPublicModelName,prepareImageForSave,createSceneThumbnailCache,atomicRecordWrite,subsetRegisteredLibrary,changeSceneCards,readImageInfo,embedGenerationInfo,imageCrc,inspectImageContainer,importImageComposition,importedImagePreset,compatibleSettings,resolvePresetCommon,deleteCommonPreset,DEFAULT_BATCH_PROMPT_ORDER,normalizeBatchPromptOrder,normalizeBatchPlan,makeSceneCard,refreshSceneCard,resolveBatchRow,expandBatchPlan,appendBatchReservations,parsePublicModelLink,imageInfoFields,submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   Object.assign(core,{assertWebReceipt,assertWebUnlimited,webOriginal,runWebUnlimited,createWebUnlimitedAdapter,createUserscriptStorage,readOfficialLoraTriggerWords,UPDATE_URLS,updateChannelUrl,updateChannelInfo,queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeComposeDraft,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   Object.assign(core,{SYNC_COLLECTIONS,canonicalSync,parseSyncLibrary,projectSyncLibrary,applySyncLibrary,syncLibraryHash,createLibrarySyncTransport,createLibrarySyncClient,mountLibrarySyncPanel});
+  Object.assign(core,{normalizeMaterialOrder});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
   if (window.top !== window.self || location.hostname !== 'pixai.art') return;
   const dataStorage=createUserscriptStorage(localStorage,typeof GM_getValue==='function' && typeof GM_setValue==='function' && typeof GM_deleteValue==='function' ? {get:GM_getValue,set:GM_setValue,remove:GM_deleteValue} : null);
@@ -5771,7 +5873,7 @@ function mountPresetEditor(parent, io) {
     panel = node('aside', null, {id:'local-pixai-queue'});
     if (typeof ResizeObserver==='function') new ResizeObserver(()=>{panel.dataset.short=String(panel.clientHeight>0 && panel.clientHeight<560);}).observe(panel);
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.10.21-dev.1', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.10.22-dev.1', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue .pq-backup-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}#local-pixai-queue .pq-backup-choices label.pq-check-label,#local-pixai-queue .pq-backup-folder-list label.pq-check-label{margin:5px 0;min-width:0}#local-pixai-queue .pq-backup-choices span,#local-pixai-queue .pq-backup-folder-list span{min-width:0;overflow-wrap:anywhere}#local-pixai-queue .pq-backup-folder-list{max-height:180px;overflow:auto;padding:4px 8px}#local-pixai-queue [data-backup-result]{padding:8px;border-left:3px solid #94bedf;overflow-wrap:anywhere}@media(max-width:700px){#local-pixai-queue .pq-backup-choices{grid-template-columns:minmax(0,1fr)}}';
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
@@ -5985,7 +6087,7 @@ function mountPresetEditor(parent, io) {
       }
       render();
     }
-    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.21-dev.1',exportedAt:new Date().toISOString()})));
+    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.22-dev.1',exportedAt:new Date().toISOString()})));
     const exportPreview=node('div',null,{'data-export-preview':''});exportPreview.hidden=true;
     let pendingExport=null;
     function clearExport() {pendingExport=null;exportPreview.replaceChildren();exportPreview.hidden=true;}
@@ -6021,7 +6123,7 @@ function mountPresetEditor(parent, io) {
       const folders=Object.fromEntries(Object.entries(p.folders).filter(([key])=>p.selection[key]));
       const save=backupButton('선택한 항목 파일 저장',()=>settingsAction(async()=>{
         if(dataStorage.getItem(LIBRARY_KEY)!==p.libraryBefore)throw new Error('백업 범위를 고르는 동안 자료가 바뀌었습니다. 선택 내보내기를 다시 열어 주세요.');
-        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.21-dev.1',exportedAt:new Date().toISOString()},folders);
+        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.22-dev.1',exportedAt:new Date().toISOString()},folders);
         await downloadSettings(data,'선택_설정');
         if(pendingExport===p){clearExport();openExport.focus();}
       },{readOnly:true}));
@@ -6044,7 +6146,7 @@ function mountPresetEditor(parent, io) {
       drawExport();exportPreview.hidden=false;exportPreview.querySelector('input')?.focus();
     });
     const compatibility=node('div',null,{'data-compatibility-preview':'',role:'status'});compatibility.hidden=true;
-    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.21-dev.1',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
+    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.22-dev.1',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
     const input=node('input',null,{type:'file',accept:'.json,application/json','aria-label':'설정 백업 JSON 파일','data-edit':''});input.hidden=true;
     const preview=node('div',null,{'data-import-preview':'','aria-live':'polite'});preview.hidden=true;
     let pendingSettings=null;
@@ -6536,7 +6638,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.21-dev.1', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.22-dev.1', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

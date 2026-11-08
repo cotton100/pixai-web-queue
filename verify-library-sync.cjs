@@ -35,6 +35,27 @@ test('canonical wire digest is object-order independent, array-order sensitive, 
     assert.notEqual(await core.syncLibraryHash([1,2]),await core.syncLibraryHash([2,1]));
     const cyclic={};cyclic.a=cyclic;for(const value of [cyclic,{a:undefined},NaN,new Date(),{constructor:'bad'}])assert.throws(()=>core.canonicalSync(value));
 });
+
+test('optional material folders retain legacy wire hashes and round-trip folder order and final deletion',async()=>{
+    const legacy=projection(),empty={...library(),presetFolders:[],commonPresetFolders:[]};
+    assert.deepEqual(projection(empty),legacy);
+    assert.equal(await core.syncLibraryHash(projection(empty)),await core.syncLibraryHash(legacy));
+    assert.deepEqual(core.parseSyncLibrary({...legacy,presetFolders:[],commonPresetFolders:[]}),legacy);
+    const source=library();source.presetFolders=[{id:'p-two',name:'Second'},{id:'p-one',name:'First'}];source.presets[0].folderId='p-two';
+    source.commonPresetFolders=[{id:'cf',name:'Common group'}];source.commonPresets=[{id:'cp',name:'Common',prompt:'linked',negativePrompt:'bad',folderId:'cf'}];source.presets[0].commonPresetId='cp';
+    const synchronized=core.applySyncLibrary(library(),projection(source));
+    assert.deepEqual(synchronized.presetFolders,source.presetFolders);assert.equal(synchronized.presets[0].folderId,'p-two');assert.equal(synchronized.commonPresets[0].folderId,'cf');
+    assert.equal(synchronized.reservations[0].snapshot.common.prompt,'before');
+    const removed=copy(source);removed.presetFolders=[];removed.commonPresetFolders=[];delete removed.presets[0].folderId;delete removed.commonPresets[0].folderId;
+    const cleared=core.applySyncLibrary(synchronized,projection(removed));
+    assert.deepEqual(cleared.presetFolders,[]);assert.deepEqual(cleared.commonPresetFolders,[]);assert.equal(cleared.presets[0].folderId,undefined);assert.deepEqual(projection(cleared),projection(removed));
+    for(const mutate of [v=>v.presetFolders=null,v=>v.commonPresetFolders={},v=>v.presets[0].folderId='missing',v=>v.commonPresets[0].folderId='missing']){const bad=projection(source);mutate(bad);assert.throws(()=>core.applySyncLibrary(synchronized,bad));}
+});
+
+test('app compatibility block explains required update without saving or acknowledging',async()=>{
+    const f=await linked();f.setReply(async()=>({state:'blocked',message:'폴더를 보존하려면 스크립트를 업데이트하세요.'}));
+    await f.client.sync();assert.match(f.client.state().message,/스크립트를 업데이트/);assert.equal(f.saves.length,0);assert(!f.calls.some(call=>call.path==='ack'));
+});
 test('replacing or deleting materials freezes old pending reservation settings and preserves local history',()=>{
     const old=library(),before=copy(old),next=projection();next.common.prompt='new';next.presets=[];next.characters=[];next.scenes=[];
     const result=core.applySyncLibrary(old,next);assert.deepEqual(old,before);assert.deepEqual(result.combinations,before.combinations);
@@ -128,6 +149,7 @@ test('concurrent manual requests cannot double-apply, and a busy disconnect cann
 });
 test('GM request uses only fixed loopback POST, anonymous transport, bounded timeout and bearer auth',async()=>{
     let request;const send=core.createLibrarySyncTransport(options=>{request=options;options.onload({status:200,responseHeaders:'Content-Type: application/json; charset=utf-8',responseText:'{"state":"idle"}',finalUrl:options.url});});
+    await send('exchange',{},token);assert.equal(request.headers['X-Pixai-Library-Features'],'material-folders-v1');
     await send('exchange',{library:projection(),automatic:false},token);assert.equal(request.url,'http://127.0.0.1:50321/v1/library-sync/exchange');assert.equal(request.method,'POST');assert.equal(request.anonymous,true);assert.equal(request.redirect,'error');assert.equal(request.timeout,5000);assert.equal(request.headers.Authorization,'Bearer '+token);
     await assert.rejects(send('../outside',{}));await assert.rejects(send('exchange',{large:'x'.repeat(21*1024*1024)},token));
 });

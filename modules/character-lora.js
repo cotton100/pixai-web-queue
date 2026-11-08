@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Browser-only envelope: older userscripts reject version 2 instead of dropping
-// character LoRAs on save. Transfer files still use the shared version 1 library.
+// Browser-only envelope: older userscripts reject version 2/3 instead of dropping
+// character LoRAs, material folders or composition order. Transfers still use version 1.
 function encodeLocalPresetLibrary(library) {
+    const folders = (library.presetFolders?.length || library.commonPresetFolders?.length ||
+        library.presets.some(preset => preset.folderId) || library.commonPresets?.some(preset => preset.folderId));
+    const ordered = [...library.reservations,...(library.combinations||[])].some(item=>Object.hasOwn(item,'materialOrder'));
+    if (folders || ordered) return JSON.stringify({ version: 3, library });
     return JSON.stringify(library.characters.some(character => character.loras?.length)
         ? { version: 2, library }
         : library);
 }
 function decodeLocalPresetLibrary(raw) {
     const value = raw === null ? makePresetLibrary() : JSON.parse(raw);
-    if (value?.version === 2) {
+    if (value?.version === 2 || value?.version === 3) {
         settingsBackupKeys(value, '브라우저 라이브러리', ['version', 'library']);
         return normalizePresetLibrary(value.library);
     }

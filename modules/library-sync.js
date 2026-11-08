@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Same-PC library transport. No PixAI credentials, job submission, or page fetch.
 const SYNC_COLLECTIONS=Object.freeze(['commonPresets','presets','characters','characterFolders','chunkFolders','scenes','sceneFolders','sceneCards','casts','batchPlans']);
+const SYNC_FOLDER_COLLECTIONS=Object.freeze(['presetFolders','commonPresetFolders']);
 const LIBRARY_SYNC_URL='http://127.0.0.1:50321/v1/library-sync/';
 const LIBRARY_SYNC_KEY='local.pixai-web-queue.library-sync.v1';
 const LIBRARY_SYNC_MAX_BYTES=20*1024*1024;
@@ -17,11 +18,12 @@ function canonicalSync(value) {
     }
     const text=JSON.stringify(sorted(value,0));if(new TextEncoder().encode(text).byteLength>LIBRARY_SYNC_MAX_BYTES)throw Error('동기화 자료는 20MiB까지 처리할 수 있습니다.');return text;
 }
-function syncProjection(library) {return {version:1,common:library.common,...Object.fromEntries(SYNC_COLLECTIONS.map(key=>[key,library[key]||[]]))};}
+function syncProjection(library) {return {version:1,common:library.common,...Object.fromEntries(SYNC_COLLECTIONS.map(key=>[key,library[key]||[]])),...Object.fromEntries(SYNC_FOLDER_COLLECTIONS.filter(key=>library[key]?.length).map(key=>[key,library[key]]))};}
 function parseSyncLibrary(value) {
     canonicalSync(value);
-    settingsBackupKeys(value,'동기화 라이브러리',['version','common',...SYNC_COLLECTIONS]);
+    settingsBackupKeys(value,'동기화 라이브러리',['version','common',...SYNC_COLLECTIONS],['version','common',...SYNC_COLLECTIONS,...SYNC_FOLDER_COLLECTIONS]);
     for(const key of SYNC_COLLECTIONS)if(!Array.isArray(value[key]))throw Error('동기화 목록 형식이 맞지 않습니다.');
+    for(const key of SYNC_FOLDER_COLLECTIONS)if(Object.hasOwn(value,key)&&!Array.isArray(value[key]))throw Error('동기화 폴더 목록 형식이 맞지 않습니다.');
     // Keep the existing schema's frozen-copy and saved-plan semantics. The app
     // merger rejects newly broken references; an already missing live source is preserved.
     return syncProjection(settingsBackupLibrary({...value,reservations:[]}));
@@ -29,6 +31,7 @@ function parseSyncLibrary(value) {
 function projectSyncLibrary(library) {return parseSyncLibrary(syncProjection(normalizePresetLibrary(library)));}
 function applySyncLibrary(current,incoming) {
     const next=parseSyncLibrary(incoming),old=normalizePresetLibrary(current);
+    for(const key of SYNC_FOLDER_COLLECTIONS)if(Object.hasOwn(old,key)||Object.hasOwn(next,key))next[key]=next[key]||[];
     return normalizePresetLibrary({...old,...next,reservations:old.reservations.map(item=>freezeBackupReservation(old,item))});
 }
 async function syncLibraryHash(value) {
@@ -45,7 +48,7 @@ function createLibrarySyncTransport(request,timers={setTimeout,clearTimeout}) {
         const offline=()=>finish(Object.assign(Error('앱 오프라인 · 앱의 같은 PC 연결을 켠 뒤 다시 시도하세요.'),{offline:true}));
         // Tampermonkey fetch-mode timeouts vary by browser. Always own a deadline.
         const deadline=timers.setTimeout(()=>{offline();handle?.abort?.();},5000);
-        try {handle=request({method:'POST',url,data,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},anonymous:true,redirect:'error',timeout:5000,
+        try {handle=request({method:'POST',url,data,headers:{'Content-Type':'application/json','X-Pixai-Library-Features':'material-folders-v1',...(token?{Authorization:'Bearer '+token}:{})},anonymous:true,redirect:'error',timeout:5000,
             onerror:offline,ontimeout:offline,onabort:offline,
             onprogress:progress=>{if(progress.loaded>limit){finish(Error('앱의 동기화 응답이 너무 큽니다.'));handle?.abort?.();}},
             onload:response=>{
@@ -76,7 +79,7 @@ function createLibrarySyncClient(io) {
             for(const item of p.conflicts)if(!item||typeof item.key!=='string'||typeof item.label!=='string')throw Error('동기화 충돌 형식을 확인하지 못했습니다.');
         }
         exchange=value;
-        if(value.state!=='apply'){message=value.state==='preview'?'미리보기를 확인하고 적용해 주세요.':value.state==='blocked'?'자료가 변경되었거나 앱 편집 중입니다. 확인한 뒤 지금 동기화를 누르세요.':'연결됨 · 라이브러리 확인 완료';return value;}
+        if(value.state!=='apply'){message=value.state==='preview'?'미리보기를 확인하고 적용해 주세요.':value.state==='blocked'?(typeof value.message==='string'?value.message:'자료가 변경되었거나 앱 편집 중입니다. 확인한 뒤 지금 동기화를 누르세요.'):'연결됨 · 라이브러리 확인 완료';return value;}
         if(typeof value.transactionId!=='string'||!value.transactionId||!/^[a-f0-9]{64}$/.test(value.expectedScriptHash||''))throw Error('동기화 전송 정보를 확인하지 못했습니다.');
         const incoming=parseSyncLibrary(value.library),current=io.read(),projection=projectSyncLibrary(current);
         if(canonicalSync(projection)!==canonicalSync(incoming)){
