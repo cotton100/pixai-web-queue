@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.10.20
+// @version      0.10.21
 // @license      GPL-3.0-only
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -453,7 +453,7 @@ function effectiveCharacterPreset(preset, character = {}, options = {}) {
 }
   // END CHARACTER LORA
   const UPDATE_CHANNEL = 'stable';
-  const UPDATE_BUILD_VERSION = '0.10.20';
+  const UPDATE_BUILD_VERSION = '0.10.21';
   const UPDATE_URLS = Object.freeze({stable:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js',development:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js'});
   function updateChannelUrl(channel) {
     if (!Object.hasOwn(UPDATE_URLS,channel)) throw new Error('업데이트 채널을 다시 선택해 주세요.');
@@ -1482,9 +1482,11 @@ function mountSceneStudio(ctx) {
     const layout=el('div',null,{class:'pq-studio-layout'}),materials=el('div',null,{class:'pq-studio-materials'}),editor=el('div',null,{class:'pq-studio-editor'}),schedule=el('div',null,{class:'pq-studio-schedule'}),notice=el('div',null,{role:'status',class:'pq-studio-notice'});
     const searchRows=field('캐릭터·출연 검색','input',{type:'search',placeholder:'캐릭터·출연 검색'}),searchScenes=field('씬 검색','input',{type:'search',placeholder:'씬 검색'}),rowList=el('div',null,{class:'pq-studio-list','aria-label':'캐릭터·출연 선택'}),sceneList=el('div',null,{class:'pq-studio-list','aria-label':'씬 선택 목록'});
     searchRows.input.value=rowQuery;searchScenes.input.value=sceneQuery;
+    const searchExtraChunks=field('일괄 추가 청크 검색','input',{type:'search',placeholder:'추가 청크 검색'}),extraChunkList=el('div',null,{class:'pq-studio-list','aria-label':'일괄 추가 청크 선택'}),openExtraChunks=new Set(['']);
     const selectedRows=el('div',null,{class:'pq-studio-selected','aria-label':'선택 행 순서'}),selectedColumns=el('div',null,{class:'pq-studio-selected','aria-label':'선택 씬 순서'}),summary=el('strong',null,{role:'status','aria-label':'일괄 예약 수량'}),preview=el('div',null,{class:'pq-preview','aria-label':'일괄 조합 문구 미리보기'}),exceptions=el('details');exceptions.append(el('summary','조합별 반복 · 0회는 제외'));const table=el('div',null,{class:'pq-studio-matrix'});exceptions.append(table);
     const count=field('일괄 반복 수','input',{type:'number',min:'1',max:'100'}),batchName=field('묶음 이름','input',{placeholder:'비우면 자동 이름'}),order=el('div'),plans=el('div',null,{class:'pq-choice-list','aria-label':'저장한 일괄 구성'});count.input.value=String(plan.count);batchName.input.value=plan.name;
     const images=studioImages(ctx,plan.imageOptions,value=>updatePlan({...plan,imageOptions:value}));
+    const selectedExtraChunks=el('div',null,{class:'pq-studio-selected','aria-label':'선택 추가 청크 순서'}),promptOrder=el('div',null,{class:'pq-studio-selected','aria-label':'일괄 문구 합치는 순서'});
     function persist(strict=false){try{ctx.io.saveStudioDraft?.({mode:studioMode,materialMode,plan,selectedCard,rowQuery,sceneQuery,openRows:[...openRows],openScenes:[...openScenes]});uiWarning='';}catch(error){uiWarning='화면 구성 저장 실패 · 현재 화면만 유지: '+error.message;if(strict)throw error;notice.textContent=uiWarning;}}
     function updatePlan(next){const previous=plan;try{plan=normalizeBatchPlan(next,next.id||'studio');persist(true);}catch(error){plan=previous;notice.textContent=uiWarning;}renderSchedule();renderMaterials();}
     const dirty=()=>!!draft&&JSON.stringify(draft)!==JSON.stringify(baseline);
@@ -1516,7 +1518,17 @@ function mountSceneStudio(ctx) {
             parent.append(details);
         }
     }
-    function renderMaterials(){const lib=ctx.getLibrary();grouped(rowItems(),rowList,lib.characterFolders||[],openRows,rowQuery,true);grouped((lib.sceneCards||[]).map(v=>({...v,text:v.chunks.map(c=>c.prompt).join(', ')+', '+(v.extra?.prompt||''),negativePrompt:v.extra?.negativePrompt||''})),sceneList,lib.sceneFolders||[],openScenes,sceneQuery,false);groupChoices.replaceChildren(parityChoice(ctx,'씬 이동 그룹',[{id:'',name:'미분류'},...(lib.sceneFolders||[])],managedGroup,value=>{managedGroup=value;renderMaterials();}));selectionStatus.textContent=`씬 관리 ${checked.size}개 선택 · 그룹 ${lib.sceneFolders?.find(v=>v.id===managedGroup)?.name||'미분류'}`;renderMaterialMode();}
+    function renderExtraChunks(){
+        const lib=ctx.getLibrary(),query=searchExtraChunks.input.value.toLocaleLowerCase();extraChunkList.replaceChildren();
+        for(const group of [{id:'',name:'미분류'},...(lib.chunkFolders||[])]){
+            const items=lib.scenes.filter(v=>(v.folderId||'')===group.id&&(!query||(v.name+' '+v.prompt+' '+v.negativePrompt).toLocaleLowerCase().includes(query)));if(!items.length)continue;
+            const details=el('details',null,{class:'pq-folder-group'});details.open=query?true:openExtraChunks.has(group.id);details.append(el('summary',group.name+' · '+items.length+'개'));
+            details.addEventListener('toggle',()=>{if(!query){if(details.open)openExtraChunks.add(group.id);else openExtraChunks.delete(group.id);}});
+            for(const item of items){const row=el('div',null,{class:'pq-parity-card pq-studio-material-card'}),choice=field('일괄 추가 청크 선택: '+item.name,'input',{type:'checkbox'});choice.input.checked=(plan.extraChunkIds||[]).includes(item.id);choice.wrap.className='pq-check-label';choice.wrap.replaceChildren(choice.input,el('span',item.name));choice.input.addEventListener('change',()=>updatePlan({...plan,extraChunkIds:choice.input.checked?[...(plan.extraChunkIds||[]),item.id]:(plan.extraChunkIds||[]).filter(id=>id!==item.id)}));row.append(choice.wrap,previewMaterial(el,item));details.append(row);}extraChunkList.append(details);
+        }
+        if(!extraChunkList.children.length)extraChunkList.append(el('small','선택할 추가 청크가 없습니다.'));
+    }
+    function renderMaterials(){const lib=ctx.getLibrary();grouped(rowItems(),rowList,lib.characterFolders||[],openRows,rowQuery,true);grouped((lib.sceneCards||[]).map(v=>({...v,text:v.chunks.map(c=>c.prompt).join(', ')+', '+(v.extra?.prompt||''),negativePrompt:v.extra?.negativePrompt||''})),sceneList,lib.sceneFolders||[],openScenes,sceneQuery,false);renderExtraChunks();groupChoices.replaceChildren(parityChoice(ctx,'씬 이동 그룹',[{id:'',name:'미분류'},...(lib.sceneFolders||[])],managedGroup,value=>{managedGroup=value;renderMaterials();}));selectionStatus.textContent=`씬 관리 ${checked.size}개 선택 · 그룹 ${lib.sceneFolders?.find(v=>v.id===managedGroup)?.name||'미분류'}`;renderMaterialMode();}
     async function moveCards(operation,newGroup){let next=copy(ctx.getLibrary()),folderId=managedGroup;if(newGroup){folderId=crypto.randomUUID();next.sceneFolders=[...(next.sceneFolders||[]),{id:folderId,name:newGroup}];}next=changeSceneCards(next,[...checked],{operation,folderId});await ctx.commit(next,'선택한 씬을 '+({move:'이동',duplicate:'복제',delete:'삭제'})[operation]+'했습니다. 등록된 작업·원본 이미지에는 영향이 없습니다.');if(newGroup)managedGroup=folderId;if(operation==='delete')checked.clear();renderMaterials();}
     const groupName=field('새 씬 그룹 이름'),groupChoices=el('div'),selectionStatus=el('small',null,{role:'status'}),management=el('details');management.append(el('summary','씬·그룹 관리'),selectionStatus,groupChoices,groupName.wrap,action('새 그룹 만들기',async()=>{if(!groupName.input.value.trim())throw Error('그룹 이름을 입력해 주세요.');const next=copy(ctx.getLibrary()),id=crypto.randomUUID();next.sceneFolders=[...(next.sceneFolders||[]),{id,name:groupName.input.value.trim()}];await ctx.commit(next,'씬 그룹을 만들었습니다.');managedGroup=id;renderMaterials();}),action('선택 씬 이동',()=>moveCards('move')),action('새 그룹으로 선택 이동',()=>{if(!groupName.input.value.trim())throw Error('새 그룹 이름을 입력해 주세요.');return moveCards('move',groupName.input.value.trim());}),action('선택 씬 복제',()=>moveCards('duplicate')),action('선택 씬 삭제',()=>ctx.confirm('선택한 씬 카드만 삭제합니다. 예약 사본과 원본 이미지는 유지합니다.',()=>moveCards('delete'))),action('그룹 이름 변경',async()=>{if(!managedGroup||!groupName.input.value.trim())throw Error('그룹과 새 이름을 입력해 주세요.');const next=copy(ctx.getLibrary());next.sceneFolders.find(v=>v.id===managedGroup).name=groupName.input.value.trim();await ctx.commit(next,'씬 그룹 이름을 바꿨습니다.');renderMaterials();}),action('선택 그룹 삭제',()=>ctx.confirm('그룹만 삭제하고 씬은 미분류로 옮깁니다.',async()=>{const next=copy(ctx.getLibrary());next.sceneFolders=next.sceneFolders.filter(v=>v.id!==managedGroup);for(const card of next.sceneCards||[])if(card.folderId===managedGroup)delete card.folderId;await ctx.commit(next,'씬 그룹을 삭제했습니다.');managedGroup='';renderMaterials();})));
     function renderEditor(){editor.replaceChildren(el('strong','씬 사본 편집'));if(!draft){editor.append(el('p','씬을 누르면 이 칸에서 청크 사본을 편집합니다.'));return;}const lib=ctx.getLibrary(),name=field('씬 이름'),extraPrompt=field('씬 추가 포지','textarea'),extraNegative=field('씬 추가 네거','textarea'),status=el('small',null,{role:'status'});name.input.value=draft.name;extraPrompt.input.value=draft.extra?.prompt||'';extraNegative.input.value=draft.extra?.negativePrompt||'';
@@ -1527,24 +1539,27 @@ function mountSceneStudio(ctx) {
         editor.append(studioImages(ctx,draft.imageOptions,value=>{if(value)draft.imageOptions=value;else delete draft.imageOptions;status.textContent='저장 안 됨';},{optional:true}).wrap);
         editor.append(parityChoice(ctx,'씬 트리거 위치',[{id:1,name:'공통문 뒤'},{id:2,name:'캐릭터 뒤'},{id:'end',name:'맨 끝'}],draft.triggerPosition??1,value=>{draft.triggerPosition=value;renderEditor();}),action('씬 저장',save),action('씬 복제 저장',async()=>{const next=copy(lib),card={...copy(draft),id:crypto.randomUUID(),name:(draft.name||'씬')+' (복사본)'};next.sceneCards=[...(next.sceneCards||[]),card];await ctx.commit(next,'새 씬으로 복제 저장했습니다.');selectedCard=card.id;baseline=copy(card);draft=copy(card);persist();renderEditor();}),action('최신 청크로 갱신',()=>{if(!selectedCard)throw Error('씬을 먼저 저장하세요.');const diff=refreshSceneCard(lib,selectedCard);ctx.confirm(`${diff.changes.length}개 변경 · 원본 삭제 ${diff.missing.length}개는 사본 유지\n`+diff.changes.map(v=>`${v.field}: ${v.before} → ${v.after}`).join('\n'),()=>{draft.chunks=copy(diff.card.chunks);renderEditor();});}));
     }
-    function renderSchedule(){selectedRows.replaceChildren();selectedColumns.replaceChildren();const lib=ctx.getLibrary();
+    function renderSchedule(){selectedRows.replaceChildren();selectedColumns.replaceChildren();selectedExtraChunks.replaceChildren();promptOrder.replaceChildren();const lib=ctx.getLibrary();
         for(const row of plan.rows){const key=batchRowKey(row),resolved=resolveBatchRow(lib,row),entry=el('div',null,{class:'pq-parity-card'});entry.append(parityDrag(ctx,entry,key,plan.rows.map(batchRowKey),ids=>updatePlan({...plan,rows:ids.map(id=>plan.rows.find(v=>batchRowKey(v)===id))}),'일괄 행'),el('strong',resolved.name),action('행 제외',()=>updatePlan({...plan,rows:plan.rows.filter(v=>batchRowKey(v)!==key)})));
             if(row.kind==='character')entry.append(parityChoice(ctx,`행 프리셋: ${resolved.name}`,lib.presets.map(v=>({id:v.id,name:v.name})),resolved.presetId,value=>updatePlan({...plan,rows:plan.rows.map(v=>batchRowKey(v)===key?{...v,presetId:value}:v)})));if(resolved.problems.length)entry.append(el('small',resolved.problems.join(' · ')));selectedRows.append(entry);}
         for(const id of plan.columns){const card=lib.sceneCards?.find(v=>v.id===id),entry=el('div',null,{class:'pq-parity-card'});entry.append(parityDrag(ctx,entry,id,plan.columns,ids=>updatePlan({...plan,columns:ids}),'일괄 씬'),el('strong',card?.name||'(삭제된 씬)'),action('열 제외',()=>updatePlan({...plan,columns:plan.columns.filter(v=>v!==id)})));selectedColumns.append(entry);}
-        let expansion;try{expansion=expandBatchPlan(lib,plan,{defaultImageOptions:ctx.getImages()});summary.textContent=`${expansion.totals.pairs}조합 · ${expansion.totals.jobs}작업 · ${expansion.totals.images}장`;notice.textContent=[uiWarning,...expansion.problems.map(v=>v.message)].filter(Boolean).join('\n');if(expansion.reservations.length){const res=expansion.reservations[0],f=res.snapshot;preview.textContent=composePresetPrompts(f.common,f.character,f.chunks,f.preset,res.triggerPosition,f.extras).prompt;}else preview.textContent='캐릭터/출연과 씬을 고르세요.';}catch(error){notice.textContent=error.message;summary.textContent='구성을 확인해 주세요.';}
+        for(const id of plan.extraChunkIds||[]){const chunk=lib.scenes.find(v=>v.id===id),entry=el('div',null,{class:'pq-parity-card'});entry.append(parityDrag(ctx,entry,id,plan.extraChunkIds,ids=>updatePlan({...plan,extraChunkIds:ids}),'추가 청크'),el('strong',chunk?.name||'(삭제된 추가 청크)'),action('추가 청크 제외: '+(chunk?.name||id),()=>updatePlan({...plan,extraChunkIds:plan.extraChunkIds.filter(v=>v!==id)})));selectedExtraChunks.append(entry);}
+        const blocks=plan.promptOrder||['character','scene','extraChunks'],labels={character:'캐릭터·출연',scene:'씬',extraChunks:'추가 청크'};for(const id of blocks){const entry=el('div',null,{class:'pq-parity-card'});entry.append(parityDrag(ctx,entry,id,blocks,ids=>updatePlan({...plan,promptOrder:ids}),'문구 순서'),el('strong',labels[id]));promptOrder.append(entry);}
+        let expansion;try{expansion=expandBatchPlan(lib,plan,{defaultImageOptions:ctx.getImages()});summary.textContent=`${expansion.totals.pairs}조합 · ${expansion.totals.jobs}작업 · ${expansion.totals.images}장`;notice.textContent=[uiWarning,...expansion.problems.map(v=>v.message)].filter(Boolean).join('\n');if(expansion.reservations.length){const res=expansion.reservations[0],f=res.snapshot;preview.textContent=composePresetPrompts(f.common,f.character,f.chunks,f.preset,res.triggerPosition,f.extras,{extraChunks:f.extraChunks,promptOrder:f.promptOrder}).prompt;}else preview.textContent='캐릭터/출연과 씬을 고르세요.';}catch(error){notice.textContent=error.message;summary.textContent='구성을 확인해 주세요.';}
         table.replaceChildren();for(const row of plan.rows)for(const id of plan.columns){const key=batchCellKey(batchRowKey(row),id),label=`반복: ${resolveBatchRow(lib,row).name} × ${lib.sceneCards?.find(v=>v.id===id)?.name||id}`,input=field(label,'input',{type:'number',min:'0',max:'100'});input.input.value=String(plan.exceptions[key]??plan.count);input.input.addEventListener('change',()=>updatePlan({...plan,exceptions:{...plan.exceptions,[key]:Number(input.input.value)}}));table.append(input.wrap);}
         order.replaceChildren(parityChoice(ctx,'순회 순서',[{id:'byRow',name:'캐릭터별'},{id:'byColumn',name:'씬별'}],plan.order,value=>updatePlan({...plan,order:value})));plans.replaceChildren();for(const item of lib.batchPlans||[]){const button=action(item.name||item.id,()=>{plan=normalizeBatchPlan(item,item.id);count.input.value=String(plan.count);batchName.input.value=plan.name;images.set(plan.imageOptions);persist();renderSchedule();renderMaterials();});plans.append(button);}
     }
     async function reserve(register){const previous=copy(ctx.getLibrary()),expanded=expandBatchPlan(previous,plan,{defaultImageOptions:ctx.getImages()}),next=appendBatchReservations(previous,expanded);if(register)await ctx.enqueue({...next,reservations:expanded.reservations},{fresh:true});else await ctx.commit(next,`${expanded.totals.jobs}개 미등록 예약을 만들었습니다. 생성 요청은 보내지 않았습니다.`);renderSchedule();}
     count.input.addEventListener('change',()=>updatePlan({...plan,count:Number(count.input.value)}));batchName.input.addEventListener('input',()=>updatePlan({...plan,name:batchName.input.value}));searchRows.input.addEventListener('input',()=>{rowQuery=searchRows.input.value;persist();renderMaterials();});searchScenes.input.addEventListener('input',()=>{sceneQuery=searchScenes.input.value;persist();renderMaterials();});
+    searchExtraChunks.input.addEventListener('input',renderExtraChunks);
     const castTools=el('details');castTools.append(el('summary','캐릭터 기본 프리셋·출연 관리'));const castEditor=mountCastTools(ctx,castTools,()=>{renderMaterials();renderSchedule();});const renderCast=()=>castEditor.refresh();
     const materialTabs=el('div',null,{class:'pq-studio-material-tabs',role:'group','aria-label':'재료 목록 전환'}),materialPanels={rows:el('div',null,{class:'pq-studio-material-panel','data-studio-material':'rows'}),scenes:el('div',null,{class:'pq-studio-material-panel','data-studio-material':'scenes'}),manage:el('div',null,{class:'pq-studio-material-panel pq-studio-material-management','data-studio-material':'manage'})},materialButtons={};
     for(const [id,label] of [['rows','캐릭터·출연'],['scenes','씬'],['manage','관리']]){const control=action(label,()=>{materialMode=id;renderMaterialMode();persist();});control.setAttribute('aria-label',`${label} 목록 보기`);control.setAttribute('data-view-only','');materialButtons[id]=control;materialTabs.append(control);}
     function renderMaterialMode(){for(const [id,pane] of Object.entries(materialPanels)){pane.hidden=id!==materialMode;materialButtons[id].setAttribute('aria-pressed',String(id===materialMode));}materialButtons.rows.textContent=`캐릭터·출연 ${plan.rows.length}`;materialButtons.scenes.textContent=`씬 ${plan.columns.length}`;materialButtons.manage.textContent=checked.size?`관리 ${checked.size}`:'관리';materialButtons.rows.title=`예약에 선택한 캐릭터·출연 ${plan.rows.length}개`;materialButtons.scenes.title=`예약에 선택한 씬 ${plan.columns.length}개`;}
     const sceneActions=el('div',null,{class:'pq-studio-material-actions'}),newScene=action('새 씬',()=>editCard(null)),fromRecipe=action('조합에서 만들기',async()=>{const recipe=ctx.getRecipe(),lib=ctx.getLibrary(),card={id:crypto.randomUUID(),name:recipe.sceneIds.map(id=>lib.scenes.find(v=>v.id===id)?.name).filter(Boolean).join(' · ')||'새 씬',sceneIds:[...recipe.sceneIds],chunks:recipe.sceneIds.map(id=>stripFolder(lib.scenes.find(v=>v.id===id))),imageOptions:recipe.imageOptions,triggerPosition:recipe.triggerPosition};const next=copy(lib);next.sceneCards=[...(next.sceneCards||[]),card];await ctx.commit(next,'현재 청크 조합을 씬 사본으로 저장했습니다.');editCard(card);});
     newScene.setAttribute('aria-label','새 씬 만들기');fromRecipe.setAttribute('aria-label','현재 조합으로 씬 만들기');newScene.title='새 씬 만들기';fromRecipe.title='현재 조합으로 씬 만들기';sceneActions.append(newScene,fromRecipe);
-    materialPanels.rows.append(searchRows.input,rowList);materialPanels.scenes.append(sceneActions,searchScenes.input,sceneList);materialPanels.manage.append(castTools,management);materials.append(materialTabs,...Object.values(materialPanels));
-    schedule.append(el('strong','예약 구성·순서'),selectedRows,selectedColumns,images.wrap,order,count.wrap,batchName.wrap,summary,notice,preview,exceptions,action('선택 조합 전부 예약',()=>reserve(false)),action('예약 후 바로 등록',()=>reserve(true)),action('구성 저장',async()=>{const next=copy(ctx.getLibrary()),saved=normalizeBatchPlan(plan,plan.id||crypto.randomUUID());saved.name=plan.name||defaultBatchName(plan.rows.length,plan.columns.length);next.batchPlans=next.batchPlans||[];const at=next.batchPlans.findIndex(v=>v.id===saved.id);if(at<0)next.batchPlans.push(saved);else next.batchPlans[at]=saved;await ctx.commit(next,'일괄 구성을 저장했습니다.');}),action('새 구성',()=>{plan={id:crypto.randomUUID(),name:'',rows:[],columns:[],count:1,exceptions:{},order:'byRow',imageOptions:ctx.getImages()};count.input.value='1';batchName.input.value='';images.set(plan.imageOptions);persist();renderSchedule();renderMaterials();}),el('strong','저장한 구성'),plans);
+    materialPanels.rows.append(searchRows.input,rowList,el('strong','추가 청크 · 모든 선택 조합에 적용'),searchExtraChunks.input,extraChunkList);materialPanels.scenes.append(sceneActions,searchScenes.input,sceneList);materialPanels.manage.append(castTools,management);materials.append(materialTabs,...Object.values(materialPanels));
+    schedule.append(el('strong','예약 구성·순서'),selectedRows,selectedColumns,el('strong','선택한 추가 청크'),selectedExtraChunks,el('strong','문구 합치는 순서 · 끌어서 변경'),promptOrder,images.wrap,order,count.wrap,batchName.wrap,summary,notice,preview,exceptions,action('선택 조합 전부 예약',()=>reserve(false)),action('예약 후 바로 등록',()=>reserve(true)),action('구성 저장',async()=>{const next=copy(ctx.getLibrary()),saved=normalizeBatchPlan(plan,plan.id||crypto.randomUUID());saved.name=plan.name||defaultBatchName(plan.rows.length,plan.columns.length);next.batchPlans=next.batchPlans||[];const at=next.batchPlans.findIndex(v=>v.id===saved.id);if(at<0)next.batchPlans.push(saved);else next.batchPlans[at]=saved;await ctx.commit(next,'일괄 구성을 저장했습니다.');}),action('새 구성',()=>{plan={id:crypto.randomUUID(),name:'',rows:[],columns:[],count:1,exceptions:{},order:'byRow',imageOptions:ctx.getImages()};count.input.value='1';batchName.input.value='';images.set(plan.imageOptions);persist();renderSchedule();renderMaterials();}),el('strong','저장한 구성'),plans);
     ctx.resizable(layout,[materials,editor,schedule],'씬·일괄 예약',[.32,.34,.34],[240,260,250]);const mode=el('div',null,{class:'pq-studio-mode'}),modeButtons={};for(const [id,label] of [['materials','재료 선택'],['editor','씬 편집'],['schedule','구성·예약']]){const control=action(label,()=>{studioMode=id;renderModes();persist();});control.setAttribute('data-view-only','');modeButtons[id]=control;mode.append(control);}function renderModes(){body.dataset.studioMode=studioMode;for(const [id,control] of Object.entries(modeButtons))control.setAttribute('aria-pressed',String(id===studioMode));}renderModes();body.append(mode,layout);const restored=ctx.getLibrary().sceneCards?.find(v=>v.id===selectedCard);if(restored){draft=copy(restored);baseline=copy(restored);}renderMaterials();renderEditor();renderSchedule();renderCast();
     return {dirty,save,discard,castEditor,refresh(){const live=ctx.getLibrary().sceneCards?.find(v=>v.id===selectedCard);if(!dirty()){draft=live?copy(live):null;baseline=live?copy(live):null;renderEditor();}renderMaterials();renderSchedule();renderCast();}};
 }
@@ -1558,6 +1573,11 @@ function readGroupView(storage,key){try{const value=JSON.parse(storage.getItem(k
 // Browser port retains legacy validators; batch image options merge per field.
 const hasOwn=(value,key)=>Object.hasOwn(value,key);
 const MAX_RESERVED_JOBS=1000;
+const DEFAULT_BATCH_PROMPT_ORDER=Object.freeze(['character','scene','extraChunks']);
+function normalizeBatchPromptOrder(value){
+    if(!Array.isArray(value)||value.length!==DEFAULT_BATCH_PROMPT_ORDER.length||!DEFAULT_BATCH_PROMPT_ORDER.every(block=>value.includes(block)))throw Error('문구 순서는 캐릭터·씬·추가 청크를 한 번씩 포함해야 합니다.');
+    return [...value];
+}
 function allowedKeys(...args){return settingsBackupKeys(...args);}
 function normalizeLibrary(value){return normalizePresetLibrary(value);}
 function normalizeImageOptions(value){return normalizeReservationImageOptions(value);}
@@ -1596,7 +1616,9 @@ function compatibleSettings(library,options,meta,target='app') {
         for(const key of ['commonPresets','sceneCards','sceneFolders','casts','batchPlans'])if(Object.hasOwn(out,key)){delete out[key];warnings.push(`${key}는 0.9.14에서 편집할 수 없어 제외합니다.`);}
         const cleanPreset=preset=>{const next={...preset};delete next.prompt;delete next.negativePrompt;delete next.commonPresetId;return next;};
         if(out.presets.some(item=>item.prompt||item.negativePrompt||item.commonPresetId))warnings.push('프리셋 문구·공통문 연결은 새 조합에서 제외합니다. 이미 예약한 문구는 사본에 합쳐 보존합니다.');
-        out.reservations=out.reservations.map(res=>{
+        const omitted=out.reservations.filter(res=>res.snapshot?.extraChunks?.length||res.snapshot?.promptOrder?.some((block,index)=>block!==DEFAULT_BATCH_PROMPT_ORDER[index]));
+        if(omitted.length)warnings.push(`추가 청크 또는 문구 순서가 있는 예약 ${omitted.length}개는 0.9.14에서 보존할 수 없어 제외합니다. 최신 전체 또는 선택 백업을 사용해 주세요.`);
+        out.reservations=out.reservations.filter(res=>!omitted.includes(res)).map(res=>{
             const next={...res},frozen=res.snapshot || snapshotCombination(library,res),p=frozen.preset,join=(...parts)=>parts.map(presetText).filter(Boolean).join(', ');
             const chunks=frozen.chunks.map(item=>({...item})),extras=frozen.extras||{};
             if(extras.scene&&(extras.scene.prompt||extras.scene.negativePrompt))chunks.push({id:`${res.id}:scene-extra`,name:'씬 추가 문구',...extras.scene});
@@ -1687,7 +1709,7 @@ function normalizeCast(item, id) {
 const batchRowKey = (row) => `${row.kind}:${row.id}`;
 const batchCellKey = (rowKey, columnId) => `${rowKey}|${columnId}`;
 function normalizeBatchPlan(item, id = 'plan') {
-    const source = allowedKeys(item, '일괄 예약 구성', ['rows', 'columns', 'count'], ['id', 'name', 'rows', 'columns', 'count', 'exceptions', 'order', 'imageOptions']);
+    const source = allowedKeys(item, '일괄 예약 구성', ['rows', 'columns', 'count'], ['id', 'name', 'rows', 'columns', 'count', 'exceptions', 'order', 'imageOptions', 'extraChunkIds', 'promptOrder']);
     if (!Array.isArray(source.rows) || !Array.isArray(source.columns))
         throw new Error('일괄 예약의 행·열 목록 형식을 확인해 주세요.');
     const rows = source.rows.map((row) => {
@@ -1733,6 +1755,15 @@ function normalizeBatchPlan(item, id = 'plan') {
     }
     if (hasOwn(source, 'imageOptions') && source.imageOptions != null)
         plan.imageOptions = normalizeImageOptions(source.imageOptions);
+    if (hasOwn(source, 'extraChunkIds')) {
+        if (!Array.isArray(source.extraChunkIds))
+            throw new Error('추가 청크 목록 형식을 확인해 주세요.');
+        plan.extraChunkIds = source.extraChunkIds.map(value => presetIdentifier(value, '추가 청크'));
+        if (new Set(plan.extraChunkIds).size !== plan.extraChunkIds.length)
+            throw new Error('추가 청크가 중복됐습니다.');
+    }
+    if (hasOwn(source, 'promptOrder'))
+        plan.promptOrder = normalizeBatchPromptOrder(source.promptOrder);
     return plan;
 }
 function normalizeBatchTag(value) {
@@ -1935,6 +1966,12 @@ function expandBatchPlan(value, planInput, options = {}) {
         ? 4
         : presetInteger(options.batchSize, '배치 장수', 1, 4);
     const problems = [];
+    const extraChunks = [];
+    for (const id of plan.extraChunkIds ?? []) {
+        const chunk = library.scenes.find(item => item.id === id);
+        if (chunk) extraChunks.push(stripFolder(chunk));
+        else problems.push({ level: 'error', message: `선택한 추가 청크가 없습니다: ${id}` });
+    }
     const rows = plan.rows.map((row) => resolveBatchRow(library, row));
     for (const row of rows)
         for (const message of row.problems)
@@ -1957,6 +1994,12 @@ function expandBatchPlan(value, planInput, options = {}) {
                 columnId: id,
                 columnName: card.name,
                 message: `씬 「${card.name}」의 청크 ${missing.join(', ')} 연결이 끊겨 저장된 사본을 사용합니다.`
+            });
+        const overlapping = extraChunks.filter(chunk => card.sceneIds.includes(chunk.id));
+        if (overlapping.length)
+            problems.push({
+                level: 'warning', columnId: id, columnName: card.name,
+                message: `씬 「${card.name}」에 이미 있는 추가 청크 「${overlapping.map(chunk => chunk.name || chunk.id).join(' · ')}」가 두 번 포함됩니다.`
             });
         return card;
     });
@@ -2003,7 +2046,9 @@ function expandBatchPlan(value, planInput, options = {}) {
                     preset,
                     character,
                     chunks: column.chunks,
-                    ...(Object.keys(extras).length ? { extras } : {})
+                    ...(Object.keys(extras).length ? { extras } : {}),
+                    ...(plan.extraChunkIds !== undefined ? { extraChunks } : {}),
+                    ...(plan.promptOrder !== undefined ? { promptOrder: plan.promptOrder } : {})
                 }),
                 batch: { id: batch.id, name: batch.name, rowName: row.name, columnName: column.name }
             };
@@ -2312,12 +2357,15 @@ function selectBackupLibrary(value, selection, folderSelection = {}) {
                 add('presets', row.presetId);
             });
             item.columns.forEach((x) => add('sceneCards', x));
+            item.extraChunkIds?.forEach((x) => add('scenes', x));
         }
         if (key === 'reservations' || key === 'combinations') {
             const item = index[key].get(id);
             add('characters', item.characterId);
             add('presets', item.presetId);
             item.sceneIds.forEach((x) => add('scenes', x));
+            if ('snapshot' in item)
+                item.snapshot?.extraChunks?.forEach((x) => add('scenes', x.id));
             if ('sourceSceneId' in item)
                 add('sceneCards', item.sourceSceneId);
         }
@@ -2549,6 +2597,8 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         }
         plan.exceptions = exceptions;
         plan.columns = plan.columns.map((id) => remap('sceneCards', id));
+        if (plan.extraChunkIds)
+            plan.extraChunkIds = plan.extraChunkIds.map((id) => remap('scenes', id));
     }
     for (const item of [...incoming.reservations, ...(incoming.combinations ?? [])]) {
         item.presetId = remap('presets', item.presetId);
@@ -2562,6 +2612,8 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
             if (item.snapshot.character.defaultPresetId)
                 item.snapshot.character.defaultPresetId = remap('presets', item.snapshot.character.defaultPresetId);
             for (const chunk of item.snapshot.chunks)
+                chunk.id = remap('scenes', chunk.id);
+            for (const chunk of item.snapshot.extraChunks ?? [])
                 chunk.id = remap('scenes', chunk.id);
         }
         if ('sourceSceneId' in item && item.sourceSceneId)
@@ -3106,11 +3158,22 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     return library;
   }
   function normalizeCombinationSnapshot(value) {
-    const source=settingsBackupKeys(value,'예약 사본',['common','preset','character','chunks'],['common','preset','character','chunks','extras']);
+    const source=settingsBackupKeys(value,'예약 사본',['common','preset','character','chunks'],['common','preset','character','chunks','extras','extraChunks','promptOrder']);
     if(Object.hasOwn(presetObject(source.character,'예약 캐릭터 사본'),'loras'))throw new Error('예약 캐릭터 사본에는 LoRA를 따로 저장할 수 없습니다. 최종 프리셋 사본을 확인해 주세요.');
     const frozen=settingsBackupLibrary({version:1,common:source.common,presets:[source.preset],characters:[source.character],scenes:source.chunks,reservations:[]},{frozen:true});
     const result={common:frozen.common,preset:frozen.presets[0],character:frozen.characters[0],chunks:frozen.scenes};
-    if(Object.hasOwn(source,'extras')){const extras=settingsBackupKeys(source.extras,'사본 추가 문구',[],['cast','scene']);result.extras={};for(const key of ['cast','scene'])if(Object.hasOwn(extras,key))result.extras[key]=normalizeExtraText(extras[key],'추가 문구');}return result;
+    if(Object.hasOwn(source,'extras')){const extras=settingsBackupKeys(source.extras,'사본 추가 문구',[],['cast','scene']);result.extras={};for(const key of ['cast','scene'])if(Object.hasOwn(extras,key))result.extras[key]=normalizeExtraText(extras[key],'추가 문구');}
+    if(Object.hasOwn(source,'extraChunks')){
+      if(!Array.isArray(source.extraChunks))throw new Error('예약 추가 청크 사본 목록 형식을 확인해 주세요.');
+      const chunks=source.extraChunks.map(item=>{
+        settingsBackupKeys(item,'추가 청크 사본',['id','name','prompt','negativePrompt'],['id','name','prompt','negativePrompt','folderId']);
+        settingsBackupStrings(item,['name','prompt','negativePrompt'],'추가 청크 사본');
+        return stripFolder(item);
+      });
+      result.extraChunks=normalizeChunkList(chunks,new Set(),'추가 청크 사본');
+    }
+    if(Object.hasOwn(source,'promptOrder'))result.promptOrder=normalizeBatchPromptOrder(source.promptOrder);
+    return result;
   }
   function resolveCombination(value, combination) {
     const library=normalizePresetLibrary(value),missing=[];
@@ -3437,7 +3500,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
     if (!Number.isInteger(value) || value<0 || value>chunkCount+2) throw new Error('LoRA 트리거 위치를 확인해 주세요.');
     return value;
   }
-  function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}, triggerPosition=1, extras={}) {
+  function composePresetPrompts(common, character, chunksOrLegacyScene, preset = {loras:[]}, triggerPosition=1, extras={}, options={}) {
     const commonPart = presetObject(common, '공통');
     const characterPart = presetObject(character, '캐릭터');
     const chunks = (Array.isArray(chunksOrLegacyScene) ? chunksOrLegacyScene : [chunksOrLegacyScene])
@@ -3451,10 +3514,26 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
       return presetText(item.triggerWords);
     });
     const join=(...parts)=>parts.map(presetText).filter(Boolean).join(', ');
-    const promptParts = [join(commonPart.prompt,configuration.prompt),join(characterPart.prompt,extras.cast?.prompt),...chunks.map(item => item.prompt)];
     const position=normalizeTriggerPosition(triggerPosition,chunks.length);
-    if(position==='end')promptParts.push(extras.scene?.prompt || '',...triggers);else {promptParts.splice(position,0,...triggers);promptParts.push(extras.scene?.prompt || '');}
-    const negativeParts = [join(commonPart.negativePrompt,configuration.negativePrompt),join(characterPart.negativePrompt,extras.cast?.negativePrompt),...chunks.map(item => item.negativePrompt),extras.scene?.negativePrompt || ''];
+    const order=options.promptOrder ? normalizeBatchPromptOrder(options.promptOrder) : DEFAULT_BATCH_PROMPT_ORDER;
+    const promptParts=position===0 ? [...triggers] : [];
+    promptParts.push(join(commonPart.prompt,configuration.prompt));
+    if(position===1)promptParts.push(...triggers);
+    const negativeParts=[join(commonPart.negativePrompt,configuration.negativePrompt)];
+    for(const block of order){
+      if(block==='character'){
+        promptParts.push(join(characterPart.prompt,extras.cast?.prompt));
+        if(position===2)promptParts.push(...triggers);
+        negativeParts.push(join(characterPart.negativePrompt,extras.cast?.negativePrompt));
+      }else if(block==='scene'){
+        chunks.forEach((chunk,index)=>{promptParts.push(chunk.prompt);if(position===index+3)promptParts.push(...triggers);negativeParts.push(chunk.negativePrompt);});
+        promptParts.push(extras.scene?.prompt || '');negativeParts.push(extras.scene?.negativePrompt || '');
+      }else{
+        promptParts.push(...(options.extraChunks ?? []).map(chunk=>chunk.prompt));
+        negativeParts.push(...(options.extraChunks ?? []).map(chunk=>chunk.negativePrompt));
+      }
+    }
+    if(position==='end')promptParts.push(...triggers);
     return {
       prompt:promptParts.map(presetText).filter(Boolean).join(', '),
       negativePrompt:negativeParts.map(presetText).filter(Boolean).join(', ')
@@ -3481,7 +3560,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         if (!chunk) throw new Error(`예약 ${reservation.id}의 프롬프트 청크가 없습니다: ${sceneId}`);
         return chunk;
       });
-      const prompts = composePresetPrompts(common,compositionCharacter,chunks,preset,reservation.triggerPosition,frozen?.extras);
+      const prompts = composePresetPrompts(common,compositionCharacter,chunks,preset,reservation.triggerPosition,frozen?.extras,{extraChunks:frozen?.extraChunks,promptOrder:frozen?.promptOrder});
       if (!prompts.prompt) throw new Error(`예약 ${reservation.id}의 조합 프롬프트가 비어 있습니다.`);
       for (let repeat = 1; repeat <= reservation.count; repeat++) {
         const id = presetIdentifier(idFactory(), '작업');
@@ -5212,7 +5291,7 @@ function mountPresetEditor(parent, io) {
     return action==='delete' ? jobs.filter(job=>!selected.has(job.id)) : jobs.map(job=>selected.has(job.id) ? {...job,state:'skipped',skippedFrom:job.state} : job);
   }
 
-  const core = {encodeLocalPresetLibrary,decodeLocalPresetLibrary,normalizeCharacterLoras,mergeCharacterLoras,effectiveCharacterPreset,BACKUP_CATEGORIES,BACKUP_LABELS,backupSelection,backupFolderChoices,backupSelectionLabels,selectBackupLibrary,makeTransferBackup,parseTransferBackup,prepareBackupImport,filterQueueJobs,jobBatch,readPublicModelName,prepareImageForSave,createSceneThumbnailCache,atomicRecordWrite,subsetRegisteredLibrary,changeSceneCards,readImageInfo,embedGenerationInfo,imageCrc,inspectImageContainer,importImageComposition,importedImagePreset,compatibleSettings,resolvePresetCommon,deleteCommonPreset,normalizeBatchPlan,makeSceneCard,refreshSceneCard,resolveBatchRow,expandBatchPlan,appendBatchReservations,parsePublicModelLink,imageInfoFields,submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
+  const core = {encodeLocalPresetLibrary,decodeLocalPresetLibrary,normalizeCharacterLoras,mergeCharacterLoras,effectiveCharacterPreset,BACKUP_CATEGORIES,BACKUP_LABELS,backupSelection,backupFolderChoices,backupSelectionLabels,selectBackupLibrary,makeTransferBackup,parseTransferBackup,prepareBackupImport,filterQueueJobs,jobBatch,readPublicModelName,prepareImageForSave,createSceneThumbnailCache,atomicRecordWrite,subsetRegisteredLibrary,changeSceneCards,readImageInfo,embedGenerationInfo,imageCrc,inspectImageContainer,importImageComposition,importedImagePreset,compatibleSettings,resolvePresetCommon,deleteCommonPreset,DEFAULT_BATCH_PROMPT_ORDER,normalizeBatchPromptOrder,normalizeBatchPlan,makeSceneCard,refreshSceneCard,resolveBatchRow,expandBatchPlan,appendBatchReservations,parsePublicModelLink,imageInfoFields,submitJob,runQueue,placeLibraryItem,MEDIA_QUERY,pickOriginalMedia,mediaUrlAllowed,assertOriginalDimensions,describeQueryFailure,graphqlQuery,snapshotCombination,rememberCombination,resolveCombination,paneRatios,resizePanePair,bindPaneResize,bindWindowResize,createChunkFolder,materialIcon,makePresetLibrary, validatePresetConfiguration, normalizePresetLibrary, orderedChunks, moveLibraryItem, moveChunksTo, removeChunks, duplicateChunks, removeChunkFolder, normalizeSettingsOptions, makeSettingsBackup, parseSettingsBackup, createSettingsStore, composePresetPrompts, expandPresetReservations, parseModelLink, assertConfiguration, assertNumberField, readLoraTriggerWords, capturePresetSettings, createPixaiSettingsAdapter, mountPresetEditor, readPromptEditorText, normalize, safeName, recover, verifyTask, outputIds, processJob, checkCost, clampPosition, bindPanelDrag, acceptFolder, folderError, bindFolderActivation, pickDirectory, storageSupport, downloadError, managedDownload, resetDownloadProgress};
   Object.assign(core,{assertWebReceipt,assertWebUnlimited,webOriginal,runWebUnlimited,createWebUnlimitedAdapter,createUserscriptStorage,readOfficialLoraTriggerWords,UPDATE_URLS,updateChannelUrl,updateChannelInfo,queueHistory,queueJobRemovable,changeQueueRecords,API_RATIOS,API_STYLES,normalizeComposeDraft,normalizeReservationImageOptions,normalizeApiOptions,buildApiPayload,reconfigureQueuedApiJob,applyQueuedImageOptions,createSessionApiKey,createRememberedApiKey,gmResponse,apiValidationDetails,apiServerReason,apiHttpError,createOfficialApiClient});
   Object.assign(core,{SYNC_COLLECTIONS,canonicalSync,parseSyncLibrary,projectSyncLibrary,applySyncLibrary,syncLibraryHash,createLibrarySyncTransport,createLibrarySyncClient,mountLibrarySyncPanel});
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
@@ -5692,7 +5771,7 @@ function mountPresetEditor(parent, io) {
     panel = node('aside', null, {id:'local-pixai-queue'});
     if (typeof ResizeObserver==='function') new ResizeObserver(()=>{panel.dataset.short=String(panel.clientHeight>0 && panel.clientHeight<560);}).observe(panel);
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.10.20', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.10.21', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue .pq-backup-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}#local-pixai-queue .pq-backup-choices label.pq-check-label,#local-pixai-queue .pq-backup-folder-list label.pq-check-label{margin:5px 0;min-width:0}#local-pixai-queue .pq-backup-choices span,#local-pixai-queue .pq-backup-folder-list span{min-width:0;overflow-wrap:anywhere}#local-pixai-queue .pq-backup-folder-list{max-height:180px;overflow:auto;padding:4px 8px}#local-pixai-queue [data-backup-result]{padding:8px;border-left:3px solid #94bedf;overflow-wrap:anywhere}@media(max-width:700px){#local-pixai-queue .pq-backup-choices{grid-template-columns:minmax(0,1fr)}}';
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
@@ -5906,7 +5985,7 @@ function mountPresetEditor(parent, io) {
       }
       render();
     }
-    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.20',exportedAt:new Date().toISOString()})));
+    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.21',exportedAt:new Date().toISOString()})));
     const exportPreview=node('div',null,{'data-export-preview':''});exportPreview.hidden=true;
     let pendingExport=null;
     function clearExport() {pendingExport=null;exportPreview.replaceChildren();exportPreview.hidden=true;}
@@ -5942,7 +6021,7 @@ function mountPresetEditor(parent, io) {
       const folders=Object.fromEntries(Object.entries(p.folders).filter(([key])=>p.selection[key]));
       const save=backupButton('선택한 항목 파일 저장',()=>settingsAction(async()=>{
         if(dataStorage.getItem(LIBRARY_KEY)!==p.libraryBefore)throw new Error('백업 범위를 고르는 동안 자료가 바뀌었습니다. 선택 내보내기를 다시 열어 주세요.');
-        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.20',exportedAt:new Date().toISOString()},folders);
+        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.21',exportedAt:new Date().toISOString()},folders);
         await downloadSettings(data,'선택_설정');
         if(pendingExport===p){clearExport();openExport.focus();}
       },{readOnly:true}));
@@ -5965,7 +6044,7 @@ function mountPresetEditor(parent, io) {
       drawExport();exportPreview.hidden=false;exportPreview.querySelector('input')?.focus();
     });
     const compatibility=node('div',null,{'data-compatibility-preview':'',role:'status'});compatibility.hidden=true;
-    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.20',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
+    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.21',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
     const input=node('input',null,{type:'file',accept:'.json,application/json','aria-label':'설정 백업 JSON 파일','data-edit':''});input.hidden=true;
     const preview=node('div',null,{'data-import-preview':'','aria-live':'polite'});preview.hidden=true;
     let pendingSettings=null;
@@ -6457,7 +6536,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.20', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.21', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();

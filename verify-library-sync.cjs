@@ -64,6 +64,29 @@ test('first preview does not save or acknowledge and explicit approval follows t
     await f.client.sync();assert.equal(f.saves.length,0);assert.equal(f.client.state().exchange.state,'preview');
     await f.client.approve('proposal',{});assert.equal(f.saves.length,1);assert.equal(f.saved().common.prompt,'merged');assert.equal(f.calls.at(-1).path,'ack');assert.equal(f.calls.at(-1).body.id,'tx');
 });
+test('first preview apply acknowledgement and restart preserve additional chunks and custom prompt order',async()=>{
+    const f=await linked(),next=library();
+    next.scenes.push({id:'extra',name:'Extra',prompt:'night street',negativePrompt:'daylight'});
+    next.batchPlans=[{id:'plan',name:'Batch',rows:[],columns:[],count:1,exceptions:{},order:'byRow',extraChunkIds:['extra'],promptOrder:['extraChunks','scene','character']}];
+    const apply=await transfer(f,next),proposal={id:'with-extras',initial:true,library:projection(next),conflicts:[],appCount:1,scriptCount:1,mergedCount:2};
+    f.setReply(async path=>path==='exchange'?{state:'preview',proposal}:path==='approve'?apply:{state:'idle'});
+    await f.client.sync();assert.equal(f.saves.length,0);assert.deepEqual(f.client.state().exchange.proposal.library.batchPlans,next.batchPlans);
+    await f.client.approve(proposal.id,{});
+    assert.deepEqual(f.saved().batchPlans,next.batchPlans);assert.equal(f.calls.at(-1).path,'ack');
+    assert.equal(await core.syncLibraryHash(f.calls.at(-1).body.library),await core.syncLibraryHash(projection(next)));
+    const restored=fixture(f.saved(),f.records);restored.setReply(async()=>({state:'idle'}));await restored.client.sync();
+    assert.deepEqual(restored.calls.at(-1).body.library.batchPlans,next.batchPlans);assert.equal(restored.saves.length,0);
+    assert.equal(restored.saved().reservations[0].snapshot.common.prompt,'before');
+});
+
+test('invalid extra chunk lists and prompt orders are rejected without save or acknowledgement',async()=>{
+    for(const field of [{extraChunkIds:['extra','extra']},{extraChunkIds:'extra'},{promptOrder:['character','scene','scene']},{promptOrder:['scene','character']},{promptOrder:null}]){
+        const f=await linked(),next=projection();next.batchPlans=[{id:'plan',name:'Bad',rows:[],columns:[],count:1,...field}];
+        f.setReply(async()=>({state:'preview',proposal:{id:'bad',initial:true,library:next,conflicts:[],appCount:1,scriptCount:1,mergedCount:1}}));
+        await assert.rejects(f.client.sync());assert.equal(f.saves.length,0);assert(!f.calls.some(v=>v.path==='ack'));assert.deepEqual(f.saved(),library());
+    }
+});
+
 test('stale projection refuses an inbound write and sends no acknowledgement',async()=>{
     const f=await linked(),next=library();next.common.prompt='merged';const apply=await transfer(f,next);f.change(v=>v.common.prompt='local edit');f.setReply(async()=>apply);
     await f.client.sync();assert.equal(f.saves.length,0);assert.equal(f.client.state().exchange.state,'blocked');assert.equal(f.saved().common.prompt,'local edit');assert(!f.calls.some(v=>v.path==='ack'));

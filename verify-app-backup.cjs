@@ -144,6 +144,38 @@ test('plan/character/cast/common/folder references and reserved final prompts su
  assert.deepEqual(preset.model,original.presets[0].model);assert.deepEqual(preset.loras,original.presets[0].loras);
  assert(imported.commonPresets.some(x=>x.id===preset.commonPresetId));
 });
+
+function extraChunkLibrary(){
+ const library=source();library.chunkFolders.push({id:'extra-folder',name:'Additional backgrounds'});
+ library.scenes.push({id:'extra-night',name:'Night',prompt:'night street',negativePrompt:'daylight',folderId:'extra-folder'},{id:'extra-rain',name:'Rain',prompt:'rain',negativePrompt:'dry',folderId:'extra-folder'});
+ library.batchPlans[0].extraChunkIds=['extra-rain','extra-night'];library.batchPlans[0].promptOrder=['extraChunks','scene','character'];
+ library.reservations=core.expandBatchPlan(library,library.batchPlans[0],{defaultImageOptions:{aspectRatio:'5:3',size:'1k',mode:'pro',batchSize:1}}).reservations;
+ return library;
+}
+test('selecting batch plans or reservations includes their extra chunk dependencies and folders',()=>{
+ const library=extraChunkLibrary();
+ for(const category of ['batchPlans','reservations']){
+  const result=core.selectBackupLibrary(library,select(category));
+  assert(result.library.scenes.some(v=>v.id==='extra-night'),category);assert(result.library.scenes.some(v=>v.id==='extra-rain'),category);
+  assert(result.library.chunkFolders.some(v=>v.id==='extra-folder'),category);assert(result.dependencies.scenes>=2,category);
+  const file=core.makeTransferBackup(library,options,select(category),fixture.meta),parsed=core.parseTransferBackup(JSON.stringify(file));
+  assert.deepEqual(parsed.backup.library,result.library);
+ }
+});
+for(const mode of ['append','replace'])test(mode+' remaps extra chunk plan and snapshot references without losing frozen text or prompt order',()=>{
+ const incoming=extraChunkLibrary(),before=copy(incoming),original=copy(before),selection=select('batchPlans','reservations');
+ for(const reservation of incoming.reservations)reservation.snapshot.extraChunks[0].prompt='frozen rain';
+ const file=core.makeTransferBackup(incoming,options,selection,fixture.meta),parsed=core.parseTransferBackup(JSON.stringify(file));
+ const result=core.prepareBackupImport(before,parsed,selection,mode,ids()).library;
+ const plan=result.batchPlans.at(-1),frozen=result.reservations.at(-1).snapshot;
+ assert.deepEqual(plan.promptOrder,['extraChunks','scene','character']);assert.deepEqual(frozen.promptOrder,plan.promptOrder);
+ assert.equal(plan.extraChunkIds.length,2);assert(!plan.extraChunkIds.includes('extra-rain'));assert(!plan.extraChunkIds.includes('extra-night'));
+ assert.deepEqual(frozen.extraChunks.map(v=>v.id),plan.extraChunkIds);
+ assert.equal(result.scenes.find(v=>v.id===plan.extraChunkIds[0]).prompt,'rain');assert.equal(frozen.extraChunks[0].prompt,'frozen rain');
+ assert(plan.extraChunkIds.every(id=>result.scenes.some(v=>v.id===id)));
+ const offset=mode==='append'?prompts(before).length:0;assert.deepEqual(prompts(result).slice(offset),prompts(incoming));
+ assert.deepEqual(before,original);
+});
 test('options apply only on explicit selection and app UI preferences are converted rather than persisted',()=>{
  const file=parse('full');
  const materials=core.prepareBackupImport(source(),file,select('scenes'),'append',ids());

@@ -6,6 +6,11 @@ function readGroupView(storage,key){try{const value=JSON.parse(storage.getItem(k
 // Browser port retains legacy validators; batch image options merge per field.
 const hasOwn=(value,key)=>Object.hasOwn(value,key);
 const MAX_RESERVED_JOBS=1000;
+const DEFAULT_BATCH_PROMPT_ORDER=Object.freeze(['character','scene','extraChunks']);
+function normalizeBatchPromptOrder(value){
+    if(!Array.isArray(value)||value.length!==DEFAULT_BATCH_PROMPT_ORDER.length||!DEFAULT_BATCH_PROMPT_ORDER.every(block=>value.includes(block)))throw Error('문구 순서는 캐릭터·씬·추가 청크를 한 번씩 포함해야 합니다.');
+    return [...value];
+}
 function allowedKeys(...args){return settingsBackupKeys(...args);}
 function normalizeLibrary(value){return normalizePresetLibrary(value);}
 function normalizeImageOptions(value){return normalizeReservationImageOptions(value);}
@@ -44,7 +49,9 @@ function compatibleSettings(library,options,meta,target='app') {
         for(const key of ['commonPresets','sceneCards','sceneFolders','casts','batchPlans'])if(Object.hasOwn(out,key)){delete out[key];warnings.push(`${key}는 0.9.14에서 편집할 수 없어 제외합니다.`);}
         const cleanPreset=preset=>{const next={...preset};delete next.prompt;delete next.negativePrompt;delete next.commonPresetId;return next;};
         if(out.presets.some(item=>item.prompt||item.negativePrompt||item.commonPresetId))warnings.push('프리셋 문구·공통문 연결은 새 조합에서 제외합니다. 이미 예약한 문구는 사본에 합쳐 보존합니다.');
-        out.reservations=out.reservations.map(res=>{
+        const omitted=out.reservations.filter(res=>res.snapshot?.extraChunks?.length||res.snapshot?.promptOrder?.some((block,index)=>block!==DEFAULT_BATCH_PROMPT_ORDER[index]));
+        if(omitted.length)warnings.push(`추가 청크 또는 문구 순서가 있는 예약 ${omitted.length}개는 0.9.14에서 보존할 수 없어 제외합니다. 최신 전체 또는 선택 백업을 사용해 주세요.`);
+        out.reservations=out.reservations.filter(res=>!omitted.includes(res)).map(res=>{
             const next={...res},frozen=res.snapshot || snapshotCombination(library,res),p=frozen.preset,join=(...parts)=>parts.map(presetText).filter(Boolean).join(', ');
             const chunks=frozen.chunks.map(item=>({...item})),extras=frozen.extras||{};
             if(extras.scene&&(extras.scene.prompt||extras.scene.negativePrompt))chunks.push({id:`${res.id}:scene-extra`,name:'씬 추가 문구',...extras.scene});
@@ -135,7 +142,7 @@ function normalizeCast(item, id) {
 const batchRowKey = (row) => `${row.kind}:${row.id}`;
 const batchCellKey = (rowKey, columnId) => `${rowKey}|${columnId}`;
 function normalizeBatchPlan(item, id = 'plan') {
-    const source = allowedKeys(item, '일괄 예약 구성', ['rows', 'columns', 'count'], ['id', 'name', 'rows', 'columns', 'count', 'exceptions', 'order', 'imageOptions']);
+    const source = allowedKeys(item, '일괄 예약 구성', ['rows', 'columns', 'count'], ['id', 'name', 'rows', 'columns', 'count', 'exceptions', 'order', 'imageOptions', 'extraChunkIds', 'promptOrder']);
     if (!Array.isArray(source.rows) || !Array.isArray(source.columns))
         throw new Error('일괄 예약의 행·열 목록 형식을 확인해 주세요.');
     const rows = source.rows.map((row) => {
@@ -181,6 +188,15 @@ function normalizeBatchPlan(item, id = 'plan') {
     }
     if (hasOwn(source, 'imageOptions') && source.imageOptions != null)
         plan.imageOptions = normalizeImageOptions(source.imageOptions);
+    if (hasOwn(source, 'extraChunkIds')) {
+        if (!Array.isArray(source.extraChunkIds))
+            throw new Error('추가 청크 목록 형식을 확인해 주세요.');
+        plan.extraChunkIds = source.extraChunkIds.map(value => presetIdentifier(value, '추가 청크'));
+        if (new Set(plan.extraChunkIds).size !== plan.extraChunkIds.length)
+            throw new Error('추가 청크가 중복됐습니다.');
+    }
+    if (hasOwn(source, 'promptOrder'))
+        plan.promptOrder = normalizeBatchPromptOrder(source.promptOrder);
     return plan;
 }
 function normalizeBatchTag(value) {
@@ -383,6 +399,12 @@ function expandBatchPlan(value, planInput, options = {}) {
         ? 4
         : presetInteger(options.batchSize, '배치 장수', 1, 4);
     const problems = [];
+    const extraChunks = [];
+    for (const id of plan.extraChunkIds ?? []) {
+        const chunk = library.scenes.find(item => item.id === id);
+        if (chunk) extraChunks.push(stripFolder(chunk));
+        else problems.push({ level: 'error', message: `선택한 추가 청크가 없습니다: ${id}` });
+    }
     const rows = plan.rows.map((row) => resolveBatchRow(library, row));
     for (const row of rows)
         for (const message of row.problems)
@@ -405,6 +427,12 @@ function expandBatchPlan(value, planInput, options = {}) {
                 columnId: id,
                 columnName: card.name,
                 message: `씬 「${card.name}」의 청크 ${missing.join(', ')} 연결이 끊겨 저장된 사본을 사용합니다.`
+            });
+        const overlapping = extraChunks.filter(chunk => card.sceneIds.includes(chunk.id));
+        if (overlapping.length)
+            problems.push({
+                level: 'warning', columnId: id, columnName: card.name,
+                message: `씬 「${card.name}」에 이미 있는 추가 청크 「${overlapping.map(chunk => chunk.name || chunk.id).join(' · ')}」가 두 번 포함됩니다.`
             });
         return card;
     });
@@ -451,7 +479,9 @@ function expandBatchPlan(value, planInput, options = {}) {
                     preset,
                     character,
                     chunks: column.chunks,
-                    ...(Object.keys(extras).length ? { extras } : {})
+                    ...(Object.keys(extras).length ? { extras } : {}),
+                    ...(plan.extraChunkIds !== undefined ? { extraChunks } : {}),
+                    ...(plan.promptOrder !== undefined ? { promptOrder: plan.promptOrder } : {})
                 }),
                 batch: { id: batch.id, name: batch.name, rowName: row.name, columnName: column.name }
             };

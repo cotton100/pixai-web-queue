@@ -62,6 +62,40 @@ test('hidden scene and cast editors retain dirty drafts and selecting a scene up
   assert.equal(f.library().sceneCards[0].name,'Scene');assert.equal(f.library().casts[0].name,'Cast');
 });
 
+test('an app batch configuration retains extra chunks and prompt order through loading, editing, saving and reservation',async()=>{
+  const initial=seed();initial.scenes.push({id:'night',name:'Night',prompt:'night street',negativePrompt:'daylight'},{id:'rain',name:'Rain',prompt:'rain',negativePrompt:'dry'});
+  initial.batchPlans=[{id:'app-plan',name:'App configuration',rows:[{kind:'character',id:'c'}],columns:['scene'],count:1,exceptions:{},order:'byRow',extraChunkIds:['rain','night'],promptOrder:['extraChunks','scene','character']}];
+  const f=fixture(initial);await f.button('App configuration').press();
+  assert.equal(f.find('일괄 추가 청크 선택: Night').checked,true);assert.equal(f.find('일괄 추가 청크 선택: Rain').checked,true);
+  assert.equal(f.find('일괄 조합 문구 미리보기').textContent,'rain, night street, smile, character');
+  f.find('일괄 반복 수').value='2';await f.find('일괄 반복 수').emit('change');
+  f.find('묶음 이름').value='Edited configuration';await f.find('묶음 이름').emit('input');await f.button('구성 저장').press();
+  const saved=f.library().batchPlans[0];assert.deepEqual(saved.extraChunkIds,['rain','night']);assert.deepEqual(saved.promptOrder,['extraChunks','scene','character']);assert.equal(saved.count,2);
+  const fresh=fixture(f.library(),copy(f.preferences));await fresh.button('Edited configuration').press();
+  assert.equal(fresh.find('일괄 조합 문구 미리보기').textContent,'rain, night street, smile, character');
+  await fresh.button('선택 조합 전부 예약').press();const reservation=fresh.library().reservations[0];
+  assert.deepEqual(reservation.snapshot.extraChunks.map(v=>v.id),['rain','night']);assert.deepEqual(reservation.snapshot.promptOrder,['extraChunks','scene','character']);
+  assert.equal(core.expandPresetReservations(fresh.library())[0].prompt,fresh.find('일괄 조합 문구 미리보기').textContent);
+  assert.deepEqual(fresh.messages,[]);
+});
+
+test('extra chunk selection and native or keyboard ordering change the preview and survive draft restoration',async()=>{
+  const initial=seed();initial.chunkFolders=[{id:'backgrounds',name:'Backgrounds'}];initial.scenes.push({id:'night',name:'Night',prompt:'night street',negativePrompt:'',folderId:'backgrounds'},{id:'rain',name:'Rain',prompt:'rain',negativePrompt:'',folderId:'backgrounds'});
+  const f=fixture(initial);await f.check('일괄 행 선택: Character');await f.check('일괄 씬 선택: Scene');await f.check('일괄 추가 청크 선택: Night');await f.check('일괄 추가 청크 선택: Rain');
+  assert(f.panel('rows').children.includes(f.find('일괄 추가 청크 선택')));
+  assert.equal(f.find('일괄 조합 문구 미리보기').textContent,'character, smile, night street, rain');
+  await f.find('추가 청크 이동: rain').emit('keydown',{key:'ArrowUp'});await new Promise(resolve=>setImmediate(resolve));
+  const data=new Map(),dataTransfer={setData:(type,value)=>data.set(type,value),getData:type=>data.get(type)||''};
+  await f.find('문구 순서 이동: extraChunks').emit('dragstart',{dataTransfer});
+  await f.find('문구 순서 이동: character').parentElement.emit('drop',{dataTransfer,clientY:101});await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(f.preferences.studio.plan.extraChunkIds,['rain','night']);assert.deepEqual(f.preferences.studio.plan.promptOrder,['extraChunks','character','scene']);
+  assert.equal(f.find('일괄 조합 문구 미리보기').textContent,'rain, night street, character, smile');
+  const fresh=fixture(f.library(),copy(f.preferences));assert.equal(fresh.find('일괄 조합 문구 미리보기').textContent,'rain, night street, character, smile');
+  await fresh.button('추가 청크 제외: Rain').press();assert.deepEqual(fresh.preferences.studio.plan.extraChunkIds,['night']);assert.equal(fresh.find('일괄 추가 청크 선택: Rain').checked,false);
+  await fresh.button('새 구성').press();assert.equal(fresh.find('일괄 추가 청크 선택: Night').checked,false);assert.equal(fresh.find('선택 추가 청크 순서').children.length,0);
+  assert.deepEqual(fresh.messages,[]);
+});
+
 for(const [key,moved,target,expectedFolder] of [['ArrowUp','two','one','folder-one'],['ArrowDown','one','two','folder-two'],['ArrowUp','three','two','folder-two'],['ArrowDown','two','three',undefined]]) {
   test('scene keyboard '+key+' '+moved+' across folders matches native drag and preserves existing reservations',async()=>{
     const initial=seed();initial.sceneFolders=[{id:'folder-one',name:'Folder one'},{id:'folder-two',name:'Folder two'}];
