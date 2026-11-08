@@ -6,6 +6,14 @@ const path=require('node:path');
 const core=require(path.join(__dirname,'pixai-web-queue.user.js'));
 const copy=value=>JSON.parse(JSON.stringify(value));
 
+test('preset/common editor saves and common duplication retain app folder metadata',async t=>{
+  const initial=seed();initial.presetFolders=[{id:'pf',name:'Presets'}];initial.presets[0].folderId='pf';initial.commonPresetFolders=[{id:'cf',name:'Common'}];initial.commonPresets=[{id:'cp',name:'Linked',prompt:'quality',negativePrompt:'bad',folderId:'cf'}];
+  const f=fixture(t,initial);await f.select('저장한 설정 프리셋','p1');f.field('프리셋 이름').value='Edited preset';await f.press('프리셋 저장');assert.equal(f.library().presets[0].folderId,'pf');
+  await f.press('공통문 세트 편집: Linked');f.field('세트 포지').value='updated quality';await f.press('공통문 세트 저장');assert.equal(f.library().commonPresets[0].folderId,'cf');
+  await f.press('공통문 복제 저장');assert.equal(f.library().commonPresets[1].folderId,'cf');assert.equal(f.library().commonPresets[1].prompt,'updated quality');
+  assert.deepEqual(f.library().presetFolders,initial.presetFolders);assert.deepEqual(f.library().commonPresetFolders,initial.commonPresetFolders);
+});
+
 test('library sync guard detects unsaved common, preset, character, chunk, folder and parity editors',async t=>{
   const f=fixture(t);assert.equal(f.ui.hasDirty(),false);
   f.field('공통 프롬프트').value='unsaved common';assert.equal(f.ui.hasDirty(),true);await f.press('공통문 저장');assert.equal(f.ui.hasDirty(),false);
@@ -125,10 +133,10 @@ test('reservation image choice is atomic on library storage failure and button l
 test('fresh compose mount restores selected materials, order, count, dimensions and LoRA trigger position without enqueuing',async t=>{
   const f=fixture(t);await f.choose('행동');await f.choose('표정');await f.press('LoRA 트리거 아래로');await f.press('LoRA 트리거 아래로');await f.press('LoRA 트리거 아래로');
   await f.select('이 조합의 생성 횟수','3');await f.select('조합 이미지 비율','5:3');await f.select('조합 이미지 크기','1.5k');
-  assert.equal(f.preferences.draft.triggerPosition,'end');const before=copy(f.preferences.draft);
+  assert.equal(f.preferences.draft.triggerPosition,4);const before=copy(f.preferences.draft);
   const fresh=fixture(t,f.library(),f.preferences);assert.deepEqual(fresh.preferences.draft,before);assert.match(fresh.preview(),/waving, smiling, trigger one/);
   assert.equal(fresh.field('이 조합의 생성 횟수').value,'3');assert.equal(fresh.field('조합 이미지 비율').value,'5:3');assert.equal(fresh.field('청크 선택: 행동').checked,true);assert.equal(fresh.jobs.length,0);
-  await fresh.press('이 조합 예약 추가');assert.equal(fresh.library().reservations[0].triggerPosition,'end');assert.deepEqual(fresh.library().reservations[0].sceneIds,['s2','s1']);
+  await fresh.press('이 조합 예약 추가');assert.equal(fresh.library().reservations[0].triggerPosition,4);assert.deepEqual(fresh.library().reservations[0].sceneIds,['s2','s1']);
 });
 
 test('image storage failure restores the last choice and invalid count does not erase the saved draft',async t=>{
@@ -955,7 +963,7 @@ test('trigger arrows match preview and submitted jobs, preserve old reservations
   await f.press('LoRA 트리거 아래로');assert.match(f.preview(),/quality, character tags, trigger one, trigger two, smiling, waving/);
   await f.press('LoRA 트리거 아래로');assert.match(f.preview(),/quality, character tags, smiling, trigger one, trigger two, waving/);
   await f.press('LoRA 트리거 아래로');assert.match(f.preview(),/quality, character tags, smiling, waving, trigger one, trigger two/);assert.equal(f.button('LoRA 트리거 아래로').disabled,true);assert.deepEqual(f.library().reservations[0],old);
-  await f.press('이 조합 예약 추가');assert.equal(f.library().reservations[1].triggerPosition,'end');await f.press('현재 조합 즐겨찾기');const entry=f.library().combinations.find(e=>e.triggerPosition==='end');
+  await f.press('이 조합 예약 추가');assert.equal(f.library().reservations[1].triggerPosition,4);await f.press('현재 조합 즐겨찾기');const entry=f.library().combinations.find(e=>e.triggerPosition===4);
   const restored=core.parseSettingsBackup(JSON.stringify(core.makeSettingsBackup(f.library(),{maxCredits:7800,filePrefix:'',repeat:1},{appVersion:'0.8.4',exportedAt:'2026-10-08T00:00:00.000Z'}))).library;
   const fresh=fixture(t,restored);await fresh.press('조합 불러오기: '+entry.id);assert.match(fresh.preview(),/smiling, waving, trigger one, trigger two/);await fresh.press('예약 전부를 대기열에 등록');assert.equal(fresh.jobs[1].prompt,'quality, character tags, smiling, waving, trigger one, trigger two');assert.equal(fresh.jobs[0].prompt,'quality, trigger one, trigger two, character tags, smiling, waving');
   f.ui.reload();assert.match(f.preview(),/quality, trigger one, trigger two, character tags/);

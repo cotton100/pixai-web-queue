@@ -13,7 +13,7 @@ const BACKUP_CATEGORIES = [
     'reservations',
     'combinations'
 ];
-const BACKUP_FOLDER_CATEGORIES = ['sceneCards', 'scenes'];
+const BACKUP_FOLDER_CATEGORIES = ['sceneCards', 'scenes', 'presets', 'commonPresets'];
 const BACKUP_LABELS = {
     sceneCards: '씬',
     scenes: '청크',
@@ -28,6 +28,8 @@ const BACKUP_LABELS = {
     options: '생성·화면 설정'
 };
 const TRANSFER_FOLDERS = {
+    presets: 'presetFolders',
+    commonPresets: 'commonPresetFolders',
     characters: 'characterFolders',
     scenes: 'chunkFolders',
     sceneCards: 'sceneFolders'
@@ -145,8 +147,11 @@ function selectBackupLibrary(value, selection, folderSelection = {}) {
     }
     for (let cursor = 0; cursor < pending.length; cursor++) {
         const [key, id] = pending[cursor];
-        if (key === 'presets')
+        if (key === 'presets') {
             add('commonPresets', index.presets.get(id).commonPresetId);
+            add('presetFolders', index.presets.get(id).folderId);
+        }
+        if (key === 'commonPresets') add('commonPresetFolders', index.commonPresets.get(id).folderId);
         if (key === 'characters') {
             const item = index.characters.get(id);
             add('presets', item.defaultPresetId);
@@ -185,8 +190,10 @@ function selectBackupLibrary(value, selection, folderSelection = {}) {
         }
     }
     const library = makePresetLibrary();
-    for (const key of TRANSFER_COLLECTIONS)
+    for (const key of TRANSFER_COLLECTIONS) {
+        if (['presetFolders', 'commonPresetFolders'].includes(key) && !Object.hasOwn(source, key)) continue;
         Object.assign(library, { [key]: (source[key] ?? []).filter((x) => ids[key].has(x.id)) });
+    }
     // A preset without a linked set needs the source default, even when it is not
     // a replacement target. No key or path setting travels with these materials.
     if (selection.common || library.presets.some((x) => !x.commonPresetId) || selection.reservations)
@@ -372,8 +379,12 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         if (p.commonPresetId)
             p.commonPresetId = remap('commonPresets', p.commonPresetId);
     };
-    for (const preset of incoming.presets)
+    for (const preset of incoming.presets) {
         presetRef(preset);
+        if (preset.folderId) preset.folderId = remap('presetFolders', preset.folderId);
+    }
+    for (const preset of incoming.commonPresets ?? [])
+        if (preset.folderId) preset.folderId = remap('commonPresetFolders', preset.folderId);
     for (const character of incoming.characters) {
         if (character.defaultPresetId)
             character.defaultPresetId = remap('presets', character.defaultPresetId);
@@ -418,6 +429,8 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
         item.presetId = remap('presets', item.presetId);
         item.characterId = remap('characters', item.characterId);
         item.sceneIds = item.sceneIds.map((id) => remap('scenes', id));
+        if (item.materialOrder)
+            item.materialOrder = item.materialOrder.map(part => part.startsWith('chunk:') ? `chunk:${remap('scenes', part.slice(6))}` : part);
         if ('snapshot' in item && item.snapshot) {
             item.snapshot.preset.id = item.presetId;
             // Frozen common is authoritative; a deleted live set must not bind elsewhere.
@@ -436,6 +449,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
             item.batch.id = remap('batch', item.batch.id);
     }
     for (const key of TRANSFER_COLLECTIONS) {
+        if (['presetFolders', 'commonPresetFolders'].includes(key) && !Object.hasOwn(result, key) && !Object.hasOwn(incoming, key)) continue;
         const merged = [...retained[key], ...(incoming[key] ?? [])];
         const category = Object.entries(TRANSFER_FOLDERS).find(([, folder]) => folder === key)?.[0];
         if (mode === 'replace' && category && folders[category]) {

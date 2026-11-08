@@ -46,21 +46,26 @@ function compatibleSettings(library,options,meta,target='app') {
     if(Object.hasOwn(preferences,'embedMetadata')){delete preferences.embedMetadata;warnings.push('브라우저 PNG 기록 선택은 대상 앱/구형 스크립트 옵션에서 제외합니다.');}
     if(target==='legacy') {
         if(out.characters.some(character=>character.loras?.length))throw Error('구형 내보내기는 캐릭터 LoRA를 보존할 수 없습니다. 최신 전체 또는 선택 백업을 사용해 주세요.');
-        for(const key of ['commonPresets','sceneCards','sceneFolders','casts','batchPlans'])if(Object.hasOwn(out,key)){delete out[key];warnings.push(`${key}는 0.9.14에서 편집할 수 없어 제외합니다.`);}
-        const cleanPreset=preset=>{const next={...preset};delete next.prompt;delete next.negativePrompt;delete next.commonPresetId;return next;};
+        for(const key of ['commonPresets','sceneCards','sceneFolders','casts','batchPlans','presetFolders','commonPresetFolders'])if(Object.hasOwn(out,key)){delete out[key];warnings.push(`${key}는 0.9.14에서 편집할 수 없어 제외합니다.`);}
+        const cleanPreset=preset=>{const next={...preset};delete next.prompt;delete next.negativePrompt;delete next.commonPresetId;delete next.folderId;return next;};
         if(out.presets.some(item=>item.prompt||item.negativePrompt||item.commonPresetId))warnings.push('프리셋 문구·공통문 연결은 새 조합에서 제외합니다. 이미 예약한 문구는 사본에 합쳐 보존합니다.');
-        const omitted=out.reservations.filter(res=>res.snapshot?.extraChunks?.length||res.snapshot?.promptOrder?.some((block,index)=>block!==DEFAULT_BATCH_PROMPT_ORDER[index]));
+        const omitted=out.reservations.filter(res=>hasCustomMaterialOrder(res)||res.snapshot?.extraChunks?.length||res.snapshot?.promptOrder?.some((block,index)=>block!==DEFAULT_BATCH_PROMPT_ORDER[index]));
         if(omitted.length)warnings.push(`추가 청크 또는 문구 순서가 있는 예약 ${omitted.length}개는 0.9.14에서 보존할 수 없어 제외합니다. 최신 전체 또는 선택 백업을 사용해 주세요.`);
         out.reservations=out.reservations.filter(res=>!omitted.includes(res)).map(res=>{
             const next={...res},frozen=res.snapshot || snapshotCombination(library,res),p=frozen.preset,join=(...parts)=>parts.map(presetText).filter(Boolean).join(', ');
             const chunks=frozen.chunks.map(item=>({...item})),extras=frozen.extras||{};
             if(extras.scene&&(extras.scene.prompt||extras.scene.negativePrompt))chunks.push({id:`${res.id}:scene-extra`,name:'씬 추가 문구',...extras.scene});
             next.sceneIds=chunks.map(item=>item.id);next.snapshot={common:{prompt:join(frozen.common.prompt,p.prompt),negativePrompt:join(frozen.common.negativePrompt,p.negativePrompt)},preset:cleanPreset(p),character:{...frozen.character,prompt:join(frozen.character.prompt,extras.cast?.prompt),negativePrompt:join(frozen.character.negativePrompt,extras.cast?.negativePrompt)},chunks};
-            delete next.snapshot.character.defaultPresetId;delete next.snapshot.character.folderId;delete next.batch;delete next.sourceSceneId;return next;
+            delete next.snapshot.character.defaultPresetId;delete next.snapshot.character.folderId;delete next.batch;delete next.sourceSceneId;delete next.materialOrder;return next;
         });
+        const omittedHistory=(out.combinations||[]).filter(hasCustomMaterialOrder);
+        if(omittedHistory.length)warnings.push(`재료 순서가 있는 최근 조합·즐겨찾기 ${omittedHistory.length}개는 0.9.14에서 보존할 수 없어 제외합니다. 최신 전체 또는 선택 백업을 사용해 주세요.`);
+        if(out.combinations)out.combinations=out.combinations.filter(item=>!hasCustomMaterialOrder(item)).map(item=>omitKey(item,'materialOrder'));
         out.presets=out.presets.map(cleanPreset);out.characters=out.characters.map(item=>{delete item.defaultPresetId;delete item.loras;return item;});
     }
     if(target==='app'&&out.characters.some(character=>character.loras?.length))warnings.push('캐릭터 LoRA를 지원하는 최신 앱에서 불러오세요. 구버전 앱에서는 새 캐릭터 항목을 읽을 수 없습니다.');
+    if(target==='app'&&(out.presetFolders?.length||out.commonPresetFolders?.length))warnings.push('프리셋·공통문 폴더를 보존하려면 앱 0.1.25 이상에서 불러오세요.');
+    if(target==='app'&&[...out.reservations,...(out.combinations||[])].some(item=>Object.hasOwn(item,'materialOrder')))warnings.push('공통문·캐릭터·청크의 재료 순서를 보존하려면 앱 0.1.25 이상에서 불러오세요.');
     return {backup:{format:'pixai-web-queue-settings',version:1,...settingsBackupMeta(meta),library:out,options:preferences},warnings};
 }
 /** Resolve only live compositions. Frozen reservations already contain the selected text. */
