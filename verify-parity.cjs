@@ -59,4 +59,71 @@ test('app-only UI options are validated and conversion is explicit, while secret
 test('public model links never infer a missing version and reject credentials or foreign URLs',()=>{
  assert.deepEqual(core.parsePublicModelLink('https://pixai.art/ko/model/123-name/456').id,'123');assert.equal(core.parsePublicModelLink('https://pixai.art/model/123').versionId,'');assert.throws(()=>core.parsePublicModelLink('https://user:pw@pixai.art/model/123/456'));assert.throws(()=>core.parsePublicModelLink('https://example.com/model/123/456'));
 });
+test('batch plan fields preserve explicit empty selections and validate all prompt blocks without changing old plans',()=>{
+ const old={id:'plan',rows:[{kind:'character',id:'c'}],columns:['card'],count:1};
+ const legacy=core.normalizeBatchPlan(old,'plan');assert.equal(Object.hasOwn(legacy,'extraChunkIds'),false);assert.equal(Object.hasOwn(legacy,'promptOrder'),false);
+ const order=['extraChunks','scene','character'],value=core.normalizeBatchPlan({...old,extraChunkIds:['night','coat'],promptOrder:order},'plan');
+ assert.deepEqual(value.extraChunkIds,['night','coat']);assert.deepEqual(value.promptOrder,order);assert.notEqual(value.promptOrder,order);
+ assert.deepEqual(core.normalizeBatchPlan({...old,extraChunkIds:[]},'plan').extraChunkIds,[]);
+ for(const extraChunkIds of [null,'night',['night','night'],['']])assert.throws(()=>core.normalizeBatchPlan({...old,extraChunkIds},'plan'),/추가 청크/);
+ for(const promptOrder of [null,[],['character','scene'],['character','scene','scene'],['character','scene','unknown']])assert.throws(()=>core.normalizeBatchPlan({...old,promptOrder},'plan'),/문구 순서/);
+});
+test('all six character-scene-extra permutations compose positive and negative blocks with trigger anchors intact',()=>{
+ const lib=seed(),common=core.resolvePresetCommon(lib,lib.presets[0]),chunks=[lib.scenes[0],{prompt:'pose',negativePrompt:'pose-neg'}],extras={cast:{prompt:'outfit',negativePrompt:'outfit-neg'},scene:{prompt:'scene-extra',negativePrompt:'scene-neg'}};
+ const blocks={character:['character','outfit'],scene:['smile','pose','scene-extra'],extraChunks:['night','rain']};
+ const negatives={character:['character-neg','outfit-neg'],scene:['chunk-neg','pose-neg','scene-neg'],extraChunks:['night-neg','rain-neg']};
+ const extraChunks=[{prompt:'night',negativePrompt:'night-neg'},{prompt:'rain',negativePrompt:'rain-neg'}];
+ const permutations=[['character','scene','extraChunks'],['character','extraChunks','scene'],['scene','character','extraChunks'],['scene','extraChunks','character'],['extraChunks','character','scene'],['extraChunks','scene','character']];
+ for(const promptOrder of permutations)for(const position of [0,1,2,3,4,'end']){
+   const result=core.composePresetPrompts(common,lib.characters[0],chunks,lib.presets[0],position,extras,{extraChunks,promptOrder});
+   const parts=['set-quality','preset-style',...promptOrder.flatMap(block=>blocks[block])];
+   const insertion=position===0?0:position===1?2:position===2?parts.indexOf('outfit')+1:position===3?parts.indexOf('smile')+1:position===4?parts.indexOf('pose')+1:parts.length;
+   parts.splice(insertion,0,'trigger');assert.equal(result.prompt,parts.join(', '));
+   assert.equal(result.negativePrompt,['set-neg','preset-neg',...promptOrder.flatMap(block=>negatives[block])].join(', '));
+ }
+ for(const position of [0,1,2,3,4,'end']){
+   const oldParts=['set-quality, preset-style','character, outfit','smile','pose'];
+   if(position==='end')oldParts.push('scene-extra','trigger');else{oldParts.splice(position,0,'trigger');oldParts.push('scene-extra');}
+   assert.equal(core.composePresetPrompts(common,lib.characters[0],chunks,lib.presets[0],position,extras).prompt,oldParts.join(', '));
+ }
+});
+test('batch additional chunks and prompt order freeze into jobs and survive live edits deletion and backup round trips',()=>{
+ const lib=seed();lib.chunkFolders=[{id:'folder',name:'배경'}];lib.scenes.push({id:'night',name:'밤',prompt:'night',negativePrompt:'night-neg',folderId:'folder'});
+ lib.characters[0].loras=[{id:'302',versionId:'402',name:'캐릭터 LoRA',weight:.4,triggerWords:'char-trigger'}];
+ lib.sceneCards=[core.makeSceneCard(lib,{id:'card',name:'씬',sceneIds:['s'],extra:{prompt:'scene-extra',negativePrompt:'scene-neg'},triggerPosition:'end'})];
+ lib.casts=[{id:'cast',name:'정장',characterId:'c',presetId:'p',extra:{prompt:'outfit',negativePrompt:'outfit-neg'}}];
+ const plan={id:'plan',rows:[{kind:'cast',id:'cast'}],columns:['card'],count:1,extraChunkIds:['night'],promptOrder:['extraChunks','scene','character']};
+ lib.batchPlans=[plan];const expanded=core.expandBatchPlan(lib,plan);assert.deepEqual(expanded.problems,[]);
+ lib.reservations=expanded.reservations;const snapshot=lib.reservations[0].snapshot;
+ assert.deepEqual(snapshot.extraChunks,[{id:'night',name:'밤',prompt:'night',negativePrompt:'night-neg'}]);assert.deepEqual(snapshot.promptOrder,plan.promptOrder);
+ assert.equal(snapshot.preset.loras.length,2);assert.equal(snapshot.character.loras,undefined);
+ lib.scenes[1].prompt='changed-night';lib.characters[0].prompt='changed-character';lib.scenes=[];lib.chunkFolders=[];
+ const meta={appVersion:'test',exportedAt:'2026-11-08T00:00:00.000Z'},options={maxCredits:null,filePrefix:'',repeat:1};
+ for(const backup of [core.makeSettingsBackup(lib,options,meta),core.compatibleSettings(lib,options,meta,'app').backup]){
+   const restored=core.parseSettingsBackup(JSON.stringify(backup)).library;assert.deepEqual(restored.batchPlans[0].extraChunkIds,['night']);assert.deepEqual(restored.batchPlans[0].promptOrder,plan.promptOrder);
+   const [job]=core.expandPresetReservations(restored);assert.equal(job.prompt,'set-quality, preset-style, night, smile, scene-extra, character, outfit, trigger, char-trigger');
+   assert.equal(job.negativePrompt,'set-neg, preset-neg, night-neg, chunk-neg, scene-neg, character-neg, outfit-neg');assert.deepEqual(job.composition.reservation.snapshot,snapshot);
+ }
+});
+test('missing additional chunks block a complete batch while duplicate scene selection is explicit and retained',()=>{
+ const lib=seed();lib.sceneCards=[core.makeSceneCard(lib,{id:'card',sceneIds:['s']})];const plan={id:'plan',rows:[{kind:'character',id:'c'}],columns:['card'],count:1},before=copy(lib);
+ const missing=core.expandBatchPlan(lib,{...plan,extraChunkIds:['gone']});assert.equal(missing.reservations.length,0);assert(missing.problems.some(p=>p.level==='error'&&/추가 청크/.test(p.message)));assert.throws(()=>core.appendBatchReservations(lib,missing),/추가 청크/);assert.deepEqual(lib,before);
+ const duplicate=core.expandBatchPlan(lib,{...plan,extraChunkIds:['s']});assert(duplicate.problems.some(p=>p.level==='warning'&&/두 번/.test(p.message)));assert.equal(duplicate.reservations.length,1);
+ const [job]=core.expandPresetReservations({...lib,reservations:duplicate.reservations});assert.equal(job.prompt,'set-quality, preset-style, trigger, character, smile, smile');
+});
+test('additional chunk snapshots reject malformed arrays duplicates unknown fields and broken block orders',()=>{
+ const lib=seed(),recipe={id:'r',presetId:'p',characterId:'c',sceneIds:['s'],count:1},frozen=core.snapshotCombination(lib,recipe);
+ const read=snapshot=>core.normalizePresetLibrary({...lib,reservations:[{...recipe,snapshot}]});
+ for(const extraChunks of [null,{},[lib.scenes[0],lib.scenes[0]],[{...lib.scenes[0],apiKey:'untrusted'}]])assert.throws(()=>read({...frozen,extraChunks}),/사본/);
+ assert.throws(()=>read({...frozen,promptOrder:['scene','character','character']}),/문구 순서/);
+ const result=read({...frozen,extraChunks:[{...lib.scenes[0],folderId:'deleted-folder'}],promptOrder:['extraChunks','character','scene']});
+ assert.equal(result.reservations[0].snapshot.extraChunks[0].folderId,undefined);
+});
+test('legacy export excludes unsupported extra chunks and ordering visibly while default and old reservations remain exact',()=>{
+ const lib=seed(),recipe={id:'old',presetId:'p',characterId:'c',sceneIds:['s'],count:1},frozen=core.snapshotCombination(lib,recipe);
+ lib.reservations=[{...recipe,snapshot:frozen},{...recipe,id:'default',snapshot:{...copy(frozen),extraChunks:[],promptOrder:['character','scene','extraChunks']}},{...recipe,id:'extra',snapshot:{...copy(frozen),extraChunks:[{id:'night',name:'밤',prompt:'night',negativePrompt:''}]}},{...recipe,id:'reordered',snapshot:{...copy(frozen),promptOrder:['scene','character','extraChunks']}}];
+ const before=copy(lib),result=core.compatibleSettings(lib,{maxCredits:null,filePrefix:'',repeat:1},{appVersion:'test',exportedAt:'2026-11-08T00:00:00.000Z'},'legacy');
+ assert.deepEqual(result.backup.library.reservations.map(v=>v.id),['old','default']);assert(result.warnings.some(text=>/예약 2개/.test(text)));
+ const jobs=core.expandPresetReservations(core.parseSettingsBackup(JSON.stringify(result.backup)).library);assert.equal(jobs[0].prompt,jobs[1].prompt);assert.equal(jobs[0].prompt,core.expandPresetReservations(lib)[0].prompt);assert.deepEqual(lib,before);
+});
 module.exports={seed};
