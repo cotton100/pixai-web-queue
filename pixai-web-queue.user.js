@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.10.22
+// @version      0.10.23
 // @license      GPL-3.0-only
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -237,7 +237,13 @@ function createWebUnlimitedAdapter(doc,io) {
   const toggle=()=>only(list(doc,'main input[role="switch"]').filter(e=>['Tsubaki.3 무제한 모드','Tsubaki.3 Unlimited Mode'].includes(e.getAttribute('aria-label'))&&shown(e.closest('label'))),'무제한 토글');
   const groupName=e=>e.getAttribute('aria-label')||(e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>doc.getElementById(id)?.textContent||'').join(' ').trim();
   const ratioGroup=()=>only(list(doc,'main [role="group"]').filter(e=>shown(e)&&['비율','Aspect ratio','Aspect Ratio'].includes(groupName(e))),'비율 그룹');
-  const selectedRatio=()=>only(list(ratioGroup(),'button').filter(e=>/^\d+:\d+$/.test(e.textContent.trim())&&e.classList.contains('ring-neutral-700')),'선택 비율').textContent.trim();
+  function selectedRatio(allowPending=false) {
+    const selected=list(ratioGroup(),'button').filter(e=>shown(e)&&/^\d+:\d+$/.test(e.textContent.trim())&&e.classList.contains('ring-neutral-700'));
+    // A custom ratio has no selected standard button until the click rerenders.
+    // Only this empty transition may wait; ambiguous selections still stop.
+    if(allowPending&&!selected.length)return null;
+    return only(selected,'선택 비율').textContent.trim();
+  }
   function safety() {
     // The site's marker is a display:contents span (no own client rects).
     // Anchor the price to the uniquely visible button, not that layout wrapper.
@@ -259,7 +265,7 @@ function createWebUnlimitedAdapter(doc,io) {
     let button=list(group,'button').find(e=>shown(e)&&e.textContent.trim()===value);
     if(!button){const reverse=value.split(':').reverse().join(':');if(list(group,'button').some(e=>e.textContent.trim()===reverse)){click(only(list(group,'button').filter(e=>['가로/세로 전환','Swap orientation'].includes(e.getAttribute('aria-label'))),'가로/세로 전환'));await io.sleep(250);group=ratioGroup();button=list(group,'button').find(e=>shown(e)&&e.textContent.trim()===value);}}
     if(!button)throw Error(`웹 무제한: ${value} 비율 버튼을 찾지 못했습니다. 사이트에서 해당 비율을 먼저 선택해 주세요.`);
-    click(button);await waitFor(()=>selectedRatio()===value,'비율 적용');
+    click(button);await waitFor(()=>selectedRatio(true)===value,'비율 적용');
   }
   const canvas=()=>only(list(doc,'main [data-feed-scroller="true"] [data-testid="feed-column"]').filter(shown),'중앙 작업 화면');
   function ids(){return [...new Set(list(canvas(),'[data-task-id]').map(e=>e.getAttribute('data-task-id')).filter(id=>/^\d+$/.test(id)))];}
@@ -282,7 +288,8 @@ function createWebUnlimitedAdapter(doc,io) {
     const control=toggle();if(!control.checked)click(control.closest('label'));
     await waitFor(()=>toggle().checked,'무제한 모드');
     await io.settings.setImageCount(1);
-    await setRatio(job.apiOptions?.aspectRatio||'1:1');
+    const requestedRatio=job.apiOptions?.aspectRatio||'1:1';
+    await setRatio(requestedRatio);
     const helpers=list(doc,'main input[role="switch"]').filter(e=>['프롬프트 도우미','Prompt helper','Prompt Helper'].includes(e.getAttribute('aria-label'))&&shown(e.closest('label')));
     if(helpers.length>1)throw Error('프롬프트 도우미를 하나로 확인하지 못했습니다.');
     if(helpers[0]?.checked){click(helpers[0].closest('label'));await waitFor(()=>!helpers[0].checked,'프롬프트 도우미 끄기');}
@@ -295,7 +302,8 @@ function createWebUnlimitedAdapter(doc,io) {
     await waitFor(()=>normalize(readPromptEditorText(editor()))===normalize(job.prompt),'프롬프트 적용');
     await io.sleep(500);safety();
     if(ids().length)throw Error('설정 적용 중 중앙 화면에 다른 작업이 나타났습니다. 생성하지 않았습니다.');
-    job.webBeforeIds=[];job.webApplied={aspectRatio:selectedRatio(),batchSize:1,mode:'site-unlimited',resolution:'site-fixed'};
+    if(selectedRatio()!==requestedRatio)throw Error('웹 무제한: 설정 적용 중 비율이 예약과 달라졌습니다. 생성하지 않았습니다.');
+    job.webBeforeIds=[];job.webApplied={aspectRatio:requestedRatio,batchSize:1,mode:'site-unlimited',resolution:'site-fixed'};
   }
   async function submitWeb(job) {
     let button,before;
@@ -460,7 +468,7 @@ function effectiveCharacterPreset(preset, character = {}, options = {}) {
 }
   // END CHARACTER LORA
   const UPDATE_CHANNEL = 'stable';
-  const UPDATE_BUILD_VERSION = '0.10.22';
+  const UPDATE_BUILD_VERSION = '0.10.23';
   const UPDATE_URLS = Object.freeze({stable:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js',development:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js'});
   function updateChannelUrl(channel) {
     if (!Object.hasOwn(UPDATE_URLS,channel)) throw new Error('업데이트 채널을 다시 선택해 주세요.');
@@ -3868,8 +3876,11 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
       throw new Error(`${label} 확인 시간 초과. 생성하지 않았습니다.`);
     }
     function dialog() {
-      const found = list(doc,'[role="dialog"]').filter(shown);
-      return found.length === 1 ? found[0] : null;
+      // Announcements can also use role=dialog. Only explicitly nonmodal ones
+      // are ignored; unknown or multiple blocking dialogs must still stop us.
+      const found = list(doc,'[role="dialog"]').filter(shown).filter(e=>e.getAttribute('aria-modal')!=='false');
+      if(found.length>1)throw new Error('열린 사이트 선택창이 여러 개입니다. 먼저 닫아 주세요.');
+      return found[0] || null;
     }
     async function revealModelPanel() {
       const tabs=list(doc,'main [role="tab"]').filter(e=>shown(e)&&['모델','Model'].includes(e.textContent.trim()));
@@ -5873,7 +5884,7 @@ function mountPresetEditor(parent, io) {
     panel = node('aside', null, {id:'local-pixai-queue'});
     if (typeof ResizeObserver==='function') new ResizeObserver(()=>{panel.dataset.short=String(panel.clientHeight>0 && panel.clientHeight<560);}).observe(panel);
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.10.22', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.10.23', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue .pq-backup-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}#local-pixai-queue .pq-backup-choices label.pq-check-label,#local-pixai-queue .pq-backup-folder-list label.pq-check-label{margin:5px 0;min-width:0}#local-pixai-queue .pq-backup-choices span,#local-pixai-queue .pq-backup-folder-list span{min-width:0;overflow-wrap:anywhere}#local-pixai-queue .pq-backup-folder-list{max-height:180px;overflow:auto;padding:4px 8px}#local-pixai-queue [data-backup-result]{padding:8px;border-left:3px solid #94bedf;overflow-wrap:anywhere}@media(max-width:700px){#local-pixai-queue .pq-backup-choices{grid-template-columns:minmax(0,1fr)}}';
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
@@ -6087,7 +6098,7 @@ function mountPresetEditor(parent, io) {
       }
       render();
     }
-    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.22',exportedAt:new Date().toISOString()})));
+    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.23',exportedAt:new Date().toISOString()})));
     const exportPreview=node('div',null,{'data-export-preview':''});exportPreview.hidden=true;
     let pendingExport=null;
     function clearExport() {pendingExport=null;exportPreview.replaceChildren();exportPreview.hidden=true;}
@@ -6123,7 +6134,7 @@ function mountPresetEditor(parent, io) {
       const folders=Object.fromEntries(Object.entries(p.folders).filter(([key])=>p.selection[key]));
       const save=backupButton('선택한 항목 파일 저장',()=>settingsAction(async()=>{
         if(dataStorage.getItem(LIBRARY_KEY)!==p.libraryBefore)throw new Error('백업 범위를 고르는 동안 자료가 바뀌었습니다. 선택 내보내기를 다시 열어 주세요.');
-        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.22',exportedAt:new Date().toISOString()},folders);
+        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.23',exportedAt:new Date().toISOString()},folders);
         await downloadSettings(data,'선택_설정');
         if(pendingExport===p){clearExport();openExport.focus();}
       },{readOnly:true}));
@@ -6146,7 +6157,7 @@ function mountPresetEditor(parent, io) {
       drawExport();exportPreview.hidden=false;exportPreview.querySelector('input')?.focus();
     });
     const compatibility=node('div',null,{'data-compatibility-preview':'',role:'status'});compatibility.hidden=true;
-    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.22',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
+    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.23',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
     const input=node('input',null,{type:'file',accept:'.json,application/json','aria-label':'설정 백업 JSON 파일','data-edit':''});input.hidden=true;
     const preview=node('div',null,{'data-import-preview':'','aria-live':'polite'});preview.hidden=true;
     let pendingSettings=null;
@@ -6638,7 +6649,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.22', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.23', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
