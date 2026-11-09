@@ -1897,6 +1897,31 @@ test('capture rejects ambiguous visible model links and open settings dialogs wi
   const opened=fixture({openDialog:true});await assert.rejects(opened.adapter.capture(),/먼저 닫아/);
   await assert.rejects(opened.adapter.apply(configuration()),/먼저 닫아/);assert.equal(opened.state.mutations,0);
 });
+
+test('explicitly nonmodal announcement does not block capture or model and LoRA selectors',async()=>{
+  const f=fixture({modelTabHidden:true}),toast=new Element('div',{role:'dialog','aria-modal':'false'},'Halloween announcement');
+  const close=new Element('button',{'aria-label':'Close'});close.onClick=()=>assert.fail('announcement must not be closed');toast.append(close);f.doc.append(toast);
+  assert.deepEqual(plain(await f.adapter.capture()),configuration());
+  const target=configuration({id:'2',versionId:'22',name:'대상 모델'},[{id:'20',versionId:'201',name:'대상 LoRA',weight:0.7}]);
+  await f.adapter.apply(target);assert.deepEqual(plain(await f.adapter.capture()),target);
+  assert.equal(f.doc.querySelectorAll('[role="dialog"]').length,1);assert.equal(f.doc.querySelector('[role="dialog"]'),toast);
+  assert.equal(f.state.paidClicks,0);
+});
+
+test('modal or unknown dialogs remain blocking beside a nonmodal announcement',async()=>{
+  for(const attributes of [{'aria-modal':'true'},{}, {'aria-modal':'unexpected'}]) {
+    const f=fixture();f.doc.append(new Element('div',{role:'dialog','aria-modal':'false'}),new Element('div',{role:'dialog',...attributes}));
+    await assert.rejects(f.adapter.capture(),/먼저 닫아/);
+    await assert.rejects(f.adapter.apply(configuration()),/먼저 닫아/);
+    assert.equal(f.state.mutations,0);assert.equal(f.state.paidClicks,0);
+  }
+});
+
+test('multiple blocking dialogs cannot be mistaken for no open dialog',async()=>{
+  const f=fixture({openDialog:true});f.doc.append(new Element('div',{role:'dialog','aria-modal':'true'}));
+  await assert.rejects(f.adapter.capture(),/선택창/);await assert.rejects(f.adapter.apply(configuration()),/선택창/);
+  assert.equal(f.state.mutations,0);assert.equal(f.state.paidClicks,0);
+});
 test('selected model card ignores recommendation/history links and the legacy model key follows only the selected version',async()=>{
   const f=fixture();
   const recommendation=new Element('a',{href:'/en/model/9/99'},'추천 모델');recommendation.parentElement=f.modelSection;f.modelSection.children.unshift(recommendation);

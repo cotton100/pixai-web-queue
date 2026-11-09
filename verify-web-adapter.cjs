@@ -13,8 +13,14 @@ function fixture(options={}) {
     getAttribute(k){return this.attrs[k]??null;},getClientRects(){return [{}];},closest(){return null;},
     querySelectorAll(){return [];},querySelector(){return null;},hasAttribute(k){return Object.hasOwn(this.attrs,k);},focus(){},blur(){},dispatchEvent(){}});
   const input=elem();input.childNodes=[{nodeType:1,tagName:'P',childNodes:[{nodeType:3,textContent:'desired'}]}];
-  const ratio=elem({},'1:1');ratio.classList={contains:()=>true};ratio.click=()=>{};
-  const group=elem({'aria-label':'Aspect ratio'});group.querySelectorAll=()=>[ratio];
+  let ratioClickAt=null,ratioClicks=0,ratioInvalidated=false;
+  const ratio=elem({},options.aspectRatio||'1:1');
+  const ratioSelected=()=>!ratioInvalidated&&(!options.unselectedRatio||(ratioClickAt!==null&&!options.ratioNeverSelected&&clock-ratioClickAt>=(options.ratioDelay||0)));
+  ratio.classList={contains:name=>name==='ring-neutral-700'&&ratioSelected()};
+  ratio.click=()=>{ratioClicks++;ratioClickAt=clock;};
+  const otherRatio=elem({},'5:3');otherRatio.classList={contains:name=>name==='ring-neutral-700'};
+  if(options.hiddenRatioCopy)otherRatio.hidden=true;
+  const group=elem({'aria-label':'Aspect ratio'});group.querySelectorAll=()=>options.ambiguousRatio||options.hiddenRatioCopy?[ratio,otherRatio]:[ratio];
   const label=elem(),toggle=elem({'aria-label':'Tsubaki.3 Unlimited Mode'});toggle.checked=true;toggle.closest=s=>s==='label'?label:null;
   const free=elem({},'Free'),banner=elem({},'Unlimited mode active'),scope=elem(),generateArea=elem(),button=elem();
   generateArea.parentElement=scope;button.parentElement=generateArea;button.closest=s=>s==='[data-share-guide="generate"]'?generateArea:null;
@@ -57,15 +63,62 @@ function fixture(options={}) {
     'button':menuOpen?[detail]:[]
   })[s]??[];},createRange:()=>({selectNodeContents(){}}),execCommand:(name,unused,value)=>{input.childNodes=[{nodeType:1,tagName:'P',childNodes:[{nodeType:3,textContent:value}]}];return true;}};
   const settings={capture:async()=>config,apply:async()=>{},read:()=>preflightFailure==='config'?{...config,model:{...config.model,versionId:'22'}}:config,readImageCount:()=>1,setImageCount:async()=>{},
-    setNegative:async value=>{negative=value;},verifyNegative(){if(preflightFailure==='negative')throw Error('negative changed');},captureNegative:async()=>{negativeReads++;return negative;}};
+    setNegative:async value=>{negative=value;if(options.ratioDrift)ratio.textContent='5:3';},verifyNegative(){if(preflightFailure==='negative')throw Error('negative changed');},captureNegative:async()=>{negativeReads++;return negative;}};
   class FakeDate extends Date {static now(){return 1000000+clock;}}
   const context={URL,Date:FakeDate,normalize:core.normalize,readPromptEditorText:core.readPromptEditorText,assertConfiguration:core.assertConfiguration};
   vm.runInNewContext(source+'\nthis.reviewExports={createWebUnlimitedAdapter,runWebUnlimited};',context);
   const adapter=context.reviewExports.createWebUnlimitedAdapter(doc,{settings,freeze:job=>{if(options.freezeFailure)throw Error('baseline quota');frozen.push({job:structuredClone(job),ids:[...ids],negative});},win:{getComputedStyle:()=>({}),getSelection:()=>({removeAllRanges(){},addRange(){}}),InputEvent:class{}},check(){if(options.cancelAt!=null&&clock>=options.cancelAt)throw Error('중단됨');},mutate:fn=>fn(),sleep:async ms=>{clock+=ms;if(options.lateDuringReset&&clock-resetClock>=1000)ids.push('100');if(submits&&options.idDelay&&!options.noId&&clock-submitClock>=options.idDelay&&!ids.includes(receiptId))ids.push(receiptId);if(submits&&options.otherAfter!=null&&clock-submitClock>=options.otherAfter&&!ids.includes('1000'))ids.push('1000');}});
   const job=()=>({backend:'web-unlimited',id:'local',state:'queued',saved:[],prompt:'desired',negativePrompt:'',configuration:config,webApplied:{aspectRatio:'1:1'},webBeforeIds:[]});
   const breakPreflight=kind=>{preflightFailure=kind;if(kind==='prompt')input.childNodes=[];if(kind==='price')free.textContent='1100';if(kind==='other')ids.push('2000');if(kind==='missing')button.attrs['data-prompt-input-missing']='';};
-  return {adapter,run:context.reviewExports.runWebUnlimited,job,frozen,events,breakPreflight,clock:()=>clock,ids:()=>[...ids],addId:id=>ids.push(id),negative:()=>negative,negativeReads:()=>negativeReads,submits:()=>submits,dialogOpen:()=>dialogOpen};
+  return {adapter,run:context.reviewExports.runWebUnlimited,job,frozen,events,breakPreflight,clock:()=>clock,ids:()=>[...ids],addId:id=>ids.push(id),negative:()=>negative,negativeReads:()=>negativeReads,submits:()=>submits,dialogOpen:()=>dialogOpen,ratioClicks:()=>ratioClicks,clearRatio:()=>{ratioInvalidated=true;}};
 }
+
+test('custom ratio waits for delayed standard selection then completes consecutive jobs without reclicking',async()=>{
+  for(const ratioDelay of [500,1500]) {
+    const f=fixture({sequence:true,aspectRatio:'16:9',unselectedRatio:true,ratioDelay}),jobs=[{...f.job(),apiOptions:{aspectRatio:'16:9'}},{...f.job(),id:'next',apiOptions:{aspectRatio:'16:9'}}];
+    await f.run(jobs,{prepare:f.adapter.prepare,submit:f.adapter.submit,wait:f.adapter.wait,guard:f.adapter.guard,persist(){},save:async job=>'saved-'+job.taskId+'.webp'});
+    assert(jobs.every(job=>job.state==='done'&&job.webApplied.aspectRatio==='16:9'));
+    assert.equal(f.submits(),2);assert.equal(f.ratioClicks(),2);
+  }
+});
+
+test('missing ratio confirmation times out without submitting and preserves queued jobs for retry',async()=>{
+  const f=fixture({unselectedRatio:true,ratioNeverSelected:true}),jobs=[f.job(),{...f.job(),id:'next'}];
+  await assert.rejects(f.run(jobs,{prepare:f.adapter.prepare,submit:f.adapter.submit,persist(){},save:async()=>assert.fail('save')}),/비율 적용 확인 시간 초과/);
+  assert.equal(f.submits(),0);assert.equal(f.ratioClicks(),1);assert(f.clock()>=21000);
+  assert(jobs.every(job=>job.state==='queued'&&!job.taskId&&!job.submittedAt));
+});
+
+test('multiple selected ratios still fail immediately without submitting',async()=>{
+  const f=fixture({ambiguousRatio:true}),job=f.job();
+  await assert.rejects(f.adapter.prepare(job),/선택 비율을 하나로/);
+  assert.equal(f.submits(),0);assert.equal(f.ratioClicks(),1);assert.equal(f.clock(),1000);
+});
+
+test('ratio confirmation lost before submission rejects without generation',async()=>{
+  const f=fixture({unselectedRatio:true,ratioDelay:500}),job=f.job();
+  await f.adapter.prepare(job);f.clearRatio();
+  await assert.rejects(f.adapter.submit(job),error=>error.notSubmitted===true&&/선택 비율/.test(error.message));
+  assert.equal(f.submits(),0);
+});
+
+test('delayed ratio never bypasses changed price or cancellation checks',async()=>{
+  const paid=fixture({unselectedRatio:true,ratioDelay:500,paidPrice:true});
+  await assert.rejects(paid.adapter.prepare(paid.job()),/무료/);assert.equal(paid.submits(),0);
+  const stopped=fixture({unselectedRatio:true,ratioDelay:2000,cancelAt:1500});
+  await assert.rejects(stopped.adapter.prepare(stopped.job()),/중단/);assert.equal(stopped.submits(),0);assert.equal(stopped.ratioClicks(),1);
+});
+
+test('hidden selected ratio copies do not make the visible selection ambiguous',async()=>{
+  const f=fixture({unselectedRatio:true,ratioDelay:500,hiddenRatioCopy:true}),job=f.job();
+  await f.adapter.prepare(job);assert.equal(job.webApplied.aspectRatio,'1:1');assert.equal(f.submits(),0);
+});
+
+test('ratio changed while applying other fields cannot become the accepted request',async()=>{
+  const f=fixture({ratioDrift:true}),jobs=[f.job(),{...f.job(),id:'next'}];
+  await assert.rejects(f.run(jobs,{prepare:f.adapter.prepare,submit:f.adapter.submit,persist(){}}),/비율이 예약과 달라졌/);
+  assert(jobs.every(job=>job.state==='queued'&&!job.taskId));assert.equal(f.submits(),0);
+});
 
 test('actual adapter persists each ID before 70-second generation and saves before the next submit regardless of age labels',async()=>{
   const f=fixture({sequence:true,menu:true,mediaDelay:70000,metaDelay:70000,pendingText:'생성 중 32%',recentText:'1분 전'}),jobs=[{...f.job(),id:'one',prompt:'green vase'},{...f.job(),id:'two',prompt:'yellow bowl'}],snapshots=[];

@@ -66,7 +66,13 @@ function createWebUnlimitedAdapter(doc,io) {
   const toggle=()=>only(list(doc,'main input[role="switch"]').filter(e=>['Tsubaki.3 무제한 모드','Tsubaki.3 Unlimited Mode'].includes(e.getAttribute('aria-label'))&&shown(e.closest('label'))),'무제한 토글');
   const groupName=e=>e.getAttribute('aria-label')||(e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>doc.getElementById(id)?.textContent||'').join(' ').trim();
   const ratioGroup=()=>only(list(doc,'main [role="group"]').filter(e=>shown(e)&&['비율','Aspect ratio','Aspect Ratio'].includes(groupName(e))),'비율 그룹');
-  const selectedRatio=()=>only(list(ratioGroup(),'button').filter(e=>/^\d+:\d+$/.test(e.textContent.trim())&&e.classList.contains('ring-neutral-700')),'선택 비율').textContent.trim();
+  function selectedRatio(allowPending=false) {
+    const selected=list(ratioGroup(),'button').filter(e=>shown(e)&&/^\d+:\d+$/.test(e.textContent.trim())&&e.classList.contains('ring-neutral-700'));
+    // A custom ratio has no selected standard button until the click rerenders.
+    // Only this empty transition may wait; ambiguous selections still stop.
+    if(allowPending&&!selected.length)return null;
+    return only(selected,'선택 비율').textContent.trim();
+  }
   function safety() {
     // The site's marker is a display:contents span (no own client rects).
     // Anchor the price to the uniquely visible button, not that layout wrapper.
@@ -88,7 +94,7 @@ function createWebUnlimitedAdapter(doc,io) {
     let button=list(group,'button').find(e=>shown(e)&&e.textContent.trim()===value);
     if(!button){const reverse=value.split(':').reverse().join(':');if(list(group,'button').some(e=>e.textContent.trim()===reverse)){click(only(list(group,'button').filter(e=>['가로/세로 전환','Swap orientation'].includes(e.getAttribute('aria-label'))),'가로/세로 전환'));await io.sleep(250);group=ratioGroup();button=list(group,'button').find(e=>shown(e)&&e.textContent.trim()===value);}}
     if(!button)throw Error(`웹 무제한: ${value} 비율 버튼을 찾지 못했습니다. 사이트에서 해당 비율을 먼저 선택해 주세요.`);
-    click(button);await waitFor(()=>selectedRatio()===value,'비율 적용');
+    click(button);await waitFor(()=>selectedRatio(true)===value,'비율 적용');
   }
   const canvas=()=>only(list(doc,'main [data-feed-scroller="true"] [data-testid="feed-column"]').filter(shown),'중앙 작업 화면');
   function ids(){return [...new Set(list(canvas(),'[data-task-id]').map(e=>e.getAttribute('data-task-id')).filter(id=>/^\d+$/.test(id)))];}
@@ -111,7 +117,8 @@ function createWebUnlimitedAdapter(doc,io) {
     const control=toggle();if(!control.checked)click(control.closest('label'));
     await waitFor(()=>toggle().checked,'무제한 모드');
     await io.settings.setImageCount(1);
-    await setRatio(job.apiOptions?.aspectRatio||'1:1');
+    const requestedRatio=job.apiOptions?.aspectRatio||'1:1';
+    await setRatio(requestedRatio);
     const helpers=list(doc,'main input[role="switch"]').filter(e=>['프롬프트 도우미','Prompt helper','Prompt Helper'].includes(e.getAttribute('aria-label'))&&shown(e.closest('label')));
     if(helpers.length>1)throw Error('프롬프트 도우미를 하나로 확인하지 못했습니다.');
     if(helpers[0]?.checked){click(helpers[0].closest('label'));await waitFor(()=>!helpers[0].checked,'프롬프트 도우미 끄기');}
@@ -124,7 +131,8 @@ function createWebUnlimitedAdapter(doc,io) {
     await waitFor(()=>normalize(readPromptEditorText(editor()))===normalize(job.prompt),'프롬프트 적용');
     await io.sleep(500);safety();
     if(ids().length)throw Error('설정 적용 중 중앙 화면에 다른 작업이 나타났습니다. 생성하지 않았습니다.');
-    job.webBeforeIds=[];job.webApplied={aspectRatio:selectedRatio(),batchSize:1,mode:'site-unlimited',resolution:'site-fixed'};
+    if(selectedRatio()!==requestedRatio)throw Error('웹 무제한: 설정 적용 중 비율이 예약과 달라졌습니다. 생성하지 않았습니다.');
+    job.webBeforeIds=[];job.webApplied={aspectRatio:requestedRatio,batchSize:1,mode:'site-unlimited',resolution:'site-fixed'};
   }
   async function submitWeb(job) {
     let button,before;
