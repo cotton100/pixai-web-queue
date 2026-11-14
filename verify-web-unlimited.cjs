@@ -28,8 +28,32 @@ test('first-job mode leaves later work untouched and never invokes API jobs',asy
   const f=fixture();f.jobs.unshift({id:'api',state:'queued',saved:[]});await runWebUnlimited(f.jobs,f.io,{oneJob:true});
   assert.deepEqual(f.events,['prepare0','submit0','wait0','save0']);assert.equal(f.jobs[0].state,'queued');assert.equal(f.jobs[2].state,'queued');
 });
-test('failed preflight leaves the job unsubmitted',async()=>{
-  const f=fixture();f.io.prepare=async()=>{throw Error('paid');};await assert.rejects(runWebUnlimited(f.jobs,f.io),/paid/);assert.deepEqual(f.events,[]);assert.equal(f.jobs[0].state,'queued');assert.equal(f.jobs[0].submittedAt,undefined);
+test('failed preflight persists its reason without submitting or touching later work',async()=>{
+  const f=fixture(),later=structuredClone(f.jobs[1]),failure=Error('free price unavailable');
+  f.io.prepare=async()=>{throw failure;};
+  await assert.rejects(runWebUnlimited(f.jobs,f.io),error=>error===failure);
+  assert.deepEqual(f.events,[]);assert.equal(f.jobs[0].state,'queued');assert.equal(f.jobs[0].taskId,undefined);assert.equal(f.jobs[0].submittedAt,undefined);
+  assert.equal(f.jobs[0].error,failure.message);assert.equal(f.snapshots.length,1);assert.equal(f.snapshots[0][0].error,failure.message);assert.deepEqual(f.jobs[1],later);
+});
+test('preflight failure survives reload and a successful first-job retry clears it',async()=>{
+  const failed=fixture();failed.io.prepare=async()=>{throw Error('ratio unavailable');};
+  await assert.rejects(runWebUnlimited(failed.jobs,failed.io),/ratio unavailable/);
+  const retry=fixture(),restored=recover(JSON.parse(JSON.stringify(failed.snapshots.at(-1))));
+  retry.jobs.splice(0,retry.jobs.length,...restored);
+  assert.equal(retry.jobs[0].state,'queued');assert.equal(retry.jobs[0].error,'ratio unavailable');assert.equal(retry.jobs[0].taskId,undefined);
+  const later=structuredClone(retry.jobs[1]);
+  await runWebUnlimited(retry.jobs,retry.io,{oneJob:true});
+  assert.deepEqual(retry.events,['prepare0','submit0','wait0','save0']);assert.equal(retry.snapshots[0][0].error,'');
+  assert.equal(retry.jobs[0].state,'done');assert.equal(retry.jobs[0].error,'');assert.deepEqual(retry.jobs[1],later);
+});
+test('preflight persistence failure preserves the primary cause and warns that the reason was not saved',async()=>{
+  const f=fixture(),later=structuredClone(f.jobs[1]),failure=Error('model unavailable');let writes=0;
+  f.io.prepare=async()=>{throw failure;};f.io.persist=()=>{writes++;throw Error('quota');};
+  await assert.rejects(runWebUnlimited(f.jobs,f.io),error=>{
+    assert.equal(error.cause,failure);assert.match(error.message,/^model unavailable\n/);assert.match(error.message,/오류 기록 저장에도 실패.*quota/);assert.match(error.message,/새로고침하면 원인 표시가 사라질 수 있습니다/);return true;
+  });
+  assert.equal(writes,1);assert.deepEqual(f.events,[]);assert.equal(f.jobs[0].state,'queued');assert.equal(f.jobs[0].taskId,undefined);assert.equal(f.jobs[0].submittedAt,undefined);
+  assert.match(f.jobs[0].error,/^model unavailable\n/);assert.deepEqual(f.jobs[1],later);
 });
 test('quota failure before submit performs no website click',async()=>{
   const f=fixture();f.io.persist=()=>{throw Error('quota');};await assert.rejects(runWebUnlimited(f.jobs,f.io),/quota/);assert.deepEqual(f.events,['prepare0']);assert.equal(f.jobs[0].state,'unknown');

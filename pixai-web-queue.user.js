@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PixAI 웹 대기열 (로컬 후보)
 // @namespace    local.pixai-web-queue
-// @version      0.10.23
+// @version      0.10.25
 // @license      GPL-3.0-only
 // @homepageURL  https://github.com/cotton100/pixai-web-queue
 // @updateURL    https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js
@@ -194,7 +194,16 @@ async function runWebUnlimited(jobs,io,{oneJob=false,stopped=()=>false}={}) {
     if (!['queued','waiting','saving','save_failed'].includes(job.state)) throw Error('웹 제출 결과가 불명확합니다. 사이트 기록을 확인해 주세요. 자동 재제출하지 않습니다.');
     if (job.state==='queued') {
       if (job.taskId || job.submittedAt || job.apiPayload) throw Error('이미 제출됐거나 API 요청이 있는 작업을 웹에서 다시 생성할 수 없습니다.');
-      await io.prepare(job);
+      try {await io.prepare(job);}
+      catch(error) {
+        job.error=error.message;
+        try {io.persist();}
+        catch(storageError) {
+          job.error=`${error.message}\n대기열 오류 기록 저장에도 실패했습니다: ${storageError.message}. 새로고침하면 원인 표시가 사라질 수 있습니다.`;
+          throw new Error(job.error,{cause:error});
+        }
+        throw error;
+      }
       if(stopped()) break;
       Object.assign(job,{expected:1,state:'submitting',submittedAt:Date.now(),error:''});
       // Commit the uncertainty marker BEFORE any website click, including on quota failure.
@@ -468,7 +477,7 @@ function effectiveCharacterPreset(preset, character = {}, options = {}) {
 }
   // END CHARACTER LORA
   const UPDATE_CHANNEL = 'stable';
-  const UPDATE_BUILD_VERSION = '0.10.23';
+  const UPDATE_BUILD_VERSION = '0.10.25';
   const UPDATE_URLS = Object.freeze({stable:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/main/pixai-web-queue.user.js',development:'https://raw.githubusercontent.com/cotton100/pixai-web-queue/develop/pixai-web-queue.dev.user.js'});
   function updateChannelUrl(channel) {
     if (!Object.hasOwn(UPDATE_URLS,channel)) throw new Error('업데이트 채널을 다시 선택해 주세요.');
@@ -4090,7 +4099,7 @@ function prepareBackupImport(current, transfer, selection, mode, idFactory = () 
       const group=only(groups,'이미지 수 선택');
       return [...new Set([...list(group,'[role="radio"]'),...list(group,'input[type="radio"]')])].filter(shown).map(element=>{
         const text=element.getAttribute('aria-label') || element.textContent || element.closest?.('label')?.textContent || '';
-        return {element,count:/x4|×4/i.test(text) ? 4 : /단일|single/i.test(text) ? 1 : null};
+        return {element,count:/x4|×4/i.test(text) ? 4 : /단일|single/i.test(text)||text.trim()==='1장' ? 1 : null};
       }).filter(item=>item.count);
     }
     function readImageCount(optional=false) {
@@ -5621,7 +5630,7 @@ function mountPresetEditor(parent, io) {
         message='웹 무제한 · 단일 생성 → 원본 저장 → 다음 작업';render();
         try {
           await runWebUnlimited(jobs,{
-            persist,prepare:async job=>{await ensureDestination();await webRunner.prepare(job);},submit:webRunner.submit,wait:webRunner.wait,guard:webRunner.guard,
+            persist,prepare:async job=>{message='웹 무제한 준비 중: 모델·LoRA·이미지 설정 적용 — '+job.title;render();await ensureDestination();await webRunner.prepare(job);message='웹 무제한: 준비 완료 · 생성·저장 진행 — '+job.title;render();},submit:webRunner.submit,wait:webRunner.wait,guard:webRunner.guard,
             save:async(job,original)=>{
               await ensureDestination();job.folderToken=folderToken;persist();
               const blob=await api.image(original.url); // Anonymous image download only; never reads an API key.
@@ -5884,7 +5893,7 @@ function mountPresetEditor(parent, io) {
     panel = node('aside', null, {id:'local-pixai-queue'});
     if (typeof ResizeObserver==='function') new ResizeObserver(()=>{panel.dataset.short=String(panel.clientHeight>0 && panel.clientHeight<560);}).observe(panel);
     const style = node('style', `#local-pixai-queue{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:340px;max-height:80vh;overflow:auto;padding:16px;border:1px solid #505862;border-radius:14px;background:#222529;color:#edf1f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0006}#local-pixai-queue *{box-sizing:border-box}#local-pixai-queue h2{margin:0 0 8px;font-size:17px}#local-pixai-queue input,#local-pixai-queue textarea{width:100%;margin:5px 0;padding:8px;border:1px solid #4a515a;border-radius:7px;background:#151719;color:inherit;font:inherit}#local-pixai-queue textarea{min-height:85px;resize:vertical}#local-pixai-queue button{margin:4px 4px 4px 0;padding:7px 10px;border:1px solid #616b77;border-radius:7px;background:#30363c;color:inherit;cursor:pointer}#local-pixai-queue button:disabled{opacity:.45;cursor:default}#local-pixai-queue small{display:block;color:#bbc3cc}#local-pixai-queue .pq-job{border-top:1px solid #41474f;padding:8px 0}#local-pixai-queue .pq-job span{display:block;color:#b6c1cc}#local-pixai-queue [data-jobs]{max-height:230px;overflow:auto}#local-pixai-queue [data-message]{white-space:pre-wrap;color:#d9e0e8;margin:8px 0}`);
-    const dragHandle = node('h2','PixAI 대기열 · 0.10.23', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
+    const dragHandle = node('h2','PixAI 대기열 · 0.10.25', {'data-drag-handle':'',title:'이 제목줄을 드래그해서 이동'});
     style.textContent += '#local-pixai-queue .pq-backup-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}#local-pixai-queue .pq-backup-choices label.pq-check-label,#local-pixai-queue .pq-backup-folder-list label.pq-check-label{margin:5px 0;min-width:0}#local-pixai-queue .pq-backup-choices span,#local-pixai-queue .pq-backup-folder-list span{min-width:0;overflow-wrap:anywhere}#local-pixai-queue .pq-backup-folder-list{max-height:180px;overflow:auto;padding:4px 8px}#local-pixai-queue [data-backup-result]{padding:8px;border-left:3px solid #94bedf;overflow-wrap:anywhere}@media(max-width:700px){#local-pixai-queue .pq-backup-choices{grid-template-columns:minmax(0,1fr)}}';
     style.textContent += '#local-pixai-queue{box-sizing:border-box;width:min(340px,calc(100vw - 16px));pointer-events:auto}#local-pixai-queue button{pointer-events:auto}#local-pixai-queue [data-drag-handle]{margin:0;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:grab;user-select:none;touch-action:none}#local-pixai-queue [data-drag-handle][data-dragging]{cursor:grabbing}';
     style.textContent += '#local-pixai-queue :is(button,input,textarea,select,summary):focus-visible{outline:2px solid #acd1ed;outline-offset:2px}#local-pixai-queue button:not(:disabled):hover{border-color:#a9cce7;background:#39434d}#local-pixai-queue [data-primary]{background:#94bedf;color:#16232d;border-color:#94bedf;font-weight:650}#local-pixai-queue [data-primary]:not(:disabled):hover{background:#b3d2eb;color:#16232d}';
@@ -6098,7 +6107,7 @@ function mountPresetEditor(parent, io) {
       }
       render();
     }
-    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.23',exportedAt:new Date().toISOString()})));
+    const saveSettings=backupButton('전체 설정 내보내기',()=>downloadSettings(makeSettingsBackup(readLibrary(),readOptions(),{appVersion:'0.10.25',exportedAt:new Date().toISOString()})));
     const exportPreview=node('div',null,{'data-export-preview':''});exportPreview.hidden=true;
     let pendingExport=null;
     function clearExport() {pendingExport=null;exportPreview.replaceChildren();exportPreview.hidden=true;}
@@ -6134,7 +6143,7 @@ function mountPresetEditor(parent, io) {
       const folders=Object.fromEntries(Object.entries(p.folders).filter(([key])=>p.selection[key]));
       const save=backupButton('선택한 항목 파일 저장',()=>settingsAction(async()=>{
         if(dataStorage.getItem(LIBRARY_KEY)!==p.libraryBefore)throw new Error('백업 범위를 고르는 동안 자료가 바뀌었습니다. 선택 내보내기를 다시 열어 주세요.');
-        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.23',exportedAt:new Date().toISOString()},folders);
+        const data=makeTransferBackup(p.library,p.selection.options?readOptions():null,p.selection,{appVersion:'0.10.25',exportedAt:new Date().toISOString()},folders);
         await downloadSettings(data,'선택_설정');
         if(pendingExport===p){clearExport();openExport.focus();}
       },{readOnly:true}));
@@ -6157,7 +6166,7 @@ function mountPresetEditor(parent, io) {
       drawExport();exportPreview.hidden=false;exportPreview.querySelector('input')?.focus();
     });
     const compatibility=node('div',null,{'data-compatibility-preview':'',role:'status'});compatibility.hidden=true;
-    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.23',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
+    function compatibilityButton(label,target){return backupButton(label,()=>{clearExport();const result=compatibleSettings(readLibrary(),readOptions(),{appVersion:'0.10.25',exportedAt:new Date().toISOString()},target);compatibility.replaceChildren(node('strong',label),node('p',result.warnings.length?result.warnings.join('\n'):'재료·공통문 연결·씬·출연·구성·예약 사본을 유지합니다. 실행 작업과 브라우저 화면 위치는 포함하지 않습니다.'),backupButton('변환 내용 확인 후 파일 저장',async()=>{await downloadSettings(result.backup,target==='app'?'앱_호환':'스크립트_0.9.14_호환');compatibility.hidden=true;}),button('내보내기 취소',()=>{compatibility.hidden=true;}));compatibility.hidden=false;});}
     const input=node('input',null,{type:'file',accept:'.json,application/json','aria-label':'설정 백업 JSON 파일','data-edit':''});input.hidden=true;
     const preview=node('div',null,{'data-import-preview':'','aria-live':'polite'});preview.hidden=true;
     let pendingSettings=null;
@@ -6649,7 +6658,7 @@ function mountPresetEditor(parent, io) {
         notify('확인 파일 다운로드 중 · 파일이 저장되기 전에는 생성하지 않습니다.');
         await locked(async () => {
           const name = `PixAI_다운로드확인_${Date.now()}.json`;
-          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.23', probe:true}));
+          await writeNew(name, JSON.stringify({app:'PixAI 웹 대기열', version:'0.10.25', probe:true}));
           downloadsReady = true; folderToken = `download:${crypto.randomUUID()}`;
           message = `자동 다운로드 준비 확인 완료: ${name}\n이 파일이 저장된 위치를 확인해 주세요. 이후 다운로드는 브라우저 설정 폴더를 따릅니다. 실행 중 저장 위치를 변경하지 마세요. 부분 저장 재개 시 같은 작업의 원본 전부를 추가 사본으로 저장합니다.`;
           render();
