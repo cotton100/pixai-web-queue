@@ -1855,14 +1855,37 @@ test('model links retain exact numeric ID/version and reject broad or malformed 
 });
 
 test('image count adapter restores four-image batch after model selection resets the site to Single',async()=>{
+  for(const label of ['Single','단일','1장']) {
   let reset;const f=fixture({onModelApplied:()=>reset()}),group=new Element('div',{role:'group','aria-label':'Number of images'});
-  const batch=new Element('button',{role:'radio','aria-checked':'true'},'Batch (x4)'),single=new Element('button',{role:'radio','aria-checked':'false'},'Single');
+  const batch=new Element('button',{role:'radio','aria-checked':'true'},'Batch (x4)'),single=new Element('button',{role:'radio','aria-checked':'false'},label);
   const choose=value=>{batch.setAttribute('aria-checked',String(value===4));single.setAttribute('aria-checked',String(value===1));};
   batch.onClick=()=>choose(4);single.onClick=()=>choose(1);reset=()=>choose(1);group.append(batch,single);f.main.append(group);
   assert.equal(f.adapter.readImageCount(),4);await f.adapter.apply(configuration({id:'2',versionId:'22',name:'대상 모델'}));
   assert.equal(f.adapter.readImageCount(),4);assert.equal(f.state.paidClicks,0);
   await f.adapter.setImageCount(1);assert.equal(f.adapter.readImageCount(),1);await assert.rejects(f.adapter.setImageCount(2),/이미지 수/);
   single.setAttribute('aria-checked','false');assert.throws(()=>f.adapter.readImageCount(),/이미지 수/);
+  }
+});
+test('Korean 1장 selection remains readable while applying six LoRAs with batch disabled',async()=>{
+  const loras=Array.from({length:6},(_,i)=>({id:String(20+i),versionId:String(201+i),name:'LoRA '+i,weight:1})),f=fixture({loras});
+  const heading=new Element('h3',{id:'image-count-heading'},'이미지 수'),group=new Element('div',{role:'group','aria-labelledby':'image-count-heading'});
+  const batch=new Element('button',{role:'radio','aria-checked':'false'},'묶음 (x4)'),single=new Element('button',{role:'radio','aria-checked':'true','data-selected':'true'},'1장');
+  batch.disabled=true;group.append(batch,single);f.main.append(heading,group);f.doc.getElementById=id=>f.doc.querySelector(`[id="${id}"]`);
+  assert.equal(f.adapter.readImageCount(),1);await f.adapter.apply(configuration(undefined,loras));await f.adapter.setImageCount(1);
+  assert.equal(f.adapter.readImageCount(),1);assert.equal(f.state.loras.length,6);assert.equal(f.state.paidClicks,0);
+});
+test('unknown image count labels including 11장 never imply one image',async()=>{
+  for(const label of ['11장','2장','한 장','Unknown']) {
+    const f=fixture(),group=new Element('div',{role:'group','aria-label':'이미지 수'});
+    group.append(new Element('button',{role:'radio','aria-checked':'false'},'묶음 (x4)'),new Element('button',{role:'radio','aria-checked':'true'},label));f.main.append(group);
+    assert.throws(()=>f.adapter.readImageCount(),/선택한 이미지 수/);await assert.rejects(f.adapter.setImageCount(1),/선택한 이미지 수/);assert.equal(f.state.mutations,0);
+  }
+});
+test('native radio identity is deduplicated but distinct selected image controls stay ambiguous',async()=>{
+  const f=fixture(),group=new Element('div',{role:'group','aria-label':'이미지 수'}),native=new Input({type:'radio',role:'radio','aria-label':'1장'});
+  native.checked=true;group.append(native);f.main.append(group);assert.equal(f.adapter.readImageCount(),1);
+  group.append(new Element('button',{role:'radio','aria-checked':'true'},'1장'));
+  assert.throws(()=>f.adapter.readImageCount(),/선택한 이미지 수/);await assert.rejects(f.adapter.setImageCount(1),/선택한 이미지 수/);assert.equal(f.state.mutations,0);
 });
 test('model version mismatch rejects the same model ID',()=>{
   assert.throws(()=>core.assertConfiguration(configuration(),configuration({id:'1',versionId:'12',name:'same'})),/모델 버전/);

@@ -23,7 +23,16 @@ async function runWebUnlimited(jobs,io,{oneJob=false,stopped=()=>false}={}) {
     if (!['queued','waiting','saving','save_failed'].includes(job.state)) throw Error('웹 제출 결과가 불명확합니다. 사이트 기록을 확인해 주세요. 자동 재제출하지 않습니다.');
     if (job.state==='queued') {
       if (job.taskId || job.submittedAt || job.apiPayload) throw Error('이미 제출됐거나 API 요청이 있는 작업을 웹에서 다시 생성할 수 없습니다.');
-      await io.prepare(job);
+      try {await io.prepare(job);}
+      catch(error) {
+        job.error=error.message;
+        try {io.persist();}
+        catch(storageError) {
+          job.error=`${error.message}\n대기열 오류 기록 저장에도 실패했습니다: ${storageError.message}. 새로고침하면 원인 표시가 사라질 수 있습니다.`;
+          throw new Error(job.error,{cause:error});
+        }
+        throw error;
+      }
       if(stopped()) break;
       Object.assign(job,{expected:1,state:'submitting',submittedAt:Date.now(),error:''});
       // Commit the uncertainty marker BEFORE any website click, including on quota failure.
